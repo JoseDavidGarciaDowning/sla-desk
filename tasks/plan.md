@@ -191,8 +191,8 @@ session, or first if you want the hardest thinking out of the way while you are 
 
 ### Phase 0: Rails and a proven deployment path
 
-- [ ] **T1** — Repo, Docker Compose, Go module, health endpoint
-- [ ] **T2** — Next.js App Router scaffold
+- [x] **T1** — Repo, Docker Compose, Go module, health endpoint ✅
+- [x] **T2** — Next.js App Router scaffold ✅ Next 16.2.12, shadcn on Base UI
 - [ ] **T3** — Deploy the walking skeleton to production
 
 #### Checkpoint A — after T3
@@ -267,6 +267,8 @@ session, or first if you want the hardest thinking out of the way while you are 
 | Provisioning race: valid JWT, no `users` row, first page load fails intermittently | **High** | Resolved in spec §4.5. T7 implements the lazy upsert; T8 adds the webhook. Test asserts a first request with an unknown-but-valid subject succeeds |
 | Authorization leak: a forgotten handler check exposes another customer's ticket | **High** | Spec §4.3 pushes scoping into SQL (`WHERE requester_id = $1`). T10's acceptance requires `404`, not `403` |
 | Scope creep from slices 2–9 (attachments, WebSockets, agent dashboard) | **High** | Spec §2 lists Slice 1 exclusions explicitly. Anything not in this file does not get built |
+| Clerk does not yet support Next.js 16's `proxy.ts`, which runs on Node.js rather than edge | **High** | Found during T2. `clerkMiddleware` has historically targeted the edge runtime. Verify at the start of T12 and decide the fallback before writing code — a `middleware.ts` file is silently ignored by Next 16, so "protected" routes would simply be open |
+| Writing framework code from memory instead of from the installed version | **High** | Next 16 ships `web/AGENTS.md` saying its APIs differ from training data, and T2 hit two real cases (`middleware`→`proxy`, shadcn moving from Radix to Base UI). Read `web/node_modules/next/dist/docs/` and the installed type definitions before writing web code |
 | Clerk Go SDK API differs from expectation | Medium | Verified against `/clerk/clerk-sdk-go` docs before T7. Re-verify at implementation time rather than trusting memory |
 | Svix Go verification API unconfirmed | Medium | Only the library and headers are confirmed. T8 starts by reading the Go docs, not by writing code |
 | A Cloud Run misconfiguration produces a real bill on the card that must be on file | **High** | T3 sets `--min-instances=0`, a low `--max-instances` cap, CPU-during-requests-only, and a GCP budget alert at $1. Verify all four before the first deploy, not after |

@@ -15,17 +15,35 @@ then make it pass.
 Postgres and Redis running in containers. Nothing domain-specific.
 
 **Acceptance criteria:**
-- [ ] `git init`, `.gitignore` (ignores `.env`, `web/node_modules`, `web/.next`, binaries), `.env.example` committed
-- [ ] `compose.yaml` runs Postgres 16 and Redis 7 with named volumes and healthchecks
-- [ ] `cmd/api` serves `GET /healthz` → `200 {"status":"ok"}` via chi, config from env, no globals
+- [x] `git init`, `.gitignore` (ignores `.env`, `node_modules`, `web/.next`, binaries, local AI tooling)
+- [x] `.env.example` and `web/.env.local` created by hand — a local permission rule blocks the assistant from reading or writing `.env*`, which is why they are not machine-verified here
+- [x] `compose.yaml` runs Postgres 16 and Redis 7 with named volumes and healthchecks
+- [x] `cmd/api` serves `GET /healthz` → `200 {"status":"ok"}` via chi, config from env, no globals
+- [x] Graceful shutdown on SIGTERM, draining in-flight requests — Cloud Run sends SIGTERM before stopping a container
+- [x] `ReadHeaderTimeout` set, so a slow client cannot hold a connection open indefinitely
 
 **Verification:**
-- [ ] `make up && make api`, then `curl localhost:8080/healthz` returns 200
-- [ ] `go vet ./...` clean
-- [ ] `git status` shows no `.env` and no `node_modules`
+- [x] `make up` brings both containers to healthy; `/healthz` returns `200 {"status":"ok"}` against real Postgres
+- [x] `POST /healthz` → `405`, `GET /nope` → `404`
+- [x] SIGTERM logs `draining connections` then `stopped cleanly`
+- [x] `go vet ./...` clean, `gofmt` clean, `internal/config` and `internal/api` tested
+- [x] `git status` shows no `.env` and no `node_modules`
+
+**Host ports changed to 5433 and 6380.** The machine already runs another project
+(`habit-tracker`) on 5432, 6379 and 8080. Rather than stopping it, this project takes its
+own ports — which is the right default anyway: anyone running more than one project
+collides on the standard ones. Container-side ports are unchanged.
+
+**`.env*` files are outside the assistant's reach** by a local permission rule. The rule is
+correct and was not worked around, so those files are written and reviewed by hand.
+
+Note that `.gitignore` ignores `.env` and `.env.*` but re-includes `.env.example` — that
+file **is** committed, so it must contain placeholder values only.
+
+`PORT=8081` locally, because another project on this machine holds 8080.
 
 **Dependencies:** None
-**Files:** `.gitignore`, `.env.example`, `compose.yaml`, `Makefile`, `go.mod`, `cmd/api/main.go`, `internal/config/config.go`
+**Files:** `.gitignore`, `compose.yaml`, `Makefile`, `go.mod`, `cmd/api/main.go`, `internal/config/config.go`, `internal/config/config_test.go`, `internal/api/router.go`, `internal/api/router_test.go`
 **Scope:** M
 
 ---
@@ -36,17 +54,30 @@ Postgres and Redis running in containers. Nothing domain-specific.
 One page, no auth yet.
 
 **Acceptance criteria:**
-- [ ] `web/` runs Next.js App Router with `strict: true` in `tsconfig.json`
-- [ ] Tailwind and shadcn/ui installed; one shadcn component renders to prove the pipeline
-- [ ] `web/lib/api.ts` exists with the API base URL read from env — no hardcoded localhost
+- [x] `web/` runs **Next.js 16.2.12** App Router with `strict: true`, React 19.2, Tailwind 4.3
+- [x] shadcn/ui installed; a `Button` renders on the landing page, proving the pipeline
+- [x] `web/lib/api.ts` reads the API origin from `NEXT_PUBLIC_API_URL` — no hardcoded host, and it throws a named error rather than silently falling back to localhost
 
 **Verification:**
-- [ ] `make web` serves the page at `localhost:3000`
-- [ ] `cd web && pnpm build` succeeds
-- [ ] `pnpm lint` clean
+- [x] `pnpm build` succeeds — 4 static routes generated
+- [x] `pnpm lint` clean
+
+**Two version findings that would have caused silent bugs:**
+
+1. **`middleware.ts` is renamed to `proxy.ts` in Next 16**, and the exported function
+   `middleware` becomes `proxy`. The edge runtime is **not supported** in `proxy` — it
+   runs on Node.js and that is not configurable. This directly invalidates T12 as
+   originally written; see the updated task.
+2. **shadcn's Button now wraps Base UI, not Radix.** There is no `asChild` prop.
+   Composition uses `render={<Element />}`, plus `nativeButton={false}` when the rendered
+   element is not a native button, which changes keyboard and accessibility handling.
+
+Both were found by reading `web/node_modules/next/dist/docs/` and the Base UI type
+definitions rather than writing from memory. The generated `web/AGENTS.md` says outright:
+*"This is NOT the Next.js you know... Read the relevant guide before writing any code."*
 
 **Dependencies:** None
-**Files:** `web/app/layout.tsx`, `web/app/page.tsx`, `web/lib/api.ts`, `web/tailwind.config.ts`, `web/package.json`, `web/tsconfig.json`
+**Files:** `web/app/layout.tsx`, `web/app/page.tsx`, `web/lib/api.ts`, `web/lib/utils.ts`, `web/components/ui/button.tsx`, `web/components.json`, `web/package.json`, `web/tsconfig.json`
 **Scope:** M
 
 ---
@@ -321,9 +352,20 @@ path *produces* the cache by calling `Reconstruct` would be tautological. It tar
 **Description:** Clerk on the Next.js side, the `(customer)` route group, and the token
 attached to API calls.
 
+⚠️ **Revised after T2.** Next.js 16 renamed `middleware.ts` to **`proxy.ts`** and the
+exported `middleware` function to **`proxy`**. The **edge runtime is not supported** in
+`proxy`; it runs on Node.js and that is not configurable. Writing `middleware.ts` here
+would produce a file Next 16 silently ignores — leaving every "protected" route open.
+
+**Verify before writing any code:** does the installed Clerk version support Next 16's
+`proxy`? `clerkMiddleware` has historically targeted the edge runtime. If it does not yet,
+route protection has to be enforced another way, and the fallback must be decided before
+implementation rather than discovered during it.
+
 **Acceptance criteria:**
 - [ ] `<ClerkProvider>` mounted; sign-in and sign-up pages render
-- [ ] Middleware protects `/(customer)/*`; signed-out visitors are redirected
+- [ ] `web/proxy.ts` (**not** `middleware.ts`) protects `/(customer)/*`; signed-out visitors are redirected
+- [ ] A test or manual check proves an unauthenticated request to a protected route is actually redirected — not merely that the file exists
 - [ ] The API client attaches the Clerk session token to every request from one place — never per component
 - [ ] TanStack Query provider configured with sane defaults
 - [ ] A `401` from the API is handled globally, not per call site
@@ -335,7 +377,7 @@ attached to API calls.
 - [ ] Manual: a brand-new signup can reach the app immediately — the T7 lazy upsert covers the webhook race
 
 **Dependencies:** T3, T7
-**Files:** `web/app/layout.tsx`, `web/middleware.ts`, `web/app/(customer)/layout.tsx`, `web/lib/api.ts`, `web/lib/providers.tsx`
+**Files:** `web/app/layout.tsx`, `web/proxy.ts`, `web/app/(customer)/layout.tsx`, `web/lib/api.ts`, `web/lib/providers.tsx`
 **Scope:** M
 
 ---
