@@ -1,0 +1,48 @@
+# Local development dependencies. Nothing is installed on the host.
+#
+# Production uses managed services (Neon for Postgres, Upstash for Redis); these
+# containers exist so `make up` gives every developer the same versions.
+#
+# Host ports are deliberately non-default (5433, 6380). Anyone running more than
+# one project will otherwise collide on 5432 and 6379. The container-side ports
+# stay standard, so connection strings inside the compose network are unchanged.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sla-desk-postgres
+    environment:
+      POSTGRES_USER: sladesk
+      POSTGRES_PASSWORD: sladesk
+      POSTGRES_DB: sladesk
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # `make up --wait` blocks on this, so the API never starts against a
+      # database that is still initialising.
+      test: ["CMD-SHELL", "pg_isready -U sladesk -d sladesk"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: sla-desk-redis
+    # Unused until slice 5 (breach queue, rate limiting, WebSocket fan-out).
+    # Provisioned now so the local stack does not need a second setup pass.
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres-data:
+  redis-data:
