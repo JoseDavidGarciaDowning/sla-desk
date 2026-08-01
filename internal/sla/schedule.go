@@ -12,7 +12,6 @@ import "time"
 
 type Always24x7 struct{}
 
-
 func (Always24x7) Elapsed(from, to time.Time) time.Duration {
 	if !to.After(from) {
 		return 0
