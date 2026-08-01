@@ -1,0 +1,29 @@
+# Secrets — .env.example is committed, .env never is
+.env
+.env.*
+!.env.example
+
+# Go
+/bin/
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Next.js / Node
+node_modules/
+web/.next/
+web/out/
+web/.vercel/
+
+# Editors and OS
+.DS_Store
+.idea/
+*.swp
+
+# Local AI tooling — developer configuration, not part of the project.
+# A shared .claude/settings.json can be committed later if the team wants one.
+.agents/
+.atl/
+.claude/skills/
+skills-lock.json
