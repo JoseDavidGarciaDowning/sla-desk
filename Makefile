@@ -5,7 +5,8 @@ SHELL := /bin/bash
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help up down logs ps api test test-go lint fmt tidy check \
+.PHONY: help up down logs ps api test test-go test-int lint fmt tidy check \
+        migrate-up migrate-down migrate-reset migrate-status migrate-new sqlc \
         web web-install web-build web-lint docker-build docker-run
 
 help: ## Show the available targets
@@ -26,6 +27,34 @@ logs: ## Follow container logs
 ps: ## Show container status
 	docker compose ps
 
+# ── Database ─────────────────────────────────────────────────────────────────
+#
+# goose and sqlc are pinned as tool dependencies in go.mod and run through
+# `go tool`. A fresh clone needs nothing installed beyond Go itself, and CI
+# generates with the same version you do.
+
+GOOSE := go tool goose -dir db/migrations postgres "$(DATABASE_URL)"
+
+migrate-up: ## Apply every pending migration
+	$(GOOSE) up
+
+migrate-down: ## Roll back the most recent migration
+	$(GOOSE) down
+
+migrate-reset: ## Roll every migration back, then apply them all again
+	$(GOOSE) reset
+	$(GOOSE) up
+
+migrate-status: ## Show which migrations are applied
+	$(GOOSE) status
+
+migrate-new: ## Create a migration: make migrate-new name=add_tickets
+	@test -n "$(name)" || { echo "usage: make migrate-new name=add_tickets"; exit 1; }
+	go tool goose -dir db/migrations create $(name) sql
+
+sqlc: ## Regenerate the type-safe query code from db/queries
+	go tool sqlc generate
+
 # ── Go ───────────────────────────────────────────────────────────────────────
 
 api: ## Run the API (requires `make up`)
@@ -33,6 +62,17 @@ api: ## Run the API (requires `make up`)
 
 test-go: ## Run the Go tests with the race detector
 	go test ./... -race -cover
+
+test-int: ## Run the integration tests against the local Postgres (requires `make up`)
+	@# Without DATABASE_URL every integration test calls t.Skip and `go test`
+	@# still prints ok. Failing here instead means a green run is a real one.
+	@test -n "$(DATABASE_URL)" || { \
+		echo "DATABASE_URL is not set — the integration tests would all skip and still report ok."; \
+		echo "Copy .env.example to .env, or export it, then try again."; \
+		exit 1; \
+	}
+	$(MAKE) migrate-up
+	go test ./... -race -tags=integration -count=1
 
 fmt: ## Format the Go sources
 	gofmt -w .
@@ -42,6 +82,9 @@ tidy: ## Prune and verify module requirements
 
 lint: ## Vet the Go sources and check formatting
 	go vet ./...
+	@# Build-tagged files are invisible to the line above, so the integration
+	@# tests would rot unnoticed until someone next ran them.
+	go vet -tags=integration ./...
 	@unformatted=$$(gofmt -l .); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt would change:"; echo "$$unformatted"; exit 1; \
