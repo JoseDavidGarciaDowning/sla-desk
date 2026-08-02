@@ -1,13 +1,16 @@
-import Link from "next/link";
-
+import { ApiStatus } from "@/components/api-status";
 import { Button } from "@/components/ui/button";
 
 /**
  * Placeholder landing page for slice 1.
  *
- * It exists to prove the toolchain end to end: App Router, Tailwind and a
- * shadcn/ui component all render. T3 adds a live API status check here; T12
- * replaces it with the real customer portal entry point.
+ * It proves the toolchain end to end: App Router, Tailwind and shadcn/ui all
+ * render, and the browser reaches the API on Cloud Run across origins. T12
+ * replaces this with the real customer portal entry point.
+ *
+ * There is deliberately no link to /tickets yet. Next.js prefetches links on
+ * sight, so a link to an unbuilt route produces a 404 in the console before
+ * anyone clicks anything.
  */
 export default function Home() {
   return (
@@ -26,16 +29,9 @@ export default function Home() {
         </p>
       </div>
 
-      {/*
-        shadcn's Button wraps Base UI, not Radix. There is no `asChild` here:
-        composition goes through `render`, and `nativeButton={false}` tells Base
-        UI the rendered element is an anchor rather than a <button>, so it keeps
-        link semantics and keyboard behaviour instead of button ones.
-      */}
+      <ApiStatus />
+
       <div className="flex flex-wrap gap-3">
-        <Button size="lg" render={<Link href="/tickets" />} nativeButton={false}>
-          Open the customer portal
-        </Button>
         <Button
           size="lg"
           variant="outline"
