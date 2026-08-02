@@ -9,11 +9,14 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
@@ -337,3 +340,85 @@ func TestGetUserByClerkIDReturnsNoRowsForAnUnknownSubject(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// The two provisioning paths of docs/spec.md §4.5 are independent HTTP requests
+// that can land at the same instant: Clerk's webhook and the browser's first
+// authenticated call. Both run this upsert with the same clerk_user_id.
+//
+// This one cannot use the rolled-back transaction the other tests share — the
+// whole point is several connections racing — so it cleans up after itself.
+func TestConcurrentUpsertsCreateExactlyOneUser(t *testing.T) {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		t.Skip("DATABASE_URL is not set — run `make up` then `make test-int`")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatalf("pool: %v", err)
+	}
+	// Registered before the row cleanup so it runs after it: t.Cleanup is LIFO.
+	// A deferred pool.Close() would run first and leave the cleanup with a
+	// closed pool.
+	t.Cleanup(pool.Close)
+
+	const clerkID = "user_concurrent_race"
+	cleanup := func() {
+		if _, err := pool.Exec(context.Background(),
+			`DELETE FROM users WHERE clerk_user_id = $1`, clerkID); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	}
+	cleanup()
+	t.Cleanup(cleanup)
+
+	const racers = 16
+	var wg sync.WaitGroup
+	ids := make([]pgtype.UUID, racers)
+	errs := make([]error, racers)
+
+	start := make(chan struct{})
+	for i := range racers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start // release them together, so they actually collide
+
+			user, err := store.New(pool).UpsertUserFromClerk(ctx, store.UpsertUserFromClerkParams{
+				ClerkUserID: clerkID,
+				Email:       "race@example.test",
+				Name:        ptr("Racer"),
+			})
+			ids[i], errs[i] = user.ID, err
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("racer %d failed: %v — the upsert is not safe under concurrency", i, err)
+		}
+	}
+
+	var rows int
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM users WHERE clerk_user_id = $1`, clerkID).Scan(&rows); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("users rows = %d, want 1", rows)
+	}
+
+	// Every caller must have been handed the same row, not just have avoided an
+	// error. A racer that received a different id would be holding a user that
+	// no longer exists.
+	for i, id := range ids {
+		if id != ids[0] {
+			t.Errorf("racer %d got id %v, racer 0 got %v", i, id, ids[0])
+		}
+	}
+}
