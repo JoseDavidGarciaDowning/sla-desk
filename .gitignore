@@ -27,3 +27,8 @@ web/.vercel/
 .atl/
 .claude/skills/
 skills-lock.json
+
+# Personal operational notes. They contain deployment specifics and study notes
+# rather than project code, and are kept out of the repository by choice.
+sla-desk-gcloud-cli-cheatsheet.md
+docs/deploy-runbook.md
