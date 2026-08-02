@@ -257,20 +257,54 @@ and `StartedAt` → `RunningSince` (it collided with the ticket's `created_at`).
 **Description:** The ticket tables, the SLA cache columns, and the indexes from spec §5.
 
 **Acceptance criteria:**
-- [ ] `tickets` includes all `sla_*` columns from spec §4.2
-- [ ] `ticket_status_history` created with `from_status` nullable (creation is `NULL → open`)
-- [ ] All four indexes from spec §5 exist, including the partial index `tickets (sla_due_at) WHERE sla_breached_at IS NULL`
-- [ ] `status` and `priority` constrained by the database
-- [ ] sqlc queries: create ticket, insert history row, list by requester, get by id **scoped by requester**, read history by ticket
+- [x] `tickets` includes all `sla_*` columns from spec §4.2
+- [x] `ticket_status_history` created with `from_status` nullable (creation is `NULL → open`)
+- [x] All four indexes from spec §5 exist, including the partial index `tickets (sla_due_at) WHERE sla_breached_at IS NULL`
+- [x] `status` and `priority` constrained by the database — plus `category` and `actor_role`
+- [x] sqlc queries: create ticket, insert history row, list by requester, get by id **scoped by requester**, read history by ticket
 
 **Verification:**
-- [ ] `make migrate-up && make migrate-down && make migrate-up` clean
-- [ ] `make sqlc && go build ./...` succeeds
-- [ ] `EXPLAIN` on the breach worker query from spec §4.2 shows an index scan, not a sequential scan
+- [x] `make migrate-up && make migrate-down && make migrate-up` clean — after a full down only `goose_db_version` remains
+- [x] `make sqlc && go build ./...` succeeds
+- [x] `EXPLAIN` on the breach worker query from spec §4.2 shows an index scan, not a sequential scan
+- [x] 15 mutations of the schema and the queries each turn the matching test red
+- [x] 34 integration tests, none skipped
 
 **Dependencies:** T4
-**Files:** `db/migrations/003_*.sql`, `db/queries/tickets.sql`, `db/queries/ticket_status_history.sql`
+**Files:** `db/migrations/003_tickets_and_status_history.sql`, `db/queries/tickets.sql`,
+`db/queries/ticket_status_history.sql`, `internal/ticket/category.go`, `sqlc.yaml`,
+`internal/store/` (generated), `internal/store/tickets_integration_test.go`, `docs/spec.md`
 **Scope:** M
+
+**Decisions taken during T6:**
+
+- **`sla_consumed_micros`, not `sla_consumed_minutes`.** The spec specified both minutes and a
+  consistency test that compares the reconstruction to the cache *exactly*, and those cannot
+  both hold: `sla.Reconstruct` returns a `time.Duration`. A ticket bouncing eight times at
+  3m40s has really consumed 29m20s; in minutes the cache records 24m, putting the deadline
+  five minutes late on a 60-minute budget. `TIMESTAMPTZ` resolves to one microsecond, so
+  microseconds round-trip exactly and the drift is zero. Spec §4.2 and §5 updated.
+- **Two clock invariants are CHECK constraints**, not handler logic:
+  `(status = 'open') = (sla_clock_started_at IS NOT NULL)` and
+  `(sla_clock_started_at IS NULL) = (sla_due_at IS NULL)`. "A paused ticket cannot breach"
+  is therefore a property of the schema and holds against direct SQL.
+- **`category` values defined for the first time** — `billing`, `technical`, `account`, `other`,
+  recorded as spec §4.7. Constrained by the database, mapped to `ticket.Category`.
+- **No `ON DELETE CASCADE` anywhere.** Spec §10 forbids hard-deleting a ticket or a history
+  row, and a cascade does exactly that from a distance. Deleting a user or a policy that is
+  still referenced fails loudly.
+- **`from_status IS DISTINCT FROM to_status`.** A move to the status a ticket is already in is
+  a no-op, and recording it would pad the history the clock is rebuilt from.
+- **`actor_role` is denormalised on purpose** — the role held at the time, so promoting someone
+  does not rewrite what the audit trail says they were.
+- **Ticket ids are UUID, history ids are identity bigint**, following the rule set in T4.
+
+**Known gap, deliberate:** `ListTicketStatusHistory` orders by `created_at, id`, and no test
+covers the `id` tiebreaker. Rows written in one transaction share `created_at`, and Postgres
+returns those ties in insertion order through every plan a test can provoke — including after
+an UPDATE that moves the tuple, because a HOT update leaves the index entry pointing at the
+original item. The tiebreaker stays because Postgres guarantees no order for equal sort keys.
+What is covered is that `created_at` is the primary sort key, which is falsifiable and tested.
 
 > **Checkpoint B — migrations reversible, sqlc compiles, `internal/sla` green.**
 
