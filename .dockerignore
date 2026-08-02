@@ -1,0 +1,27 @@
+# Keep the build context small and free of anything that should never reach an
+# image layer. Secrets in particular survive in layers even if a later stage
+# deletes them.
+.env
+.env.*
+.git
+.gitignore
+
+# The web app deploys to Vercel, not into this image.
+web/
+
+docs/
+tasks/
+*.md
+
+# Local tooling
+.agents/
+.atl/
+.claude/
+skills-lock.json
+
+compose.yaml
+Makefile
+Dockerfile
+.dockerignore
+
+.DS_Store

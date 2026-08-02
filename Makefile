@@ -6,7 +6,7 @@ export
 
 .DEFAULT_GOAL := help
 .PHONY: help up down logs ps api test test-go lint fmt tidy check \
-        web web-install web-build web-lint
+        web web-install web-build web-lint docker-build docker-run
 
 help: ## Show the available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -46,6 +46,16 @@ lint: ## Vet the Go sources and check formatting
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt would change:"; echo "$$unformatted"; exit 1; \
 	fi
+
+# ── Container ────────────────────────────────────────────────────────────────
+
+docker-build: ## Build the API image
+	docker build -t sla-desk-api:local .
+
+docker-run: docker-build ## Run the API image against the local Postgres
+	docker run --rm -p 8082:8080 \
+		-e DATABASE_URL="postgres://sladesk:sladesk@host.docker.internal:5433/sladesk?sslmode=disable" \
+		sla-desk-api:local
 
 # ── Web ──────────────────────────────────────────────────────────────────────
 
