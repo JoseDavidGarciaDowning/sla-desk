@@ -177,18 +177,37 @@ non-optional — it is what makes the double representation safe.
 | Column | Meaning |
 |---|---|
 | `sla_policy_id` | Policy snapshotted at creation. Changing a policy does not silently move old deadlines |
-| `sla_consumed_minutes` | Accumulated running time, closed intervals only |
+| `sla_consumed_micros` | Accumulated running time, closed intervals only, in microseconds |
 | `sla_clock_started_at` | Non-NULL **iff** the clock is running (i.e. status is `open`) |
 | `sla_due_at` | `sla_clock_started_at + (budget − consumed)`. Non-NULL iff running |
 | `sla_breached_at` | Set once by the worker; never recomputed by request handlers |
 
+**Why microseconds and not minutes.** This column was specified as
+`sla_consumed_minutes` until T6. It cannot be: the consistency test in §9 requires the
+reconstruction to equal the cache *exactly*, and `sla.Reconstruct` returns a
+`time.Duration`. Storing minutes forces that test to carry a ±1 minute tolerance, which
+makes it blind to precisely the class of bug it exists to catch.
+
+The error is not academic. A ticket that bounces between `open` and `pending` eight times
+at 3m40s per interval has really consumed 29m20s; truncated to minutes the cache records
+24m. On an `urgent` budget of 60 minutes the deadline lands over five minutes late and the
+breach worker fires at the wrong time.
+
+Microseconds are exact rather than merely finer. `ticket_status_history.created_at` is
+`TIMESTAMPTZ`, whose resolution is one microsecond, so every duration the reconstruction
+can produce is a whole number of microseconds. Round-tripping through a `BIGINT` of
+microseconds loses nothing, and the drift is zero for any number of transitions. Seconds
+would reintroduce truncation with no bound on the accumulated error.
+
 **A paused ticket has `sla_due_at IS NULL` and therefore cannot breach.** That falls out
-of the model rather than being a special case in the worker.
+of the model rather than being a special case in the worker. Both halves of it are CHECK
+constraints on `tickets`, so the invariant holds against direct SQL as well as against
+our own handlers.
 
 Transitions:
 
 - Entering `open`: `sla_clock_started_at = now()`, recompute `sla_due_at`.
-- Leaving `open`: `sla_consumed_minutes += now() − sla_clock_started_at`, then set
+- Leaving `open`: `sla_consumed_micros += now() − sla_clock_started_at`, then set
   `sla_clock_started_at = NULL` and `sla_due_at = NULL`.
 
 Breach worker query — one indexed predicate:
@@ -333,6 +352,19 @@ their own tickets and nothing else.
 This is a deliberate, recorded decision: retrofitting multi-tenancy touches every query,
 index, and permission check. We are choosing not to have it rather than deferring it.
 
+### 4.7 Ticket categories
+
+`category` was listed as a ticket field from the start without its values ever being
+defined. They are: `billing`, `technical`, `account`, `other`.
+
+A fixed set constrained by the database, not free text. The agent dashboard filters and
+groups by category, and free text turns that into guesswork the moment `Billing`,
+`billing` and `facturación` coexist. Widening the set is a one-line migration.
+
+Not a `categories` table with a foreign key: unlike SLA budgets, which the product exists
+to let people tune, categories change on the order of never. The extra table, join and
+admin CRUD would buy nothing in this slice.
+
 ---
 
 ## 5. Data Model (initial sketch)
@@ -345,7 +377,7 @@ sla_policies       (id, name, priority, budget_minutes, schedule_mode, active, c
 tickets            (id, requester_id → users, assignee_id → users NULL,
                     title, description, category, priority, status,
                     sla_policy_id → sla_policies,
-                    sla_consumed_minutes, sla_clock_started_at,
+                    sla_consumed_micros, sla_clock_started_at,
                     sla_due_at, sla_breached_at,
                     created_at, updated_at)
 ticket_status_history
