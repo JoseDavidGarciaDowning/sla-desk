@@ -167,20 +167,49 @@ the browser path was broken.
 **Description:** First migration and the sqlc pipeline. `users` and `sla_policies` only.
 
 **Acceptance criteria:**
-- [ ] goose migration creates `users` (`id`, `clerk_user_id` UNIQUE NOT NULL, `email`, `name`, `role`, timestamps) and `sla_policies` (`id`, `name`, `priority`, `budget_minutes`, `schedule_mode`, `active`, `created_at`)
-- [ ] `role` and `priority` are constrained by the database (enum or CHECK) — not only by Go
-- [ ] Seed migration inserts the four default policies from spec §4.2 (urgent 60, high 240, normal 1440, low 4320)
-- [ ] `sqlc.yaml` configured; `make sqlc` generates compiling Go
-- [ ] `down` migration reverses cleanly
+- [x] goose migration creates `users` (`id`, `clerk_user_id` UNIQUE NOT NULL, `email`, `name`, `role`, timestamps) and `sla_policies` (`id`, `name`, `priority`, `budget_minutes`, `schedule_mode`, `active`, `created_at`)
+- [x] `role` and `priority` are constrained by the database (enum or CHECK) — not only by Go — **CHECK**, see below
+- [x] Seed migration inserts the four default policies from spec §4.2 (urgent 60, high 240, normal 1440, low 4320)
+- [x] `sqlc.yaml` configured; `make sqlc` generates compiling Go
+- [x] `down` migration reverses cleanly
 
 **Verification:**
-- [ ] `make migrate-up && make migrate-down && make migrate-up` runs clean
-- [ ] `make sqlc && go build ./...` succeeds
-- [ ] `SELECT * FROM sla_policies` returns exactly 4 active rows
+- [x] `make migrate-up && make migrate-down && make migrate-up` runs clean — after a full down only `goose_db_version` remains
+- [x] `make sqlc && go build ./...` succeeds
+- [x] `SELECT * FROM sla_policies` returns exactly 4 active rows
+- [x] 14 mutations of the schema and the queries each turn the matching test red
 
 **Dependencies:** T1
-**Files:** `db/migrations/001_*.sql`, `db/migrations/002_seed_sla_policies.sql`, `db/queries/users.sql`, `sqlc.yaml`
+**Files:** `db/migrations/001_users_and_sla_policies.sql`, `db/migrations/002_seed_sla_policies.sql`,
+`db/queries/users.sql`, `db/queries/sla_policies.sql`, `sqlc.yaml`, `internal/ticket/role.go`,
+`internal/store/` (generated), `internal/store/store_integration_test.go`
 **Scope:** M
+
+**Decisions taken during T4:**
+
+- **CHECK constraints on TEXT, not native enums.** Measured against Postgres 16: a new enum
+  value cannot be used in the transaction that adds it, and goose runs every migration in a
+  transaction — so any migration that adds a value and backfills with it has to be split or
+  lose atomicity. `ALTER TYPE ... DROP VALUE` does not exist at all. A CHECK is a table
+  constraint, swapped with `DROP`/`ADD` in one transaction. The enum's one real advantage,
+  ordering by declaration, does not apply here: the agent dashboard sorts by `sla_due_at`.
+- **sqlc overrides map the columns straight onto `ticket.Priority` and `ticket.Role`**, so the
+  vocabulary exists once instead of once in the domain and once in generated code.
+  `timestamptz` is spelled bare in the override — sqlc's own docs write `pg_catalog.timestamptz`,
+  which silently matches nothing.
+- **UUID for `users.id`, identity bigint for `sla_policies.id`.** UUID for anything that reaches
+  a URL or an API response; bigint for internal reference data. `internal/sla.Policy.ID` was
+  already `int64`.
+- **Partial unique index `(priority) WHERE active`**, beyond the stated criteria. Resolving a
+  policy from a priority has to return exactly one row, and without it a second active policy
+  would make ticket creation pick one by row order.
+- **`schedule_mode` accepts only `'24x7'`.** `internal/sla` implements no other schedule, so a
+  row the code cannot interpret must not be creatable.
+- **`email` is deliberately not unique** — two Clerk identities can carry the same address.
+- **goose and sqlc are pinned as `tool` directives in `go.mod`**, run via `go tool`. Cost:
+  go.sum went from 28 to 411 lines and the module graph to 240 modules, including ten database
+  drivers we do not use. None of it reaches the API binary, which still depends only on chi
+  and pgx.
 
 ---
 
