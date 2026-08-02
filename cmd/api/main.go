@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,9 +12,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 )
+
+// startupPingTimeout bounds the one connectivity check made at boot.
+const startupPingTimeout = 5 * time.Second
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -23,6 +29,7 @@ func main() {
 		slog.Error("server stopped with an error", "error", err)
 		os.Exit(1)
 	}
+
 }
 
 func run() error {
@@ -31,9 +38,38 @@ func run() error {
 		return err
 	}
 
+	pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+	if err != nil {
+		return fmt.Errorf("configuring the database pool: %w", err)
+	}
+	defer pool.Close()
+
+	// pgxpool connects lazily, so reaching the database once at boot turns a
+	// wrong connection string into a loud log line at deploy time rather than a
+	// surprise on the first request.
+	//
+	// It is not fatal. A database that is briefly unreachable should not stop
+	// the container from starting: /health reports the state and the platform
+	// decides whether to route traffic here.
+	pingCtx, cancelPing := context.WithTimeout(context.Background(), startupPingTimeout)
+	if err := pool.Ping(pingCtx); err != nil {
+		slog.Error("database unreachable at startup; serving anyway, /health will report degraded",
+			"error", err)
+	} else {
+		slog.Info("database reachable")
+	}
+	cancelPing()
+
+	// Redis is intentionally not probed: nothing uses it until slice 5, and a
+	// health check that fails on an unused dependency would take the service
+	// down for no reason.
+	probes := map[string]api.Probe{
+		"database": pool.Ping,
+	}
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: api.NewRouter(cfg),
+		Handler: api.NewRouter(cfg, probes),
 		// Without this a slow client can hold a connection open indefinitely
 		// while dribbling out headers.
 		ReadHeaderTimeout: 10 * time.Second,
