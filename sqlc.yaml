@@ -1,0 +1,55 @@
+version: "2"
+
+sql:
+  - engine: "postgresql"
+    # sqlc reads the goose migrations directly, so the schema it compiles
+    # against is the schema that actually ships. There is no second copy of the
+    # DDL to drift out of sync.
+    schema: "db/migrations"
+    queries: "db/queries"
+    gen:
+      go:
+        package: "store"
+        out: "internal/store"
+        sql_package: "pgx/v5"
+
+        # Nullable columns become *string rather than pgtype.Text, so callers
+        # work with ordinary Go values instead of driver types.
+        emit_pointers_for_null_types: true
+
+        overrides:
+          # Every timestamp in this schema is TIMESTAMPTZ. pgx would hand back
+          # pgtype.Timestamptz, whose Valid flag means nothing on a NOT NULL
+          # column and which no caller outside the store should have to know
+          # about. Nullable ones become *time.Time, so "no deadline" is
+          # expressed as nil rather than as a struct field.
+          #
+          # The identifier is the bare "timestamptz". sqlc's own documentation
+          # writes it as "pg_catalog.timestamptz"; that form silently matches
+          # nothing and the columns come back as pgtype.Timestamptz. Verified
+          # against sqlc v1.31.1 by generating with each spelling.
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+
+          # The domain already owns this vocabulary (internal/ticket). Mapping
+          # the columns straight onto those types is what keeps it to one type
+          # instead of two: the CHECK constraint enforces the value set in the
+          # database, ticket.Role and ticket.Priority enforce it in Go, and
+          # nothing has to translate between them.
+          - column: "users.role"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+              package: "ticket"
+              type: "Role"
+
+          - column: "sla_policies.priority"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+              package: "ticket"
+              type: "Priority"
