@@ -21,6 +21,35 @@ type SlaPolicy struct {
 	CreatedAt     time.Time
 }
 
+type Ticket struct {
+	ID                pgtype.UUID
+	RequesterID       pgtype.UUID
+	AssigneeID        pgtype.UUID
+	Title             string
+	Description       string
+	Category          ticket.Category
+	Priority          ticket.Priority
+	Status            ticket.Status
+	SlaPolicyID       int64
+	SlaConsumedMicros int64
+	SlaClockStartedAt *time.Time
+	SlaDueAt          *time.Time
+	SlaBreachedAt     *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type TicketStatusHistory struct {
+	ID         int64
+	TicketID   pgtype.UUID
+	FromStatus *ticket.Status
+	ToStatus   ticket.Status
+	ActorID    pgtype.UUID
+	ActorRole  ticket.Role
+	Reason     *string
+	CreatedAt  time.Time
+}
+
 type User struct {
 	ID          pgtype.UUID
 	ClerkUserID string

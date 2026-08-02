@@ -53,3 +53,42 @@ sql:
               import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
               package: "ticket"
               type: "Priority"
+
+          - column: "tickets.priority"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+              package: "ticket"
+              type: "Priority"
+
+          - column: "tickets.status"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+              package: "ticket"
+              type: "Status"
+
+          - column: "tickets.category"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+              package: "ticket"
+              type: "Category"
+
+          # Nullable on the row that records creation, so a pointer: nil is
+          # "there was no previous status", which is different from any status.
+          - column: "ticket_status_history.from_status"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+              package: "ticket"
+              type: "Status"
+              pointer: true
+
+          - column: "ticket_status_history.to_status"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+              package: "ticket"
+              type: "Status"
+
+          - column: "ticket_status_history.actor_role"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+              package: "ticket"
+              type: "Role"
