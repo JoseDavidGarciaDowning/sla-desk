@@ -18,13 +18,13 @@ Postgres and Redis running in containers. Nothing domain-specific.
 - [x] `git init`, `.gitignore` (ignores `.env`, `node_modules`, `web/.next`, binaries, local AI tooling)
 - [x] `.env.example` and `web/.env.local` created by hand — a local permission rule blocks the assistant from reading or writing `.env*`, which is why they are not machine-verified here
 - [x] `compose.yaml` runs Postgres 16 and Redis 7 with named volumes and healthchecks
-- [x] `cmd/api` serves `GET /healthz` → `200 {"status":"ok"}` via chi, config from env, no globals
+- [x] `cmd/api` serves `GET /health` → `200 {"status":"ok"}` (NOT `/healthz` — see ADR 0003) via chi, config from env, no globals
 - [x] Graceful shutdown on SIGTERM, draining in-flight requests — Cloud Run sends SIGTERM before stopping a container
 - [x] `ReadHeaderTimeout` set, so a slow client cannot hold a connection open indefinitely
 
 **Verification:**
-- [x] `make up` brings both containers to healthy; `/healthz` returns `200 {"status":"ok"}` against real Postgres
-- [x] `POST /healthz` → `405`, `GET /nope` → `404`
+- [x] `make up` brings both containers to healthy; `/health` returns `200 {"status":"ok"}` against real Postgres
+- [x] `POST /health` → `405`, `GET /nope` → `404`
 - [x] SIGTERM logs `draining connections` then `stopped cleanly`
 - [x] `go vet ./...` clean, `gofmt` clean, `internal/config` and `internal/api` tested
 - [x] `git status` shows no `.env` and no `node_modules`
@@ -94,30 +94,66 @@ to blame.
 **Acceptance criteria — cost guardrails first.** A card must be on file for Cloud Run's
 free tier, so a misconfiguration bills real money. Set these *before* the first deploy:
 
-- [ ] `--min-instances=0` — a warm instance leaves the free tier immediately
-- [ ] `--max-instances` capped low (start at 3), so a spike or a loop cannot scale out
-- [ ] CPU allocated **during requests only**, never "always allocated"
-- [ ] GCP budget alert active at $1
+- [x] `--min-instances=0` — verified: the `minScale` annotation is absent, which means 0
+- [x] `--max-instances=3` — verified: `autoscaling.knative.dev/maxScale: '3'`
+- [x] CPU allocated **during requests only** — verified: `cpu-throttling` is absent, so throttling is on. The annotation only appears when someone passes `--no-cpu-throttling` to disable it
+- [x] Budget alert active at **$2**, thresholds at 50/90/100/150%, `INCLUDE_ALL_CREDITS`
 
-**Acceptance criteria — the deploy:**
-- [ ] Multi-stage `Dockerfile` produces a small static Go binary
-- [ ] The API binds to the `PORT` environment variable Cloud Run injects — a hardcoded port fails to start
-- [ ] Neon project created; `DATABASE_URL` from Cloud Run environment/secrets, never hardcoded
-- [ ] `GET /healthz` responds on the public Cloud Run URL
-- [ ] `/healthz` verifies real connectivity to Neon over TLS, not just process liveness
-- [ ] The deployed Next.js page fetches `/healthz` cross-origin and renders the result — CORS configured explicitly, no wildcard
-- [ ] Secrets live in Cloud Run secrets and Vercel env vars; nothing sensitive in the repo
+`run.googleapis.com/startup-cpu-boost: 'true'` is set by gcloud without being asked, and it
+**is billed** — *"You are charged for the allocated boosted CPU for the duration of the
+container startup time."* It stays: at a 1.84 s cold start it is earning its cost, and
+cold start is the risk this project actually cares about. Disable with `--no-cpu-boost` if
+that ever changes.
 
-**Verification:**
-- [ ] `curl https://<service>.run.app/healthz` → 200 with `database: ok`
-- [ ] `gcloud run services describe` confirms all four guardrails
-- [ ] The Vercel URL displays the API status in a browser
-- [ ] Browser devtools show no CORS errors
-- [ ] **Cold start measured** after ≥15 minutes idle, and the number recorded in `tasks/plan.md`. This is a data point the plan currently lacks — do not skip it
-- [ ] The GCP billing page shows $0.00
+**A budget does not cap spending.** Cloud Billing documents that an alerts-only budget
+*"doesn't automatically cap Google Cloud usage or spending"*, and that the first email may
+take *"several hours"*. `maxScale` is the real protection; the budget is a smoke detector.
+
+**Split.** The application half is built and verified locally. The cloud half needs
+interactive logins and accounts and was run by hand; those steps live in local operational
+notes that are deliberately not committed.
+
+**Done — application, verified locally:**
+- [x] Multi-stage `Dockerfile`: static `CGO_ENABLED=0` binary on `distroless/static`, **18 MB**, running as `nonroot`. `docker exec … id` fails because the image contains no shell and no coreutils — that is the point
+- [x] The API binds the injected `PORT` — verified by running the container with `PORT=9999`
+- [x] `/health` runs injected `Probe`s and returns **503 `degraded`** when any fails, verified by stopping Postgres and watching it recover
+- [x] Probe failures never leak detail to the client: driver errors carry hosts and credentials, so they go to the logs and the response says only `failed`
+- [x] Each probe is bounded by a 2s timeout, so an unreachable dependency reads as a failure rather than a hang
+- [x] Redis is deliberately not probed — nothing uses it until slice 5, and failing health on an unused dependency would take the service down for nothing
+- [x] CORS: single configured origin, `Vary: Origin`, preflight `204`, no wildcard ever, and disabled entirely when unconfigured
+- [x] `Access-Control-Allow-Credentials` is not set — auth travels in the `Authorization` header, not cookies
+- [x] `.dockerignore` keeps `.env*`, `.git`, `web/`, docs and local tooling out of the build context; secrets survive in layers even when a later stage deletes them
+- [x] `internal/api` at 97.7% coverage; `make check` green
+
+**Done — cloud:**
+- [x] `gcloud` installed and authenticated
+- [x] GCP project `sla-desk-josgd` created, billing linked, Run and Artifact Registry enabled
+- [x] All cost guardrails set and verified
+- [x] Neon project created; `DATABASE_URL` in Secret Manager, read by a **dedicated** runtime service account (`sla-desk-runtime@`) rather than the over-privileged default Compute account
+- [x] `curl "$API_URL/health"` returns `database: ok` from the public URL
+- [x] Vercel project linked, `NEXT_PUBLIC_API_URL` set **before** building
+- [x] `CORS_ALLOWED_ORIGIN` set to the stable production domain, verified in the browser
+
+**Live URLs**
+
+| | |
+|---|---|
+| Web | <https://sla-desk-phi.vercel.app> |
+| API | `https://sla-desk-api-278131323722.us-central1.run.app` |
+
+The Vercel origin must be the **stable production domain**, never a per-deployment URL —
+those carry a hash that changes on every deploy, so CORS would break on the next one with
+no backend change. And it carries **no trailing slash**: browsers send `Origin` without
+one, and the middleware compares exact strings.
+
+The landing page renders `<ApiStatus />`, a **client** component. That is the point: a
+server component would fetch server-to-server and never exercise CORS, passing green while
+the browser path was broken.
+- [x] **Cold start measured**: 1.84 s cold, 0.44 s warm — recorded in `tasks/plan.md`. `startup-cpu-boost` is on (gcloud enables it by default and it is billed per startup); at 1.84 s it is earning its keep, so it stays
+- [ ] GCP billing page shows **$0.00**
 
 **Dependencies:** T1, T2
-**Files:** `Dockerfile`, `.dockerignore`, `cmd/api/main.go`, `internal/config/config.go`, `web/app/page.tsx`
+**Files:** `Dockerfile`, `.dockerignore`, `Makefile`, `cmd/api/main.go`, `internal/api/health.go`, `internal/api/health_test.go`, `internal/api/cors.go`, `internal/api/cors_test.go`, `internal/api/router.go`, `web/components/api-status.tsx`, `web/app/page.tsx`
 **Scope:** M
 
 > **Checkpoint A — review with human before Phase 1.**

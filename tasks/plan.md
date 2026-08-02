@@ -193,17 +193,17 @@ session, or first if you want the hardest thinking out of the way while you are 
 
 - [x] **T1** — Repo, Docker Compose, Go module, health endpoint ✅
 - [x] **T2** — Next.js App Router scaffold ✅ Next 16.2.12, shadcn on Base UI
-- [ ] **T3** — Deploy the walking skeleton to production
+- [x] **T3** — Deploy the walking skeleton to production ✅ live, CORS verified in the browser
 
-#### Checkpoint A — after T3
-- [ ] `make up` brings Postgres and Redis up locally
-- [ ] `make api` serves `GET /healthz` → `200`
-- [ ] The Next.js app is live on a Vercel URL
-- [ ] The Go API is live on a Cloud Run URL and reachable from the browser (CORS verified)
-- [ ] The API connects to Neon over TLS
-- [ ] All four cost guardrails are set and verified: `min-instances=0`, `max-instances` capped, CPU during requests only, budget alert active
-- [ ] Cold start measured and the number written into this plan
-- [ ] **Review with human before proceeding**
+#### Checkpoint A — after T3 ✅ REACHED 2026-08-02
+- [x] `make up` brings Postgres and Redis up locally
+- [x] `make api` serves `GET /health` → `200`
+- [x] The Next.js app is live at <https://sla-desk-phi.vercel.app>
+- [x] The Go API is live on Cloud Run and reachable **from the browser** — CORS verified in devtools rather than with curl, because curl ignores CORS entirely
+- [x] The API connects to Neon over TLS — `/health` returns `database: ok` from the public URL
+- [x] All cost guardrails set and verified
+- [x] Cold start measured: **1.84 s cold / 0.44 s warm** — see the risk table above
+- [ ] **Review with human before proceeding** ← the work is uncommitted and awaiting review
 
 ### Phase 1: Domain and data
 
@@ -272,7 +272,7 @@ session, or first if you want the hardest thinking out of the way while you are 
 | Clerk Go SDK API differs from expectation | Medium | Verified against `/clerk/clerk-sdk-go` docs before T7. Re-verify at implementation time rather than trusting memory |
 | Svix Go verification API unconfirmed | Medium | Only the library and headers are confirmed. T8 starts by reading the Go docs, not by writing code |
 | A Cloud Run misconfiguration produces a real bill on the card that must be on file | **High** | T3 sets `--min-instances=0`, a low `--max-instances` cap, CPU-during-requests-only, and a GCP budget alert at $1. Verify all four before the first deploy, not after |
-| Cold start on scale-to-zero makes the portfolio link feel broken | Medium | **Magnitude unverified.** T3 measures it directly and records the number. Go binaries start fast, but "fast" is not a number. If it turns out unacceptable, the tradeoff is a warm instance and leaving the free tier |
+| ~~Cold start on scale-to-zero makes the portfolio link feel broken~~ | ~~Medium~~ **RESOLVED** | **Measured 2026-08-02: 1.84 s cold, 0.44 s warm.** Both figures are `curl` `time_total`, so they include DNS, the TLS handshake, container start *and* the real Neon round trip in `/health` — the container's own cold start is smaller still. Acceptable for a public portfolio link; no warm instance needed and the service stays inside the free tier. For scale: Render's free tier takes roughly a minute |
 | 1 GB/month egress is the tightest limit in the stack | Medium | Vercel serves all static assets; the API returns JSON only. Add a Cloud Monitoring alert on egress in T3 |
 | Google changes the always-free tier | Low | Documented as *"no end date"* with 30 days' notice for changes. Neon and Upstash are card-free fallbacks if it ever moves |
 | sqlc / goose configuration friction | Low | Isolated in T4, early, with nothing depending on it yet |
