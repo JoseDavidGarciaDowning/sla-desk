@@ -10,6 +10,9 @@ func TestLoad_ReadsEveryValueFromTheEnvironment(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/sladesk")
 	t.Setenv("REDIS_URL", "redis://localhost:6379")
 	t.Setenv("CORS_ALLOWED_ORIGIN", "https://sla-desk.vercel.app")
+	t.Setenv("CLERK_SECRET_KEY", "sk_test_key")
+	t.Setenv("CLERK_WEBHOOK_SECRET", "whsec_test")
+	t.Setenv("CLERK_AUTHORIZED_PARTY", "https://explicit.example.com")
 
 	got, err := Load()
 	if err != nil {
@@ -28,6 +31,15 @@ func TestLoad_ReadsEveryValueFromTheEnvironment(t *testing.T) {
 	if want := "https://sla-desk.vercel.app"; got.CORSAllowedOrigin != want {
 		t.Errorf("CORSAllowedOrigin = %q, want %q", got.CORSAllowedOrigin, want)
 	}
+	if got.ClerkSecretKey != "sk_test_key" {
+		t.Errorf("ClerkSecretKey = %q", got.ClerkSecretKey)
+	}
+	if got.ClerkWebhookSecret != "whsec_test" {
+		t.Errorf("ClerkWebhookSecret = %q", got.ClerkWebhookSecret)
+	}
+	if want := "https://explicit.example.com"; got.ClerkAuthorizedParty != want {
+		t.Errorf("ClerkAuthorizedParty = %q, want the explicit value to win", got.ClerkAuthorizedParty)
+	}
 }
 
 // Cloud Run injects PORT and the process must bind to it. Locally there is no
@@ -35,6 +47,8 @@ func TestLoad_ReadsEveryValueFromTheEnvironment(t *testing.T) {
 func TestLoad_DefaultsPortWhenUnset(t *testing.T) {
 	t.Setenv("PORT", "")
 	t.Setenv("DATABASE_URL", "postgres://localhost/sladesk")
+	t.Setenv("CLERK_SECRET_KEY", "sk_test_key")
+	t.Setenv("CLERK_WEBHOOK_SECRET", "whsec_test")
 
 	got, err := Load()
 	if err != nil {
@@ -66,6 +80,8 @@ func TestLoad_RefusesToStartWithoutADatabaseURL(t *testing.T) {
 // the API from another origin. Neither may block startup today.
 func TestLoad_TreatsRedisAndCORSAsOptional(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://localhost/sladesk")
+	t.Setenv("CLERK_SECRET_KEY", "sk_test_key")
+	t.Setenv("CLERK_WEBHOOK_SECRET", "whsec_test")
 	t.Setenv("REDIS_URL", "")
 	t.Setenv("CORS_ALLOWED_ORIGIN", "")
 
@@ -76,5 +92,47 @@ func TestLoad_TreatsRedisAndCORSAsOptional(t *testing.T) {
 	if got.RedisURL != "" || got.CORSAllowedOrigin != "" {
 		t.Errorf("optional values should stay empty, got RedisURL=%q CORS=%q",
 			got.RedisURL, got.CORSAllowedOrigin)
+	}
+}
+
+// Every route but the health check needs a verified session, so an API that
+// booted without these could only answer /health. Failing at startup is the
+// whole point of loading configuration up front.
+func TestLoad_RefusesToStartWithoutTheClerkSecrets(t *testing.T) {
+	for _, missing := range []string{"CLERK_SECRET_KEY", "CLERK_WEBHOOK_SECRET"} {
+		t.Run(missing, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://localhost/sladesk")
+			t.Setenv("CLERK_SECRET_KEY", "sk_test_key")
+			t.Setenv("CLERK_WEBHOOK_SECRET", "whsec_test")
+			t.Setenv(missing, "")
+
+			got, err := Load()
+
+			if !errors.Is(err, ErrMissingRequired) {
+				t.Fatalf("error = %v, want one wrapping %v", err, ErrMissingRequired)
+			}
+			if got != (Config{}) {
+				t.Errorf("config = %+v, want the zero value", got)
+			}
+		})
+	}
+}
+
+// An operator who sets the CORS origin and forgets the authorized party would
+// otherwise silently lose the check that ties a token to our frontend, because
+// jwt.Verify only validates the shape of the issuer.
+func TestLoad_AuthorizedPartyFallsBackToTheCORSOrigin(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/sladesk")
+	t.Setenv("CLERK_SECRET_KEY", "sk_test_key")
+	t.Setenv("CLERK_WEBHOOK_SECRET", "whsec_test")
+	t.Setenv("CORS_ALLOWED_ORIGIN", "https://sla-desk.vercel.app")
+	t.Setenv("CLERK_AUTHORIZED_PARTY", "")
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := "https://sla-desk.vercel.app"; got.ClerkAuthorizedParty != want {
+		t.Errorf("ClerkAuthorizedParty = %q, want it to fall back to %q", got.ClerkAuthorizedParty, want)
 	}
 }
