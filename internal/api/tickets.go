@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -152,11 +154,37 @@ func pageSize(raw string) int32 {
 	return int32(min(n, MaxPageSize))
 }
 
+// filterParam reads an optional ?name= filter, checking it against the
+// vocabulary the API actually supports.
+//
+// Absent and empty mean the same thing — no filter. Empty matters because that
+// is what a form submits for "any", and treating it as a value would ask the
+// database for tickets whose status is the empty string and return none.
+//
+// A value outside the vocabulary is refused rather than ignored. Ignoring it
+// always returns something, but it returns the wrong thing silently: a
+// bookmarked ?status=opne would show every ticket while the page said the list
+// was filtered. The message names what is allowed, so the client does not have
+// to hold a copy of the list to explain the failure.
+func filterParam[T ~string](q url.Values, name string, valid []T) (*string, string) {
+	raw := q.Get(name)
+	if raw == "" {
+		return nil, ""
+	}
+
+	if !slices.Contains(valid, T(raw)) {
+		return nil, "must be one of " + join(valid)
+	}
+	return &raw, ""
+}
+
 // ListTicketsHandler serves GET /api/tickets.
 //
 // Mount behind RequireAuth. The scope is the query's WHERE clause, so this
 // handler has no ownership check to forget: another customer's row never
-// arrives to be filtered out.
+// arrives to be filtered out — and that stays true with filters applied,
+// because they are further predicates on the same query rather than a
+// replacement for it.
 func ListTicketsHandler(tickets TicketReader) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, ok := auth.UserFromContext(r.Context())
@@ -165,9 +193,25 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 			return
 		}
 
+		query := r.URL.Query()
 		params := store.ListTicketsByRequesterParams{RequesterID: caller.ID}
 
-		if raw := r.URL.Query().Get("cursor"); raw != "" {
+		// Both filters are read before either is rejected, so a request with
+		// two bad ones is told about two rather than about the first.
+		filterErrs := make(map[string]string)
+		var problem string
+		if params.Status, problem = filterParam(query, "status", validStatuses); problem != "" {
+			filterErrs["status"] = problem
+		}
+		if params.Priority, problem = filterParam(query, "priority", validPriorities); problem != "" {
+			filterErrs["priority"] = problem
+		}
+		if len(filterErrs) > 0 {
+			httperr.WriteValidation(w, filterErrs)
+			return
+		}
+
+		if raw := query.Get("cursor"); raw != "" {
 			createdAt, id, err := decodeCursor(raw)
 			if err != nil {
 				httperr.Write(w, http.StatusBadRequest, "the cursor is not one this API issued")
@@ -179,7 +223,7 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 
 		// One more row than asked for. If it comes back, there is another page,
 		// and that is cheaper to learn than by counting the table.
-		limit := pageSize(r.URL.Query().Get("limit"))
+		limit := pageSize(query.Get("limit"))
 		params.PageSize = limit + 1
 
 		rows, err := tickets.ListTicketsByRequester(r.Context(), params)

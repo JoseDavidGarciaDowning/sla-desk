@@ -1,6 +1,8 @@
 package api_test
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -107,6 +109,41 @@ func TestContractOffersEveryDomainValue(t *testing.T) {
 			t.Errorf("priority %q exists in the domain but is missing from the contract", priority)
 		}
 	}
+
+	// Statuses are not accepted in a create body — a client does not choose the
+	// state a ticket is in — but they are a list filter and a thing the UI
+	// labels, so they travel with the rest.
+	for _, status := range []ticket.Status{
+		ticket.StatusOpen, ticket.StatusPending, ticket.StatusResolved, ticket.StatusClosed,
+	} {
+		if !containsValue(c.Statuses, status) {
+			t.Errorf("status %q exists in the domain but is missing from the contract", status)
+		}
+	}
+}
+
+// A status the contract offers has to be one GET /api/tickets?status= accepts,
+// or the filter control is built from options that produce a 400.
+func TestContractStatusesAreAcceptedAsFilters(t *testing.T) {
+	c := api.TicketContract()
+
+	if len(c.Statuses) == 0 {
+		t.Fatal("no statuses in the contract; a filter control cannot be rendered")
+	}
+
+	for _, status := range c.Statuses {
+		reader := &fakeReader{}
+		handler, r := getRequest(t, customer(t), api.ListTicketsHandler(reader),
+			"/api/tickets", "/api/tickets?status="+string(status))
+
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("status %q is offered but refused with %d: %s",
+				status, rec.Code, rec.Body.String())
+		}
+	}
 }
 
 func containsValue[T ~string](values []T, want T) bool {
@@ -142,6 +179,11 @@ func TestTypeScriptCarriesEveryContractValue(t *testing.T) {
 	for _, priority := range c.Priorities {
 		if !strings.Contains(out, `"`+string(priority)+`"`) {
 			t.Errorf("the rendered contract does not contain priority %q", priority)
+		}
+	}
+	for _, status := range c.Statuses {
+		if !strings.Contains(out, `"`+string(status)+`"`) {
+			t.Errorf("the rendered contract does not contain status %q", status)
 		}
 	}
 

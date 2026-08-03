@@ -539,3 +539,105 @@ func TestGetRejectsAnIDThatIsNotAUUID(t *testing.T) {
 		t.Error("a malformed id reached the store")
 	}
 }
+
+// ── Filters (T14) ────────────────────────────────────────────────────────────
+
+func TestListPassesTheFiltersToTheQuery(t *testing.T) {
+	for _, tc := range []struct {
+		query        string
+		wantStatus   *string
+		wantPriority *string
+	}{
+		{query: ""},
+		{query: "?status=open", wantStatus: strPtr("open")},
+		{query: "?priority=urgent", wantPriority: strPtr("urgent")},
+		{
+			query:        "?status=pending&priority=low",
+			wantStatus:   strPtr("pending"),
+			wantPriority: strPtr("low"),
+		},
+		// An empty parameter is how a form submits "no filter chosen". It has
+		// to mean the same as omitting it, or clearing a filter in the UI would
+		// ask for tickets whose status is the empty string and return none.
+		{query: "?status=&priority="},
+	} {
+		t.Run("filters"+tc.query, func(t *testing.T) {
+			reader := &fakeReader{}
+			handler, r := getRequest(t, customer(t), api.ListTicketsHandler(reader),
+				"/api/tickets", "/api/tickets"+tc.query)
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, r)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200\nbody: %s", rec.Code, rec.Body.String())
+			}
+			if !samePtr(reader.listParams.Status, tc.wantStatus) {
+				t.Errorf("status filter = %v, want %v",
+					deref(reader.listParams.Status), deref(tc.wantStatus))
+			}
+			if !samePtr(reader.listParams.Priority, tc.wantPriority) {
+				t.Errorf("priority filter = %v, want %v",
+					deref(reader.listParams.Priority), deref(tc.wantPriority))
+			}
+		})
+	}
+}
+
+// A filter the API cannot honour is refused rather than ignored.
+//
+// Ignoring it is the tempting choice — it always returns something — but it
+// returns the wrong thing silently: a bookmark reading ?status=opne shows every
+// ticket while the UI says the list is filtered to open ones. A 400 naming the
+// field is what the form already knows how to display, since it is the same
+// document shape as a rejected create.
+func TestListRejectsAFilterThatIsNotInTheVocabulary(t *testing.T) {
+	for _, tc := range []struct {
+		query string
+		field string
+	}{
+		{"?status=opne", "status"},
+		{"?status=archived", "status"},
+		{"?priority=critical", "priority"},
+	} {
+		t.Run(tc.query, func(t *testing.T) {
+			reader := &fakeReader{}
+			handler, r := getRequest(t, customer(t), api.ListTicketsHandler(reader),
+				"/api/tickets", "/api/tickets"+tc.query)
+
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, r)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", rec.Code)
+			}
+			if reader.listCalls != 0 {
+				t.Error("the query ran anyway")
+			}
+
+			errs, ok := decodeProblem(t, rec)["errors"].(map[string]any)
+			if !ok {
+				t.Fatalf("no errors member: %s", rec.Body.String())
+			}
+			if errs[tc.field] == nil {
+				t.Errorf("no message for %q: %v", tc.field, errs)
+			}
+		})
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+func samePtr(got, want *string) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	return *got == *want
+}
+
+func deref(p *string) string {
+	if p == nil {
+		return "<none>"
+	}
+	return *p
+}

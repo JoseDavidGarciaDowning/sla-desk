@@ -42,6 +42,14 @@ var (
 	validPriorities = []ticket.Priority{
 		ticket.PriorityUrgent, ticket.PriorityHigh, ticket.PriorityNormal, ticket.PriorityLow,
 	}
+
+	// Statuses are never accepted in a request body — a client does not choose
+	// what state a ticket is in — but they are accepted as a list filter, and
+	// the frontend needs them to render both the filter control and a status
+	// label. In the contract for that reason, and validated for the same one.
+	validStatuses = []ticket.Status{
+		ticket.StatusOpen, ticket.StatusPending, ticket.StatusResolved, ticket.StatusClosed,
+	}
 )
 
 // Normalised returns the request with surrounding whitespace removed, so the
