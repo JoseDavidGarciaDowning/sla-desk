@@ -114,3 +114,62 @@ func (q *Queries) ListTicketStatusHistory(ctx context.Context, ticketID pgtype.U
 	}
 	return items, nil
 }
+
+const listTicketStatusHistoryForRequester = `-- name: ListTicketStatusHistoryForRequester :many
+SELECT h.id, h.ticket_id, h.from_status, h.to_status, h.actor_id, h.actor_role, h.reason, h.created_at FROM ticket_status_history h
+JOIN tickets t ON t.id = h.ticket_id
+WHERE h.ticket_id = $1
+  AND t.requester_id = $2
+ORDER BY h.created_at, h.id
+`
+
+type ListTicketStatusHistoryForRequesterParams struct {
+	TicketID    pgtype.UUID
+	RequesterID pgtype.UUID
+}
+
+// The timeline as a customer is allowed to see it.
+//
+// The requester predicate is in the JOIN, not in a check the handler performs
+// afterwards. Same reason as GetTicketForRequester (docs/spec.md §4.3): a
+// forgotten check in Go must not be enough to leak another customer's ticket,
+// and a query that never returns the row cannot be forgotten about.
+//
+// Returning nothing for both "no such ticket" and "not yours" is what lets the
+// handler answer 404 rather than 403 for both, without being able to tell them
+// apart — a 403 would confirm the id names a real ticket (docs/spec.md §11).
+// Empty is unambiguous here: every ticket has at least the row recording its
+// creation, so a real ticket of yours is never an empty history.
+//
+// Separate from ListTicketStatusHistory rather than replacing it. That one is
+// the input to sla.Reconstruct, which runs inside a transaction that has
+// already established which ticket it is working on and must not be scoped to
+// a requester — an agent transitions tickets that are not theirs.
+func (q *Queries) ListTicketStatusHistoryForRequester(ctx context.Context, arg ListTicketStatusHistoryForRequesterParams) ([]TicketStatusHistory, error) {
+	rows, err := q.db.Query(ctx, listTicketStatusHistoryForRequester, arg.TicketID, arg.RequesterID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []TicketStatusHistory
+	for rows.Next() {
+		var i TicketStatusHistory
+		if err := rows.Scan(
+			&i.ID,
+			&i.TicketID,
+			&i.FromStatus,
+			&i.ToStatus,
+			&i.ActorID,
+			&i.ActorRole,
+			&i.Reason,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

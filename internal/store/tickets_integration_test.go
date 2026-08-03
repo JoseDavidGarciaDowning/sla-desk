@@ -719,3 +719,87 @@ func TestFilteringNeverReachesAnotherCustomersTickets(t *testing.T) {
 		})
 	}
 }
+
+// ── The history read for the timeline (T14b) ─────────────────────────────────
+
+// The requester predicate lives in the JOIN, not in a check the handler could
+// forget. Same reason as GetTicketForRequester: a missed check in Go must not
+// be enough to leak another customer's ticket (docs/spec.md §4.3).
+func TestHistoryForRequesterHidesAnotherCustomersTicket(t *testing.T) {
+	c := setup(t)
+	alice := newUser(t, c, "user_alice_history", ticket.RoleCustomer)
+	bob := newUser(t, c, "user_bob_history", ticket.RoleCustomer)
+
+	bobs := newTicket(t, c, bob, "bob's ticket")
+	writeHistory(t, c, bobs.ID, bob, nil, ticket.StatusOpen)
+
+	got, err := c.q.ListTicketStatusHistoryForRequester(c.ctx,
+		store.ListTicketStatusHistoryForRequesterParams{
+			TicketID:    bobs.ID,
+			RequesterID: alice,
+		})
+	if err != nil {
+		t.Fatalf("ListTicketStatusHistoryForRequester: %v", err)
+	}
+
+	if len(got) != 0 {
+		t.Errorf("got %d rows of Bob's history, want none", len(got))
+	}
+}
+
+// Which is what lets the handler answer 404 without being able to tell "no such
+// ticket" from "not yours" — it cannot, because the query returns nothing for
+// both. An existing ticket always has at least the row recording its creation,
+// so an empty history means one of those two and never a real ticket.
+func TestHistoryForRequesterReturnsTheOwnersRowsInOrder(t *testing.T) {
+	c := setup(t)
+	alice := newUser(t, c, "user_alice_own_history", ticket.RoleCustomer)
+
+	tk := newTicket(t, c, alice, "alice's ticket")
+	writeHistory(t, c, tk.ID, alice, nil, ticket.StatusOpen)
+	writeHistory(t, c, tk.ID, alice, ptr(ticket.StatusOpen), ticket.StatusPending)
+	writeHistory(t, c, tk.ID, alice, ptr(ticket.StatusPending), ticket.StatusResolved)
+
+	got, err := c.q.ListTicketStatusHistoryForRequester(c.ctx,
+		store.ListTicketStatusHistoryForRequesterParams{
+			TicketID:    tk.ID,
+			RequesterID: alice,
+		})
+	if err != nil {
+		t.Fatalf("ListTicketStatusHistoryForRequester: %v", err)
+	}
+
+	want := []ticket.Status{ticket.StatusOpen, ticket.StatusPending, ticket.StatusResolved}
+	if len(got) != len(want) {
+		t.Fatalf("got %d rows, want %d", len(got), len(want))
+	}
+	for i, status := range want {
+		if got[i].ToStatus != status {
+			t.Errorf("row %d is %s, want %s — the timeline reads in order", i, got[i].ToStatus, status)
+		}
+	}
+	if got[0].FromStatus != nil {
+		t.Errorf("the creation row has from_status %v, want null", *got[0].FromStatus)
+	}
+}
+
+// writeHistory inserts a history row directly. Direct rather than through
+// TicketRepo.Transition because what is under test is the read, and going
+// through the write path would drag the SLA reconstruction into it.
+func writeHistory(t *testing.T, c testContext, ticketID, actor pgtype.UUID,
+	from *ticket.Status, to ticket.Status,
+) {
+	t.Helper()
+
+	_, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
+		TicketID:   ticketID,
+		FromStatus: from,
+		ToStatus:   to,
+		ActorID:    actor,
+		ActorRole:  ticket.RoleCustomer,
+		CreatedAt:  time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("inserting history %v -> %s: %v", from, to, err)
+	}
+}
