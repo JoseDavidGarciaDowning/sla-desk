@@ -607,24 +607,85 @@ exported `middleware` function to **`proxy`**. The **edge runtime is not support
 `proxy`; it runs on Node.js and that is not configurable. Writing `middleware.ts` here
 would produce a file Next 16 silently ignores — leaving every "protected" route open.
 
-**Verify before writing any code:** does the installed Clerk version support Next 16's
-`proxy`? `clerkMiddleware` has historically targeted the edge runtime. If it does not yet,
-route protection has to be enforced another way, and the fallback must be decided before
-implementation rather than discovered during it.
+**Verified 2026-08-03, before writing any code. The risk is closed.** `@clerk/nextjs@7.6.4`
+declares `next: ^16.1.0-0`, which `16.2.12` satisfies, and Clerk's documentation now shows
+`clerkMiddleware` in `proxy.ts` outright: *"If you're using Next.js ≤15, name your file
+`middleware.ts` instead of `proxy.ts`. The code itself remains the same."* No fallback needed.
+
+**Two findings that changed the design, though.**
+
+`clerkMiddleware()` on its own protects nothing — it attaches auth state and returns. Closing
+a route needs `createRouteMatcher` plus `await auth.protect()` inside the callback. This is
+the same shape as the `WithHeaderAuthorization` trap in spec §4.3: a helper that looks like
+protection and is not.
+
+And the pattern this task originally specified is the one both projects are moving away from.
+Next's own documentation for 16.2.12 says Proxy *"should not be used as a full session
+management or authorization solution"*, and Clerk publishes a guide titled
+`migrate-from-create-route-matcher` whose stated goal is to *"move this protection to
+individual resources"*.
+
+**Decision: the redirect lives in the `(customer)` layout, via `auth.protect()`.** `proxy.ts`
+still exists — Clerk's SDK needs it to populate auth state — but decides nothing. A layout
+covers every route in the group including ones added later; a matcher is a list someone has
+to remember to update, and a forgotten pattern fails silently.
+
+This costs nothing in security, because the frontend holds no data of its own: every ticket
+read goes through the Go API, which enforces `RequireAuth` and scopes by requester in SQL. The
+frontend redirect is UX — it stops a signed-out visitor seeing an empty shell. The boundary is
+on the other side of the network.
 
 **Acceptance criteria:**
-- [ ] `<ClerkProvider>` mounted; sign-in and sign-up pages render
-- [ ] `web/proxy.ts` (**not** `middleware.ts`) protects `/(customer)/*`; signed-out visitors are redirected
-- [ ] A test or manual check proves an unauthenticated request to a protected route is actually redirected — not merely that the file exists
-- [ ] The API client attaches the Clerk session token to every request from one place — never per component
-- [ ] TanStack Query provider configured with sane defaults
-- [ ] A `401` from the API is handled globally, not per call site
+- [x] `<ClerkProvider>` mounted; sign-in and sign-up pages render (both `200`)
+- [x] `web/proxy.ts` (**not** `middleware.ts`) mounts `clerkMiddleware`; `auth.protect()` in the `(customer)` layout redirects signed-out visitors
+- [x] A test or manual check proves an unauthenticated request to a protected route is actually redirected — measured, see below
+- [x] The API client attaches the Clerk session token to every request from one place — `lib/use-api.ts` is the only file in `web/` that mentions `Authorization` or calls `getToken`
+- [x] TanStack Query provider configured with sane defaults
+- [x] A `401` from the API is handled globally, not per call site — `QueryCache.onError`
 
 **Verification:**
-- [ ] `pnpm build` succeeds
-- [ ] Manual: signed out, `/tickets` redirects to sign-in
-- [ ] Manual: signed in, a request to the API carries the `Authorization` header
-- [ ] Manual: a brand-new signup can reach the app immediately — the T7 lazy upsert covers the webhook race
+- [x] `pnpm build`, `pnpm lint` and `tsc --noEmit` clean
+- [x] Signed out, the route surface is: `/` `200`, `/sign-in` `200`, `/sign-up` `200`, `/tickets` **`307` → `/sign-in?redirect_url=…`**
+- [x] Manual: signed in, a request to the API carries the `Authorization` header — verified 2026-08-03.
+  `/tickets` renders the success branch, which only runs when the query resolves; without a token
+  `RequireAuth` would have answered `401` and the error branch would show instead. The decoded
+  token carried `"azp": "http://localhost:3000"`, the exact claim `CLERK_AUTHORIZED_PARTY` matches.
+- [ ] **Deferred:** a brand-new signup reaching the app *before the webhook lands* is still
+  unproven in the wild. The signup on 2026-08-03 was provisioned by the **webhook**, not the
+  fallback: `created_at` equals `updated_at` on that row, so exactly one path wrote it, and the
+  relay was running. The lazy upsert is covered by unit tests but the race in spec §4.5 has never
+  actually happened here.
+
+  To force it: stop the relay CLI, create a user in the Clerk dashboard so the webhook cannot be
+  delivered, then sign in and open `/tickets`. An empty list rather than a `500` means the
+  fallback created the row. Verify with
+  `SELECT clerk_user_id, created_at FROM users ORDER BY created_at DESC LIMIT 1;`
+
+**What the measurement caught that a passing status code would not.**
+
+The first run returned `307` and looked finished. The Location header said otherwise:
+
+```
+location: https://vital-seal-65.accounts.dev/sign-in?redirect_url=…
+```
+
+Clerk's **hosted** sign-in, not the route in this app — which was reachable but dead, since
+nothing linked or redirected to it. `auth.protect()` was working; it was pointing somewhere
+else.
+
+The fix took two attempts, and the first was wrong in an instructive way. Setting `signInUrl`
+on `<ClerkProvider>` changed nothing: `auth.protect()` runs on the **server**, and the
+provider's props are React context the server never sees. The server side is configured on
+`clerkMiddleware` in `proxy.ts`. Both are now set, and they cover different halves — the
+provider governs client-side navigation, the middleware governs the server redirect.
+
+The lesson is the same one T10 taught with `RequireAuth`: **a status code says something
+happened, not that the right thing happened.** `307` was true in both cases.
+
+**Also worth recording:** `x-middleware-rewrite: /tickets` in the response is what proves the
+proxy passed the request through rather than short-circuiting it. Without that header the
+`307` could equally have been Clerk's development-instance handshake, which produces the same
+status.
 
 **Dependencies:** T3, T7
 **Files:** `web/app/layout.tsx`, `web/proxy.ts`, `web/app/(customer)/layout.tsx`, `web/lib/api.ts`, `web/lib/providers.tsx`
