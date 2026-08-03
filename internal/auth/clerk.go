@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/clerk/clerk-sdk-go/v2"
 	clerkhttp "github.com/clerk/clerk-sdk-go/v2/http"
@@ -88,42 +87,5 @@ func (c *clerkIdentities) FetchIdentity(ctx context.Context, clerkUserID string)
 	if err != nil {
 		return Identity{}, fmt.Errorf("fetching clerk user %s: %w", clerkUserID, err)
 	}
-	return Identity{
-		Email: primaryEmail(u),
-		Name:  fullName(u),
-	}, nil
-}
-
-// primaryEmail picks the address Clerk marks as primary. A user can have
-// several, and the first in the list is not necessarily the one they sign in
-// with; falling back to it is better than storing nothing, since the column is
-// NOT NULL.
-func primaryEmail(u *clerk.User) string {
-	if u.PrimaryEmailAddressID != nil {
-		for _, addr := range u.EmailAddresses {
-			if addr != nil && addr.ID == *u.PrimaryEmailAddressID {
-				return addr.EmailAddress
-			}
-		}
-	}
-	for _, addr := range u.EmailAddresses {
-		if addr != nil && addr.EmailAddress != "" {
-			return addr.EmailAddress
-		}
-	}
-	return ""
-}
-
-// fullName is empty when Clerk holds no name, which it often does: a user who
-// signed up with an email and a password has given us nothing else. The empty
-// string becomes a NULL name rather than a blank one.
-func fullName(u *clerk.User) string {
-	parts := make([]string, 0, 2)
-	if u.FirstName != nil && *u.FirstName != "" {
-		parts = append(parts, *u.FirstName)
-	}
-	if u.LastName != nil && *u.LastName != "" {
-		parts = append(parts, *u.LastName)
-	}
-	return strings.Join(parts, " ")
+	return IdentityFromClerkUser(u), nil
 }

@@ -88,14 +88,5 @@ func resolve(ctx context.Context, p Provisioner, f IdentityFetcher, subject stri
 		return store.User{}, err
 	}
 
-	var name *string
-	if identity.Name != "" {
-		name = &identity.Name
-	}
-
-	return p.UpsertUserFromClerk(ctx, store.UpsertUserFromClerkParams{
-		ClerkUserID: subject,
-		Email:       identity.Email,
-		Name:        name,
-	})
+	return Provision(ctx, p, subject, identity)
 }
