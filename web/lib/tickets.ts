@@ -49,6 +49,19 @@ export type NewTicket = {
 };
 
 /**
+ * The filters GET /api/tickets accepts, as they travel in the URL.
+ *
+ * Strings rather than the generated unions, because they arrive from a query
+ * string that anyone can type. Validating them is the API's job — it answers a
+ * 400 naming the field — and duplicating that check here would put the
+ * vocabulary in a second place that decides things.
+ */
+export type TicketFilters = {
+  status?: string;
+  priority?: string;
+};
+
+/**
  * The cache keys, built in one place so a writer and a reader cannot disagree
  * about them.
  *
@@ -56,12 +69,31 @@ export type NewTicket = {
  * ["ticket"] when the query registered ["tickets"] refetches nothing, silently,
  * and the symptom is a stale screen rather than an error.
  *
- * `list` and `detail` sit under `all` but are invalidated separately on
- * purpose. Invalidating `all` after a create would also mark the detail we just
- * seeded as stale, and the seeding would buy nothing.
+ * Three levels, and the middle one earns its place. Each combination of filters
+ * is a separate cached query, so `lists()` is the prefix they all share and the
+ * only thing worth invalidating: targeting `list({})` would refresh the
+ * unfiltered view and leave a filtered one stale on screen. Targeting `all`
+ * would go too far the other way and mark a freshly seeded detail stale too.
  */
 export const ticketKeys = {
   all: ["tickets"] as const,
-  list: () => [...ticketKeys.all, "list"] as const,
+  lists: () => [...ticketKeys.all, "list"] as const,
+  list: (filters: TicketFilters) => [...ticketKeys.lists(), filters] as const,
   detail: (id: string) => [...ticketKeys.all, "detail", id] as const,
 };
+
+/**
+ * Builds the query string for a filtered list request.
+ *
+ * Empty values are dropped rather than sent. The API treats an empty filter as
+ * absent, but sending `?status=` puts a parameter in the URL that means
+ * nothing, and it would make two identical requests look different in a log.
+ */
+export function ticketQuery(filters: TicketFilters): string {
+  const params = new URLSearchParams();
+  for (const [name, value] of Object.entries(filters)) {
+    if (value) params.set(name, value);
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}

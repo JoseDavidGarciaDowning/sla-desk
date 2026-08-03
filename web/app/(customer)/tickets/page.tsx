@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { buttonVariants } from "@/components/ui/button";
 
+import { TicketFilters } from "./ticket-filters";
 import { TicketList } from "./ticket-list";
 
 export default function TicketsPage() {
@@ -18,6 +19,7 @@ export default function TicketsPage() {
         </Link>
       </div>
 
+      <TicketFilters />
       <TicketList />
     </div>
   );

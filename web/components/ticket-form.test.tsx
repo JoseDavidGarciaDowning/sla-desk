@@ -319,21 +319,28 @@ describe("TicketForm", () => {
   // ticket seeded a line earlier as stale, so the page it was seeded for
   // refetches on arrival and the seeding bought nothing. Nothing else in this
   // suite can see that.
-  it("marks the list for refetching without undoing the seed", async () => {
+  // Every list, not just the unfiltered one. The list key carries the filters,
+  // so ["tickets","list",{}] and ["tickets","list",{status:"open"}] are
+  // different cached queries — invalidating the first leaves the second stale
+  // on screen, and the customer returns to a filtered view missing the ticket
+  // they just created. Invalidation targets the shared prefix instead.
+  it("marks every list for refetching without undoing the seed", async () => {
     const user = userEvent.setup();
     apiFetch.mockResolvedValue(created);
     const client = renderForm();
-    client.setQueryData(ticketKeys.list(), {
-      tickets: [],
-      next_cursor: null,
-    });
+
+    const unfiltered = ticketKeys.list({});
+    const filtered = ticketKeys.list({ status: "open" });
+    client.setQueryData(unfiltered, { tickets: [], next_cursor: null });
+    client.setQueryData(filtered, { tickets: [], next_cursor: null });
 
     await fillValidTicket(user);
     await submit(user);
 
     await waitFor(() =>
-      expect(client.getQueryState(ticketKeys.list())?.isInvalidated).toBe(true),
+      expect(client.getQueryState(unfiltered)?.isInvalidated).toBe(true),
     );
+    expect(client.getQueryState(filtered)?.isInvalidated).toBe(true);
     expect(
       client.getQueryState(ticketKeys.detail(created.id))?.isInvalidated,
     ).toBe(false);

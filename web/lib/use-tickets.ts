@@ -38,14 +38,14 @@ export function useCreateTicket() {
     onSuccess: (created) => {
       queryClient.setQueryData(ticketKeys.detail(created.id), created);
 
-      // The list only, never ticketKeys.all: invalidating the whole subtree
-      // would mark the detail seeded on the line above as stale, and it would
-      // be refetched the moment the detail page mounted.
+      // lists(), which is the prefix every filtered list shares — not list({}),
+      // which is only the unfiltered one, and not all, which would also mark
+      // the detail seeded on the line above as stale.
       //
       // Not awaited. The refetch is background work, and making the caller wait
       // for it would hold the user on the form while a list they are leaving
       // reloads.
-      void queryClient.invalidateQueries({ queryKey: ticketKeys.list() });
+      void queryClient.invalidateQueries({ queryKey: ticketKeys.lists() });
     },
 
     // Navigation is deliberately not here. Where to go next is the calling
