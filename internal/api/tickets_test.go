@@ -6,11 +6,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/clerk/clerk-sdk-go/v2"
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
@@ -269,5 +272,270 @@ func TestCreateTicketTrimsTheText(t *testing.T) {
 	}
 	if creator.got.Description != "Body" {
 		t.Errorf("description = %q, want Body", creator.got.Description)
+	}
+}
+
+// ── Reading tickets ─────────────────────────────────────────────────────────
+
+type fakeReader struct {
+	page []store.Ticket
+	one  store.Ticket
+	err  error
+
+	listParams store.ListTicketsByRequesterParams
+	getParams  store.GetTicketForRequesterParams
+	listCalls  int
+	getCalls   int
+}
+
+func (f *fakeReader) ListTicketsByRequester(_ context.Context, arg store.ListTicketsByRequesterParams) ([]store.Ticket, error) {
+	f.listCalls++
+	f.listParams = arg
+	return f.page, f.err
+}
+
+func (f *fakeReader) GetTicketForRequester(_ context.Context, arg store.GetTicketForRequesterParams) (store.Ticket, error) {
+	f.getCalls++
+	f.getParams = arg
+	return f.one, f.err
+}
+
+func sampleTicket(t *testing.T, id string, created time.Time) store.Ticket {
+	t.Helper()
+	due := created.Add(24 * time.Hour)
+	return store.Ticket{
+		ID:        uuid(t, id),
+		Title:     "Ticket " + id[:8],
+		Category:  ticket.CategoryOther,
+		Priority:  ticket.PriorityNormal,
+		Status:    ticket.StatusOpen,
+		SlaDueAt:  &due,
+		CreatedAt: created,
+		UpdatedAt: created,
+	}
+}
+
+// getRequest mounts the handler on a chi router at the pattern it will really
+// be served from, because GetTicketHandler reads {id} out of chi's route
+// context. Calling the handler directly leaves that context empty and every id
+// looks malformed — which is how the first version of these tests failed.
+func getRequest(t *testing.T, caller store.User, h http.Handler, pattern, target string) (http.Handler, *http.Request) {
+	t.Helper()
+
+	router := chi.NewRouter()
+	router.With(auth.RequireAuth(stubProvisioner{user: caller}, nil)).Method(http.MethodGet, pattern, h)
+
+	r := httptest.NewRequest(http.MethodGet, target, nil)
+	claims := &clerk.SessionClaims{RegisteredClaims: clerk.RegisteredClaims{Subject: caller.ClerkUserID}}
+	return router, r.WithContext(clerk.ContextWithSessionClaims(r.Context(), claims))
+}
+
+// docs/spec.md §4.3: the scope is in the SQL. The handler never sees another
+// customer's row to filter out, so there is no filter to forget.
+func TestListScopesToTheCallerInTheQuery(t *testing.T) {
+	caller := customer(t)
+	reader := &fakeReader{}
+
+	handler, r := getRequest(t, caller, api.ListTicketsHandler(reader), "/api/tickets", "/api/tickets")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if reader.listParams.RequesterID != caller.ID {
+		t.Errorf("requester = %v, want the authenticated caller", reader.listParams.RequesterID)
+	}
+}
+
+func TestListReturnsAnEmptyArrayNotNull(t *testing.T) {
+	handler, r := getRequest(t, customer(t), api.ListTicketsHandler(&fakeReader{}), "/api/tickets", "/api/tickets")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	// A JSON null would make every client write a nil check that an empty array
+	// makes unnecessary.
+	if !strings.Contains(rec.Body.String(), `"tickets":[]`) {
+		t.Errorf("body = %s, want an empty array", rec.Body.String())
+	}
+}
+
+func TestListEmitsACursorOnlyWhenThereIsAnotherPage(t *testing.T) {
+	caller := customer(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	t.Run("a full page plus one more row", func(t *testing.T) {
+		// The handler asks for one row beyond the page so it can tell whether
+		// another page exists without a second count query.
+		rows := make([]store.Ticket, 3)
+		for i := range rows {
+			rows[i] = sampleTicket(t, "1111111a-1111-1111-1111-11111111111"+string(rune('0'+i)),
+				now.Add(-time.Duration(i)*time.Minute))
+		}
+		reader := &fakeReader{page: rows}
+
+		handler, r := getRequest(t, caller, api.ListTicketsHandler(reader), "/api/tickets", "/api/tickets?limit=2")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+
+		if reader.listParams.PageSize != 3 {
+			t.Errorf("page size asked of the store = %d, want limit+1", reader.listParams.PageSize)
+		}
+
+		var body api.TicketListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decoding: %v", err)
+		}
+		if len(body.Tickets) != 2 {
+			t.Errorf("returned %d tickets, want the requested 2", len(body.Tickets))
+		}
+		if body.NextCursor == nil {
+			t.Fatal("next_cursor is null although a further page exists")
+		}
+	})
+
+	t.Run("a short page", func(t *testing.T) {
+		reader := &fakeReader{page: []store.Ticket{
+			sampleTicket(t, "2222222a-2222-2222-2222-222222222222", now),
+		}}
+
+		handler, r := getRequest(t, caller, api.ListTicketsHandler(reader), "/api/tickets", "/api/tickets?limit=10")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, r)
+
+		var body api.TicketListResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decoding: %v", err)
+		}
+		if body.NextCursor != nil {
+			t.Errorf("next_cursor = %q on the last page", *body.NextCursor)
+		}
+	})
+}
+
+// The cursor carries the sort key of the last row returned, so the next page
+// starts exactly where this one stopped, regardless of what was inserted in
+// between.
+func TestCursorResumesWhereThePageStopped(t *testing.T) {
+	caller := customer(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+
+	first := &fakeReader{page: []store.Ticket{
+		sampleTicket(t, "3333333a-3333-3333-3333-333333333331", now),
+		sampleTicket(t, "3333333a-3333-3333-3333-333333333332", now.Add(-time.Minute)),
+	}}
+
+	handler, r := getRequest(t, caller, api.ListTicketsHandler(first), "/api/tickets", "/api/tickets?limit=1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	var page api.TicketListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if page.NextCursor == nil {
+		t.Fatal("no cursor was issued")
+	}
+
+	second := &fakeReader{}
+	handler, r = getRequest(t, caller, api.ListTicketsHandler(second),
+		"/api/tickets", "/api/tickets?limit=1&cursor="+url.QueryEscape(*page.NextCursor))
+	handler.ServeHTTP(httptest.NewRecorder(), r)
+
+	if second.listParams.AfterCreatedAt == nil {
+		t.Fatal("the cursor was not decoded into the query")
+	}
+	if !second.listParams.AfterCreatedAt.Equal(now) {
+		t.Errorf("after = %v, want the first page's last row %v", second.listParams.AfterCreatedAt, now)
+	}
+	if second.listParams.AfterID != uuid(t, page.Tickets[0].ID) {
+		t.Errorf("after id = %v", second.listParams.AfterID)
+	}
+}
+
+func TestListRejectsAnUnreadableCursor(t *testing.T) {
+	reader := &fakeReader{}
+	handler, r := getRequest(t, customer(t), api.ListTicketsHandler(reader), "/api/tickets", "/api/tickets?cursor=not-a-cursor")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	if reader.listCalls != 0 {
+		t.Error("a bad cursor reached the store")
+	}
+}
+
+func TestListClampsThePageSize(t *testing.T) {
+	for _, tc := range []struct {
+		query string
+		want  int32
+	}{
+		{"", api.DefaultPageSize + 1},
+		{"?limit=0", api.DefaultPageSize + 1},
+		{"?limit=-5", api.DefaultPageSize + 1},
+		{"?limit=nonsense", api.DefaultPageSize + 1},
+		{"?limit=1000", api.MaxPageSize + 1},
+	} {
+		t.Run("limit"+tc.query, func(t *testing.T) {
+			reader := &fakeReader{}
+			handler, r := getRequest(t, customer(t), api.ListTicketsHandler(reader), "/api/tickets", "/api/tickets"+tc.query)
+			handler.ServeHTTP(httptest.NewRecorder(), r)
+
+			if reader.listParams.PageSize != tc.want {
+				t.Errorf("page size = %d, want %d", reader.listParams.PageSize, tc.want)
+			}
+		})
+	}
+}
+
+// docs/spec.md §11: another customer's ticket is 404, never 403. A 403 confirms
+// the ticket exists, which is exactly what the caller must not learn.
+func TestGetAnswers404ForATicketThatIsNotYours(t *testing.T) {
+	reader := &fakeReader{err: pgx.ErrNoRows}
+
+	handler, r := getRequest(t, customer(t), api.GetTicketHandler(reader),
+		"/api/tickets/{id}", "/api/tickets/44444444-4444-4444-4444-444444444444")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 — 403 would confirm the ticket exists", rec.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "forbidden") {
+		t.Errorf("the body hints at existence: %s", rec.Body.String())
+	}
+}
+
+func TestGetScopesToTheCallerInTheQuery(t *testing.T) {
+	caller := customer(t)
+	created := time.Now().UTC()
+	reader := &fakeReader{one: sampleTicket(t, "55555555-5555-5555-5555-555555555555", created)}
+
+	handler, r := getRequest(t, caller, api.GetTicketHandler(reader),
+		"/api/tickets/{id}", "/api/tickets/55555555-5555-5555-5555-555555555555")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if reader.getParams.RequesterID != caller.ID {
+		t.Errorf("requester = %v, want the authenticated caller", reader.getParams.RequesterID)
+	}
+}
+
+func TestGetRejectsAnIDThatIsNotAUUID(t *testing.T) {
+	reader := &fakeReader{}
+	handler, r := getRequest(t, customer(t), api.GetTicketHandler(reader), "/api/tickets/{id}", "/api/tickets/not-a-uuid")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	if reader.getCalls != 0 {
+		t.Error("a malformed id reached the store")
 	}
 }
