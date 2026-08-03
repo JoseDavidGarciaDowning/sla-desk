@@ -388,7 +388,12 @@ confirmed so far.
 - [x] A delivery stamped ten minutes ago is refused — Svix enforces a five minute tolerance
 - [x] A write failure answers `500` **on purpose**, so Svix retries rather than dropping the event
 - [x] 7 mutations of the handler and the mapping each turn the matching test red
-- [ ] Manual: `svix listen` forwards a real Clerk signup to localhost and the row appears — **still to do, needs a Clerk instance**
+- [x] Manual: a real Clerk signup reaches localhost and the row appears — **verified 2026-08-03**.
+  `npx clerk@latest webhooks listen` relayed a `user.created` from a user created in the
+  dashboard; the handler answered `200` and the row landed with `role = customer`. This is the
+  one thing the tests could not cover: every other webhook test signs its fixture with the same
+  library that verifies it, so a signature Clerk actually produced had never been through this
+  code. Note the CLI supersedes `svix listen` — see [clerk-integration.md](../docs/clerk-integration.md)
 
 **Dependencies:** T7
 **Files:** `internal/api/webhooks.go`, `internal/api/webhooks_test.go`,
