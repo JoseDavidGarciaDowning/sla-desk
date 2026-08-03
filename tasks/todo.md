@@ -782,27 +782,104 @@ mapping table that no drift test could check, unlike the vocabularies.
 
 ---
 
-### T14: Ticket list and detail with SLA display
+### T14a: Ticket list with filters and SLA display ✅
 
-**Description:** The customer portal views, with a legible SLA timer.
+**Description:** The customer's list view, with a legible SLA timer and filters that
+survive a reload.
 
 **Acceptance criteria:**
-- [ ] List shows title, status, priority, created date, and SLA remaining
-- [ ] The SLA timer renders `due_at` **received from the API** — the frontend performs no deadline arithmetic (spec §4.2)
-- [ ] A paused clock (`due_at` null) renders as paused, not as "expired" or blank
-- [ ] Loading, empty, and error states on both views — no bare spinners, no silent failures
-- [ ] Filters (status, priority) live in URL query params; a filtered view is a shareable link
-- [ ] Detail view shows the status timeline from history
+- [x] List shows title, status, priority, and SLA remaining
+- [x] The SLA timer renders `due_at` **received from the API** — the frontend performs no deadline arithmetic beyond subtracting that instant from now (spec §4.2)
+- [x] A paused clock (`due_at` null) renders as paused, not as "expired" or blank
+- [x] Loading, empty and error states — and **two** empty states, which the task did not ask for
+- [x] Filters (status, priority) live in URL query params; a filtered view is a shareable link
+- [x] Filtering happens in SQL, not in the browser
 
 **Verification:**
-- [ ] Component tests for the three states plus the paused-clock case
-- [ ] Reloading a filtered URL restores the same filters
-- [ ] Manual: a customer sees only their own tickets
-- [ ] Manual with keyboard only: every interactive element is reachable and focus is visible
+- [x] 25 component tests across the timer, the list and the filter controls
+- [x] Integration tests for the filtered query, including the scope guarantee
+- [x] `make check` and `make test-int` clean
+- [ ] Manual: reload a filtered URL, and confirm a customer sees only their own tickets
 
+**T14 as written could not be built.** Two things it assumes did not exist:
+
+1. `ListTicketsByRequester` had **no status or priority filter**. The task said filters live in
+   URL params; nothing said the API could honour them.
+2. **No endpoint exposes the status history.** `ListTicketStatusHistory` exists in SQL and in
+   the store — `Transition` reads it — but no route returns it, so the timeline had nothing to
+   render.
+
+So T14 is split. This is the list; T14b is the detail view and needs the history endpoint
+built first. Each is a vertical slice with its own backend and frontend, which is what the
+planning skill asks for and what the original single task was not.
+
+**Why filtering is server-side.** Filtering the loaded page in the browser filters only that
+page. With keyset pagination the customer is told they have three open tickets because the
+other seven were on page two — a lie that looks like a feature working.
+
+**Three SQL forms were measured before one was chosen.** sqlc gives a nullable parameter
+either the right type or the right nullability, not both:
+
+| Form | Generated | Verdict |
+|---|---|---|
+| `sqlc.narg(status)::text` | `*string` | **chosen** |
+| `status = COALESCE(sqlc.narg(status), status)` | `ticket.Status`, no pointer | An absent filter is then `""`, pgx sends `''` not NULL, and `COALESCE('', status)` matches nothing — asking for no filter returns no rows, silently |
+| `COALESCE(NULLIF(narg, ''), col)` | `interface{}` | Inference gives up |
+
+A pointer says "absent" and cannot be confused with a value. Losing the domain type on two
+parameters costs one conversion in a handler that was validating the input anyway.
+
+**An unknown filter is a 400, not an ignored one.** `?status=opne` returning every ticket is
+worse than an error: the page says the list is filtered while showing everything. The
+response is `httperr.WriteValidation`, so the frontend renders it with the code it already
+has for a rejected create.
+
+**Statuses joined the generated contract.** They are never accepted in a create body, but the
+filter control needs the options and the UI needs the labels — the same argument that put
+categories there in T13.
+
+**What the mutations caught.** 15 across the SQL, the handler, the timer, the list and the
+filters. Two survivors, both tests that looked stronger than they were:
+
+| Mutation | Why it survived | Fix |
+|---|---|---|
+| Bypass the requester predicate whenever a **status** filter is present | The scope test only exercised a *priority* filter — the query was scoped for the case the test happened to run and open for the one it did not | One case per filter and for the pair |
+| Drop the filters from the TanStack query key | Every assertion about the request still passed. The bug is in the cache: each view reads the previous filter's rows and shows them until the refetch lands | Two renders against one client, the second never resolving, so only the cache could put a row on screen |
+
+**Files:** `db/queries/tickets.sql`, `internal/api/{tickets,contract,dto}.go`,
+`web/components/sla-timer.tsx`, `web/app/(customer)/tickets/{ticket-list,ticket-filters}.tsx`,
+`web/lib/tickets.ts`
 **Dependencies:** T10, T12
-**Files:** `web/app/(customer)/tickets/page.tsx`, `web/app/(customer)/tickets/[id]/page.tsx`, `web/components/sla-timer.tsx`, `web/components/ticket-list.tsx`, `web/components/status-timeline.tsx`
-**Scope:** L — split into list and detail if it grows past 5 files
+**Scope:** M
+
+---
+
+### T14b: Ticket detail with status timeline
+
+**Description:** The single-ticket view, with the incident-style timeline the spec asks for.
+
+**Blocked on backend work that does not exist yet.**
+
+**Acceptance criteria:**
+- [ ] `GET /api/tickets/{id}/history` returns the status history, scoped to the requester in SQL like every other read
+- [ ] A DTO for a history entry — never `store.TicketStatusHistory`, which would put `pgtype` and `actor_id` on the wire
+- [ ] Detail view shows the timeline: who moved it, from what, to what, when
+- [ ] The SLA timer on the detail view, reusing `sla-timer.tsx`
+- [ ] Loading, not-found and error states
+- [ ] Replaces the thin placeholder `[id]/ticket-detail.tsx` written during T13
+
+**Verification:**
+- [ ] Integration test: another customer's history is a 404, never a 403 (spec §11)
+- [ ] Component tests for the timeline and the three states
+- [ ] Manual with keyboard only: every interactive element reachable, focus visible
+
+**Note on the 404.** `GetTicketForRequester` already returns no rows for both "does not exist"
+and "is not yours", which is what lets the handler answer 404 without being able to tell them
+apart. The history endpoint has to inherit that, which means scoping the history query by
+requester too — not checking ownership in Go and then querying.
+
+**Dependencies:** T14a
+**Scope:** M
 
 > **Checkpoint D — the whole flow works in a browser.**
 
