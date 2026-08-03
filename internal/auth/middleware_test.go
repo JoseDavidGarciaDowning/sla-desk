@@ -2,9 +2,11 @@ package auth_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/clerk/clerk-sdk-go/v2"
@@ -291,5 +293,76 @@ func TestProvisioningWithoutANameStoresNull(t *testing.T) {
 
 	if users.upsertParam.Name != nil {
 		t.Errorf("name = %q, want nil", *users.upsertParam.Name)
+	}
+}
+
+// Every other failure this API reports is an RFC 9457 problem document. These
+// two were bare status lines with no body at all — not a different wording, an
+// empty response — because internal/auth could not reach internal/api's writer
+// without an import cycle. internal/httperr exists to end that.
+//
+// A client cannot tell a 401 from this middleware apart from a 401 from a proxy
+// in front of it when neither says anything, and the frontend's error handling
+// reads the document to decide what to show.
+func TestRequireAuthAnswersWithAProblemDocument(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		handler http.Handler
+		request *http.Request
+		want    int
+	}{
+		{
+			name:    "no session claims",
+			handler: auth.RequireAuth(nil, nil)(nil),
+			request: httptest.NewRequest(http.MethodGet, "/api/tickets", nil),
+			want:    http.StatusUnauthorized,
+		},
+		{
+			name: "the database is unreachable",
+			handler: auth.RequireAuth(
+				&fakeStore{getErr: errors.New("connection refused")},
+				&fakeFetcher{},
+			)(nil),
+			request: withClaims("user_whatever"),
+			want:    http.StatusInternalServerError,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			tc.handler.ServeHTTP(rec, tc.request)
+
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/problem+json" {
+				t.Errorf("Content-Type = %q, want application/problem+json", got)
+			}
+
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decoding the body: %v\nbody: %q", err, rec.Body.String())
+			}
+			if body["status"] != float64(tc.want) {
+				t.Errorf("status in body = %v, want %d", body["status"], tc.want)
+			}
+		})
+	}
+}
+
+// The 500 above must not carry the cause. "connection refused" is the mildest
+// thing a pgx error can say; they also carry host names, ports and table names.
+func TestRequireAuthDoesNotEchoTheDatabaseError(t *testing.T) {
+	handler := auth.RequireAuth(
+		&fakeStore{getErr: errors.New("dial tcp 10.1.2.3:5432: connection refused")},
+		&fakeFetcher{},
+	)(nil)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, withClaims("user_whatever"))
+
+	for _, leak := range []string{"dial", "10.1.2.3", "5432", "refused"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Errorf("the response mentions %q: %s", leak, rec.Body.String())
+		}
 	}
 }

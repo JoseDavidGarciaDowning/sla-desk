@@ -14,6 +14,7 @@ import (
 
 	"github.com/clerk/clerk-sdk-go/v2"
 
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 )
 
@@ -49,13 +50,16 @@ func RequireAuth(p Provisioner, f IdentityFetcher) func(http.Handler) http.Handl
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			claims, ok := clerk.SessionClaimsFromContext(r.Context())
 			if !ok || claims == nil {
-				w.WriteHeader(http.StatusUnauthorized)
+				httperr.Write(w, http.StatusUnauthorized, "authentication required")
 				return
 			}
 
 			row, err := resolve(r.Context(), p, f, claims.Subject)
 			if err != nil {
-				w.WriteHeader(http.StatusInternalServerError)
+				// WriteInternal, not Write with the cause. resolve wraps
+				// whatever pgx or Clerk's SDK returned, and those carry host
+				// names, ports and table names.
+				httperr.WriteInternal(w)
 				return
 			}
 

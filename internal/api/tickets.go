@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/auth"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 )
 
@@ -46,18 +47,18 @@ func CreateTicketHandler(tickets TicketCreator) http.Handler {
 			// front of it, which is a wiring mistake rather than a bad request.
 			slog.ErrorContext(r.Context(), "ticket creation reached without an authenticated caller",
 				"path", r.URL.Path)
-			WriteProblem(w, http.StatusUnauthorized, "authentication required")
+			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 
 		var req CreateTicketRequest
 		if err := json.NewDecoder(io.LimitReader(r.Body, maxTicketBody)).Decode(&req); err != nil {
-			WriteProblem(w, http.StatusBadRequest, "the request body is not valid JSON")
+			httperr.Write(w, http.StatusBadRequest, "the request body is not valid JSON")
 			return
 		}
 
 		if errs := req.Validate(); len(errs) > 0 {
-			WriteValidationProblem(w, errs)
+			httperr.WriteValidation(w, errs)
 			return
 		}
 		req = req.Normalised()
@@ -80,7 +81,7 @@ func CreateTicketHandler(tickets TicketCreator) http.Handler {
 			} else {
 				slog.ErrorContext(r.Context(), "creating a ticket failed", "error", err)
 			}
-			WriteInternalProblem(w)
+			httperr.WriteInternal(w)
 			return
 		}
 
@@ -160,7 +161,7 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, ok := auth.UserFromContext(r.Context())
 		if !ok {
-			WriteProblem(w, http.StatusUnauthorized, "authentication required")
+			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 
@@ -169,7 +170,7 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 		if raw := r.URL.Query().Get("cursor"); raw != "" {
 			createdAt, id, err := decodeCursor(raw)
 			if err != nil {
-				WriteProblem(w, http.StatusBadRequest, "the cursor is not one this API issued")
+				httperr.Write(w, http.StatusBadRequest, "the cursor is not one this API issued")
 				return
 			}
 			params.AfterCreatedAt = &createdAt
@@ -184,7 +185,7 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 		rows, err := tickets.ListTicketsByRequester(r.Context(), params)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "listing tickets failed", "error", err)
-			WriteInternalProblem(w)
+			httperr.WriteInternal(w)
 			return
 		}
 
@@ -217,13 +218,13 @@ func GetTicketHandler(tickets TicketReader) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, ok := auth.UserFromContext(r.Context())
 		if !ok {
-			WriteProblem(w, http.StatusUnauthorized, "authentication required")
+			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 
 		var id pgtype.UUID
 		if err := id.Scan(chi.URLParam(r, "id")); err != nil {
-			WriteProblem(w, http.StatusBadRequest, "the ticket id is not a UUID")
+			httperr.Write(w, http.StatusBadRequest, "the ticket id is not a UUID")
 			return
 		}
 
@@ -233,11 +234,11 @@ func GetTicketHandler(tickets TicketReader) http.Handler {
 		})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				WriteProblem(w, http.StatusNotFound, "no such ticket")
+				httperr.Write(w, http.StatusNotFound, "no such ticket")
 				return
 			}
 			slog.ErrorContext(r.Context(), "reading a ticket failed", "error", err)
-			WriteInternalProblem(w)
+			httperr.WriteInternal(w)
 			return
 		}
 

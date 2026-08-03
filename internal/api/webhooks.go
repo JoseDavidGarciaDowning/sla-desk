@@ -11,6 +11,7 @@ import (
 	svix "github.com/svix/svix-webhooks/go"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/auth"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
 )
 
 // ClerkWebhookPath is where Clerk posts user events.
@@ -47,7 +48,7 @@ func ClerkWebhookHandler(signingSecret string, users auth.Provisioner) (http.Han
 		// read whole and verified before anything is decoded from it.
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
 		if err != nil {
-			http.Error(w, "unreadable body", http.StatusBadRequest)
+			httperr.Write(w, http.StatusBadRequest, "unreadable body")
 			return
 		}
 
@@ -57,13 +58,13 @@ func ClerkWebhookHandler(signingSecret string, users auth.Provisioner) (http.Han
 			// whose timestamp is outside five minutes.
 			slog.WarnContext(r.Context(), "rejected an unverified Clerk webhook",
 				"error", err, "svix_id", r.Header.Get("svix-id"))
-			http.Error(w, "invalid signature", http.StatusBadRequest)
+			httperr.Write(w, http.StatusBadRequest, "invalid signature")
 			return
 		}
 
 		var event clerkEvent
 		if err := json.Unmarshal(body, &event); err != nil {
-			http.Error(w, "malformed event", http.StatusBadRequest)
+			httperr.Write(w, http.StatusBadRequest, "malformed event")
 			return
 		}
 
@@ -71,11 +72,11 @@ func ClerkWebhookHandler(signingSecret string, users auth.Provisioner) (http.Han
 		case "user.created", "user.updated":
 			var u clerk.User
 			if err := json.Unmarshal(event.Data, &u); err != nil {
-				http.Error(w, "malformed user payload", http.StatusBadRequest)
+				httperr.Write(w, http.StatusBadRequest, "malformed user payload")
 				return
 			}
 			if u.ID == "" {
-				http.Error(w, "user payload has no id", http.StatusBadRequest)
+				httperr.Write(w, http.StatusBadRequest, "user payload has no id")
 				return
 			}
 
@@ -84,7 +85,7 @@ func ClerkWebhookHandler(signingSecret string, users auth.Provisioner) (http.Han
 				// database failure is exactly the case where we want it to.
 				slog.ErrorContext(r.Context(), "provisioning from a Clerk webhook failed",
 					"error", err, "clerk_user_id", u.ID, "event", event.Type)
-				http.Error(w, "could not provision the user", http.StatusInternalServerError)
+				httperr.Write(w, http.StatusInternalServerError, "could not provision the user")
 				return
 			}
 

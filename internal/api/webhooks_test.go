@@ -247,3 +247,65 @@ func TestWebhookHandlerRefusesAnUnusableSigningSecret(t *testing.T) {
 		t.Error("expected an error — a bad secret must stop the deploy, not become runtime 500s")
 	}
 }
+
+// Every error out of this API is an RFC 9457 problem document. These six paths
+// were http.Error, which writes text/plain — an API that answers two different
+// media types for the same class of failure teaches whoever reads it next to
+// pick whichever they saw first.
+//
+// The consumer here is Svix rather than a browser, and Svix only reads the
+// status. That is an argument for the body not mattering, not an argument for
+// it being inconsistent: the delivery log in Clerk's dashboard shows it, and
+// it costs nothing to say the same thing everywhere.
+func TestWebhookErrorsAreProblemDocuments(t *testing.T) {
+	handler, err := api.ClerkWebhookHandler(testWebhookSecret, &recordingProvisioner{})
+	if err != nil {
+		t.Fatalf("building the handler: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name    string
+		request func(*testing.T) *http.Request
+		want    int
+	}{
+		{
+			name: "an unsigned request",
+			request: func(*testing.T) *http.Request {
+				return httptest.NewRequest(http.MethodPost, api.ClerkWebhookPath,
+					bytes.NewReader([]byte(`{"type":"user.created","data":{}}`)))
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "a signed body that is not JSON",
+			request: func(t *testing.T) *http.Request {
+				return signed(t, []byte("not json at all"), time.Now())
+			},
+			want: http.StatusBadRequest,
+		},
+		{
+			name: "a user event with no id",
+			request: func(t *testing.T) *http.Request {
+				return signed(t, []byte(`{"type":"user.created","data":{}}`), time.Now())
+			},
+			want: http.StatusBadRequest,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, tc.request(t))
+
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d\nbody: %s", rec.Code, tc.want, rec.Body.String())
+			}
+			if got := rec.Header().Get("Content-Type"); got != "application/problem+json" {
+				t.Errorf("Content-Type = %q, want application/problem+json", got)
+			}
+
+			body := decodeProblem(t, rec)
+			if body["status"] != float64(tc.want) {
+				t.Errorf("status in body = %v, want %d", body["status"], tc.want)
+			}
+		})
+	}
+}

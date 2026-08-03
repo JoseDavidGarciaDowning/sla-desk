@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -77,25 +78,19 @@ func (r CreateTicketRequest) Validate() map[string]string {
 		errs["description"] = fmt.Sprintf("must be at most %d characters", maxDescriptionLength)
 	}
 
-	if !contains(validCategories, r.Category) {
+	if !slices.Contains(validCategories, r.Category) {
 		errs["category"] = "must be one of " + join(validCategories)
 	}
-	if !contains(validPriorities, r.Priority) {
+	if !slices.Contains(validPriorities, r.Priority) {
 		errs["priority"] = "must be one of " + join(validPriorities)
 	}
 
 	return errs
 }
 
-func contains[T ~string](valid []T, v T) bool {
-	for _, candidate := range valid {
-		if candidate == v {
-			return true
-		}
-	}
-	return false
-}
-
+// join renders a vocabulary for the "must be one of ..." message. Unlike the
+// membership test above there is no version of this in the standard library —
+// strings.Join takes []string, and these are named types over string.
 func join[T ~string](values []T) string {
 	out := make([]string, len(values))
 	for i, v := range values {
