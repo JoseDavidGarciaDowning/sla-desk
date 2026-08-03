@@ -76,6 +76,34 @@ func TestTicketDoesNotImportSLA(t *testing.T) {
 	}
 }
 
+// internal/httperr is the one package every layer may call: the domain does
+// not, but store, auth and api all report failures the same way through it.
+// That only works while it sits below all of them, and it sits below them only
+// while it imports none of them.
+//
+// The rule is stricter than "no cycle today". Letting it import internal/ticket
+// to name a role in a message, say, would put it above ticket — and the next
+// package that wanted to answer a request would find httperr already spoken
+// for. It was extracted precisely because internal/auth could not reach
+// internal/api's problem writer without a cycle; a package that can drift back
+// into the same position solves nothing.
+//
+// Note this is the opposite constraint to the domain rule above: httperr is
+// allowed net/http, which the domain is not. It is not a domain package. It is
+// a leaf that knows one thing, which is what an error looks like on the wire.
+func TestHTTPErrDependsOnNothingInThisModule(t *testing.T) {
+	root := moduleRoot(t)
+
+	for imported := range transitiveImports(t, root, modulePath+"/internal/httperr") {
+		if matches(imported, modulePath) {
+			t.Errorf("internal/httperr reaches %s\n\n"+
+				"It has to stay below every layer that reports an error, or the\n"+
+				"layer it now sits above cannot use it. Whatever this import was\n"+
+				"needed for belongs in the caller.", imported)
+		}
+	}
+}
+
 // matches reports whether importPath is prefix, or a package underneath it.
 // A plain strings.HasPrefix would make "net/http" match a package called
 // "net/httpsomething".
