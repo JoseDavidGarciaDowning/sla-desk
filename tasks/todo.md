@@ -320,21 +320,49 @@ user, and reject everything else.
 **Re-read the `clerk-sdk-go/v2` docs before writing code. Do not code from memory.**
 
 **Acceptance criteria:**
-- [ ] JWT verified against Clerk's JWKS; the JWK is cached, not fetched per request
-- [ ] `RequireAuth` **rejects** unauthenticated requests with `401` — `WithHeaderAuthorization` alone does not do this (spec §4.3)
-- [ ] The authenticated user, including the role **read from our database**, is placed in the request context
-- [ ] A verified token with no matching `users` row triggers the idempotent upsert (spec §4.5) and the request succeeds
-- [ ] New users are always seeded `role = 'customer'`; the role is never read from the token or any client input
+- [x] JWT verified against Clerk's JWKS; the JWK is cached, not fetched per request
+- [x] `RequireAuth` **rejects** unauthenticated requests with `401` — `WithHeaderAuthorization` alone does not do this (spec §4.3)
+- [x] The authenticated user, including the role **read from our database**, is placed in the request context
+- [x] A verified token with no matching `users` row triggers the idempotent upsert (spec §4.5) and the request succeeds
+- [x] New users are always seeded `role = 'customer'`; the role is never read from the token or any client input
 
 **Verification:**
-- [ ] Integration tests return `401` for: no header, malformed header, expired token, token signed by the wrong key
-- [ ] A test with a valid token for an unknown subject returns `200` and creates exactly one `users` row
-- [ ] Calling the upsert twice concurrently creates exactly one row
-- [ ] `go test ./internal/auth/... -race` passes
+- [x] Tests return `401` for: no header, malformed header, expired token, token signed by the wrong key — plus four more (tampered payload, unknown key id, wrong authorized party, non-Clerk issuer)
+- [x] A test with a valid token for an unknown subject returns `200` and provisions exactly one user
+- [x] Calling the upsert 16 times concurrently creates exactly one row, and every caller receives the same id
+- [x] `go test ./internal/auth/... -race` passes — 20 tests, `internal/auth` at 90.7%
 
 **Dependencies:** T4
-**Files:** `internal/auth/clerk.go`, `internal/auth/middleware.go`, `internal/auth/provision.go`, `internal/auth/middleware_test.go`
+**Files:** `internal/auth/clerk.go`, `internal/auth/middleware.go`, `internal/auth/user.go`,
+`internal/auth/middleware_test.go`, `internal/auth/clerk_test.go`,
+`internal/store/store_integration_test.go` (concurrency)
 **Scope:** M
+
+**What the SDK actually does, measured against v2.7.0:**
+
+- `WithHeaderAuthorization` does not reject, as the spec said — but the detail matters. A
+  request with **no token and one with a token it cannot decode both pass straight through**.
+  Only a token that decodes and then fails verification reaches the failure handler.
+- `RequireHeaderAuthorization` **does** reject, which the spec did not mention, but with
+  **403**. Combined with the failure handler's 401 that gives a mixed status surface, so it is
+  not used. `Middleware` + our `RequireAuth` answers 401 to all nine failure modes.
+- `jwt.Verify` does **not** cache the JWK; caching moved to the caller in v2. The HTTP
+  middleware does cache, by key id, for an hour — so mounting `WithHeaderAuthorization`
+  satisfies the caching requirement and no cache of ours is needed.
+- **The cache is process-global and keyed by key id alone**, with no scoping by instance or
+  issuer. Harmless with one Clerk instance; it made tests leak keys into each other until each
+  got its own key id.
+- `jwt.Verify` validates the issuer's **shape**, not its identity:
+  `HasPrefix(iss, "https://clerk.")` or a `.clerk.accounts` substring. Any Clerk instance's
+  issuer passes. What binds a token to us is the JWKS — and the authorized party, which is why
+  `AuthorizedPartyMatches` is enabled.
+- The session token carries the subject and **not** the email or name. Provisioning fetches
+  them from the Backend API, once per user, and picks the address Clerk marks primary rather
+  than the first in the list.
+
+**Deferred to T10:** `Config` is filled by the caller; `internal/config` does not read
+`CLERK_SECRET_KEY` yet, so the API still boots without it. Wiring the middleware into the
+router makes it required.
 
 ---
 
@@ -346,22 +374,46 @@ user, and reject everything else.
 confirmed so far.
 
 **Acceptance criteria:**
-- [ ] Signature verified with `github.com/svix/svix-webhooks/go` using `svix-id`, `svix-timestamp`, `svix-signature`
-- [ ] An invalid or missing signature returns `400` and writes nothing
-- [ ] The route is exempt from `RequireAuth` — Clerk does not send a session JWT
-- [ ] The handler calls the **same** upsert function as T7
-- [ ] Replaying an identical event produces no duplicate row and still returns `2xx` (Svix retries on non-2xx)
-- [ ] Unknown event types return `200` and are ignored, not treated as errors
+- [x] Signature verified with `github.com/svix/svix-webhooks/go` using `svix-id`, `svix-timestamp`, `svix-signature`
+- [x] An invalid or missing signature returns `400` and writes nothing
+- [x] The route is exempt from `RequireAuth` — Clerk does not send a session JWT — **handler built; mounting is T10**
+- [x] The handler calls the **same** upsert function as T7 — both now go through `auth.Provision`
+- [x] Replaying an identical event produces no duplicate row and still returns `2xx` (Svix retries on non-2xx)
+- [x] Unknown event types return `200` and are ignored, not treated as errors
 
 **Verification:**
-- [ ] Integration test with a correctly signed fixture payload creates the user
-- [ ] Test with a tampered body returns `400`
-- [ ] Delivering the same event twice leaves exactly one row
-- [ ] Manual: `svix listen` forwards a real Clerk signup to localhost and the row appears
+- [x] A correctly signed fixture payload provisions the user, with the address Clerk marks primary
+- [x] A tampered body returns `400` and writes nothing
+- [x] Delivering the same event twice returns `200` both times and reaches the idempotent write
+- [x] A delivery stamped ten minutes ago is refused — Svix enforces a five minute tolerance
+- [x] A write failure answers `500` **on purpose**, so Svix retries rather than dropping the event
+- [x] 7 mutations of the handler and the mapping each turn the matching test red
+- [ ] Manual: `svix listen` forwards a real Clerk signup to localhost and the row appears — **still to do, needs a Clerk instance**
 
 **Dependencies:** T7
-**Files:** `internal/api/webhooks.go`, `internal/api/webhooks_test.go`, `internal/api/testdata/user_created.json`
+**Files:** `internal/api/webhooks.go`, `internal/api/webhooks_test.go`,
+`internal/api/testdata/user_created.json`, `internal/auth/provision.go`
 **Scope:** M
+
+**Notes:**
+
+- `svix.NewWebhook` / `Verify` / `Sign` confirmed against v1.99.1. `Sign` being exported is what
+  lets the tests sign their fixtures with the same library that verifies them, instead of a
+  reimplementation of the scheme that would agree with itself whatever it did.
+- The module is `github.com/svix/svix-webhooks` and the verifier shares a package with the whole
+  Svix API client. Measured rather than feared: linking it adds **~100 KB** to a binary, because
+  the linker drops what is unused.
+- `auth.Provision` and `auth.IdentityFromClerkUser` were extracted so the webhook and the lazy
+  fallback cannot disagree about which address is a user's. The role is not a parameter of
+  either — the query writes it as a literal and omits it from the conflict clause, so no webhook
+  payload can create or demote an agent.
+- The body is read whole and verified **before** anything is decoded from it: the signature
+  covers the exact bytes Clerk sent. Capped at 1 MiB.
+- `ClerkWebhookHandler` returns an error rather than a handler that fails at request time, so an
+  unusable signing secret stops the deploy instead of becoming 500s nobody is watching.
+
+**Deferred to T10:** mounting the route outside `RequireAuth`, and reading
+`CLERK_WEBHOOK_SECRET` in `internal/config`.
 
 ---
 
