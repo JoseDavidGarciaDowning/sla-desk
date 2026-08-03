@@ -4,17 +4,19 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 )
 
 const allowedOrigin = "https://sla-desk.vercel.app"
 
-func corsRouter() http.Handler {
-	return NewRouter(
-		config.Config{DatabaseURL: "postgres://localhost/test", CORSAllowedOrigin: allowedOrigin},
-		nil,
-	)
+func corsRouter(t *testing.T) http.Handler {
+	t.Helper()
+	cfg := testConfig()
+	cfg.CORSAllowedOrigin = allowedOrigin
+	h, err := NewRouter(cfg, Deps{})
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	return h
 }
 
 func request(t *testing.T, handler http.Handler, method, path, origin string) *httptest.ResponseRecorder {
@@ -32,7 +34,7 @@ func request(t *testing.T, handler http.Handler, method, path, origin string) *h
 }
 
 func TestCORS_EchoesTheConfiguredOrigin(t *testing.T) {
-	rec := request(t, corsRouter(), http.MethodGet, "/health", allowedOrigin)
+	rec := request(t, corsRouter(t), http.MethodGet, "/health", allowedOrigin)
 
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != allowedOrigin {
 		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, allowedOrigin)
@@ -45,7 +47,7 @@ func TestCORS_EchoesTheConfiguredOrigin(t *testing.T) {
 }
 
 func TestCORS_IgnoresOtherOrigins(t *testing.T) {
-	rec := request(t, corsRouter(), http.MethodGet, "/health", "https://evil.example")
+	rec := request(t, corsRouter(t), http.MethodGet, "/health", "https://evil.example")
 
 	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "" {
 		t.Errorf("Access-Control-Allow-Origin = %q, want it absent for an unlisted origin", got)
@@ -61,7 +63,7 @@ func TestCORS_IgnoresOtherOrigins(t *testing.T) {
 // responses. It must never appear, whatever the configuration says.
 func TestCORS_NeverEmitsAWildcard(t *testing.T) {
 	for _, origin := range []string{allowedOrigin, "https://evil.example", "null"} {
-		rec := request(t, corsRouter(), http.MethodGet, "/health", origin)
+		rec := request(t, corsRouter(t), http.MethodGet, "/health", origin)
 
 		if got := rec.Header().Get("Access-Control-Allow-Origin"); got == "*" {
 			t.Errorf("origin %q produced a wildcard Access-Control-Allow-Origin", origin)
@@ -76,7 +78,7 @@ func TestCORS_AnswersPreflight(t *testing.T) {
 	req.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
 
 	rec := httptest.NewRecorder()
-	corsRouter().ServeHTTP(rec, req)
+	corsRouter(t).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
@@ -94,7 +96,10 @@ func TestCORS_AnswersPreflight(t *testing.T) {
 // Locally the web app and the API share an origin through the dev server, so
 // CORS is simply off. An unset value must not become a wildcard.
 func TestCORS_IsDisabledWhenNoOriginIsConfigured(t *testing.T) {
-	handler := NewRouter(config.Config{DatabaseURL: "postgres://localhost/test"}, nil)
+	handler, err := NewRouter(testConfig(), Deps{})
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
 
 	rec := request(t, handler, http.MethodGet, "/health", allowedOrigin)
 

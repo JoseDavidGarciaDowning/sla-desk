@@ -16,6 +16,7 @@ import (
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 )
 
 // startupPingTimeout bounds the one connectivity check made at boot.
@@ -67,9 +68,26 @@ func run() error {
 		"database": pool.Ping,
 	}
 
+	// Queries reads; TicketRepo writes, because creating a ticket spans two
+	// statements that have to commit together.
+	queries := store.New(pool)
+
+	handler, err := api.NewRouter(cfg, api.Deps{
+		Probes:  probes,
+		Users:   queries,
+		Tickets: store.NewTicketRepo(pool),
+		Reader:  queries,
+	})
+	if err != nil {
+		// Configuration the router cannot work with, most likely a malformed
+		// Clerk webhook secret. Failing here rather than serving an endpoint
+		// that rejects every delivery.
+		return fmt.Errorf("building the router: %w", err)
+	}
+
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
-		Handler: api.NewRouter(cfg, probes),
+		Handler: handler,
 		// Without this a slow client can hold a connection open indefinitely
 		// while dribbling out headers.
 		ReadHeaderTimeout: 10 * time.Second,

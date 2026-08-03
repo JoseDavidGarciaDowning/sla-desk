@@ -8,15 +8,16 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 )
 
 func healthRequest(t *testing.T, probes map[string]Probe) *httptest.ResponseRecorder {
 	t.Helper()
 
 	rec := httptest.NewRecorder()
-	router := NewRouter(config.Config{DatabaseURL: "postgres://localhost/test"}, probes)
+	router, err := NewRouter(testConfig(), Deps{Probes: probes})
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 
 	return rec
