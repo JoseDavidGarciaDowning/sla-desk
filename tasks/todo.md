@@ -479,20 +479,50 @@ at the call site.
 **Description:** Read endpoints, scoped to the caller in SQL.
 
 **Acceptance criteria:**
-- [ ] `GET /api/tickets` returns only the caller's tickets, newest first, paginated
-- [ ] `GET /api/tickets/{id}` returns `404` when the ticket belongs to someone else — **not `403`**, which would confirm the ticket exists
-- [ ] Scoping is in the SQL (`WHERE requester_id = $1`), not a post-query filter in Go
-- [ ] Responses expose `sla_due_at` and enough state for the UI to render a timer
+- [x] `GET /api/tickets` returns only the caller's tickets, newest first, paginated
+- [x] `GET /api/tickets/{id}` returns `404` when the ticket belongs to someone else — **not `403`**, which would confirm the ticket exists
+- [x] Scoping is in the SQL (`WHERE requester_id = $1`), not a post-query filter in Go
+- [x] Responses expose `sla_due_at` and enough state for the UI to render a timer
 
 **Verification:**
-- [ ] Integration test: customer A creates a ticket; customer B requests it by id and receives `404`
-- [ ] Integration test: customer B's list does not contain A's ticket
-- [ ] Removing the handler's ownership check still yields `404` — proving the SQL enforces it
-- [ ] Pagination returns stable results across pages
+- [x] Customer B asking for A's ticket by id receives `404`
+- [x] Customer B's list does not contain A's ticket
+- [x] There is no handler ownership check to remove — the SQL is the only thing enforcing it, and removing the predicate turns the store tests red
+- [x] Pagination is stable: a ticket inserted between two page reads neither repeats nor skips a row
+- [x] 8 mutations of the handlers and the wiring each turn the matching test red
 
 **Dependencies:** T9
-**Files:** `internal/api/tickets.go`, `db/queries/tickets.sql`, `internal/api/tickets_test.go`
-**Scope:** S
+**Files:** `internal/api/tickets.go`, `internal/api/router.go`, `db/queries/tickets.sql`,
+`internal/config/config.go`, `cmd/api/main.go`, plus tests
+**Scope:** M — larger than planned, see below
+
+**Scope note — the plan had no task for wiring the router.** T8 and T9 built handlers that
+nothing mounted; without doing it here we would have reached Checkpoint C with an API that still
+served only `/health` in production. Done as part of this task: `NewRouter` takes a `Deps`
+struct and returns an error, the Clerk webhook is mounted **outside** `RequireAuth`, the ticket
+routes inside it, and `cmd/api/main.go` builds the store and the repo.
+
+**Decisions taken during T10:**
+
+- **Keyset pagination, not `OFFSET`.** The criterion asks for stable results across pages, and
+  `OFFSET` cannot give them: a ticket created while someone is paging shifts every later row
+  down and they see one twice. The cursor carries `(created_at, id)` — `id` because two tickets
+  created in the same transaction share a timestamp, and a cursor on a non-unique key either
+  skips rows or repeats them. The cursor is opaque so the sort order is not part of the API.
+- **The page size is clamped, not rejected.** A caller asking for 1000 means "as many as I can
+  have", and an error there is friction with no security value.
+- **`CLERK_SECRET_KEY` and `CLERK_WEBHOOK_SECRET` are now required**; the API will not boot
+  without them. `CLERK_AUTHORIZED_PARTY` falls back to `CORS_ALLOWED_ORIGIN`, because they are
+  the same origin in practice and an operator who set one and forgot the other would silently
+  lose the check that ties a token to our frontend. `CLERK_API_URL` is optional.
+- **An empty page encodes as `[]`, never `null`**, so no client has to write a nil check.
+
+**What mutation testing caught this time:** `TestTheTicketRoutesRequireASession` stayed green
+with `RequireAuth` deleted from the router, because each handler also refuses a request with no
+caller in its context. The system fails closed, which is the right direction — but the wiring
+would have been broken with nothing to say so. The gap is now covered by
+`TestASignedRequestReachesTheHandlerThroughTheRouter`, which signs a real token against a real
+JWKS and requires the request to *succeed*, so the whole chain has to be present and in order.
 
 ---
 
