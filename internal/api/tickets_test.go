@@ -278,6 +278,10 @@ func TestCreateTicketTrimsTheText(t *testing.T) {
 // ── Reading tickets ─────────────────────────────────────────────────────────
 
 type fakeReader struct {
+	history       []store.TicketStatusHistory
+	historyParams store.ListTicketStatusHistoryForRequesterParams
+	historyCalls  int
+
 	page []store.Ticket
 	one  store.Ticket
 	err  error
@@ -298,6 +302,14 @@ func (f *fakeReader) GetTicketForRequester(_ context.Context, arg store.GetTicke
 	f.getCalls++
 	f.getParams = arg
 	return f.one, f.err
+}
+
+func (f *fakeReader) ListTicketStatusHistoryForRequester(
+	_ context.Context, arg store.ListTicketStatusHistoryForRequesterParams,
+) ([]store.TicketStatusHistory, error) {
+	f.historyCalls++
+	f.historyParams = arg
+	return f.history, f.err
 }
 
 func sampleTicket(t *testing.T, id string, created time.Time) store.Ticket {
@@ -640,4 +652,137 @@ func deref(p *string) string {
 		return "<none>"
 	}
 	return *p
+}
+
+// ── The status history (T14b) ────────────────────────────────────────────────
+
+func historyRow(from *ticket.Status, to ticket.Status, role ticket.Role, at time.Time) store.TicketStatusHistory {
+	var actor pgtype.UUID
+	_ = actor.Scan("11111111-1111-1111-1111-111111111111")
+
+	return store.TicketStatusHistory{
+		ID:         1,
+		FromStatus: from,
+		ToStatus:   to,
+		ActorID:    actor,
+		ActorRole:  role,
+		CreatedAt:  at,
+	}
+}
+
+// An empty history is a 404, not an empty timeline.
+//
+// Every ticket has at least the row recording its creation, so nothing is
+// returned only when the ticket does not exist or is not the caller's — and the
+// query cannot tell those apart, which is what stops this handler from
+// confirming that an id names a real ticket (docs/spec.md §11).
+func TestHistoryAnswers404WhenThereIsNone(t *testing.T) {
+	reader := &fakeReader{}
+	handler, r := getRequest(t, customer(t), api.GetTicketHistoryHandler(reader),
+		"/api/tickets/{id}/history",
+		"/api/tickets/6f1b5f2a-0000-4000-8000-000000000001/history")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404\nbody: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Code == http.StatusForbidden {
+		t.Error("403 confirms the ticket exists")
+	}
+}
+
+func TestHistoryReturnsTheEntriesInOrder(t *testing.T) {
+	base := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	open := ticket.StatusOpen
+
+	reader := &fakeReader{history: []store.TicketStatusHistory{
+		historyRow(nil, ticket.StatusOpen, ticket.RoleCustomer, base),
+		historyRow(&open, ticket.StatusPending, ticket.RoleAgent, base.Add(time.Hour)),
+	}}
+
+	handler, r := getRequest(t, customer(t), api.GetTicketHistoryHandler(reader),
+		"/api/tickets/{id}/history",
+		"/api/tickets/6f1b5f2a-0000-4000-8000-000000000001/history")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200\nbody: %s", rec.Code, rec.Body.String())
+	}
+
+	var body api.TicketHistoryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding: %v\nbody: %s", err, rec.Body.String())
+	}
+
+	if len(body.Entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(body.Entries))
+	}
+	if body.Entries[0].FromStatus != nil {
+		t.Errorf("the creation entry has from_status %v, want null", *body.Entries[0].FromStatus)
+	}
+	if body.Entries[1].ToStatus != ticket.StatusPending {
+		t.Errorf("entry 1 to_status = %q", body.Entries[1].ToStatus)
+	}
+	if body.Entries[1].ActorRole != ticket.RoleAgent {
+		t.Errorf("entry 1 actor_role = %q — who moved it is the point of a timeline", body.Entries[1].ActorRole)
+	}
+}
+
+// The timeline says which kind of person moved the ticket, never which one.
+// actor_id is another user's primary key, and a customer has no use for it —
+// putting it on the wire hands out an identifier for enumeration and links a
+// customer's view to the agent roster.
+func TestHistoryNeverExposesTheActorsIdentity(t *testing.T) {
+	reader := &fakeReader{history: []store.TicketStatusHistory{
+		historyRow(nil, ticket.StatusOpen, ticket.RoleAgent, time.Now()),
+	}}
+
+	handler, r := getRequest(t, customer(t), api.GetTicketHistoryHandler(reader),
+		"/api/tickets/{id}/history",
+		"/api/tickets/6f1b5f2a-0000-4000-8000-000000000001/history")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	for _, leak := range []string{"actor_id", "11111111", "ActorID"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Errorf("the response mentions %q: %s", leak, rec.Body.String())
+		}
+	}
+}
+
+func TestHistoryScopesToTheCallerInTheQuery(t *testing.T) {
+	caller := customer(t)
+	reader := &fakeReader{history: []store.TicketStatusHistory{
+		historyRow(nil, ticket.StatusOpen, ticket.RoleCustomer, time.Now()),
+	}}
+
+	handler, r := getRequest(t, caller, api.GetTicketHistoryHandler(reader),
+		"/api/tickets/{id}/history",
+		"/api/tickets/6f1b5f2a-0000-4000-8000-000000000001/history")
+	handler.ServeHTTP(httptest.NewRecorder(), r)
+
+	if reader.historyParams.RequesterID != caller.ID {
+		t.Errorf("requester = %v, want the authenticated caller", reader.historyParams.RequesterID)
+	}
+}
+
+func TestHistoryRejectsAnIDThatIsNotAUUID(t *testing.T) {
+	reader := &fakeReader{}
+	handler, r := getRequest(t, customer(t), api.GetTicketHistoryHandler(reader),
+		"/api/tickets/{id}/history", "/api/tickets/not-a-uuid/history")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if reader.historyCalls != 0 {
+		t.Error("the query ran with an unparsed id")
+	}
 }

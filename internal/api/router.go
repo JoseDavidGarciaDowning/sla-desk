@@ -98,6 +98,7 @@ func NewRouter(cfg config.Config, deps Deps) (http.Handler, error) {
 		r.Method(http.MethodPost, TicketsPath, CreateTicketHandler(deps.Tickets))
 		r.Method(http.MethodGet, TicketsPath, ListTicketsHandler(deps.Reader))
 		r.Method(http.MethodGet, TicketsPath+"/{id}", GetTicketHandler(deps.Reader))
+		r.Method(http.MethodGet, TicketsPath+"/{id}"+TicketHistorySuffix, GetTicketHistoryHandler(deps.Reader))
 	})
 
 	return r, nil

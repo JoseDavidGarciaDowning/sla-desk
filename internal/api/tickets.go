@@ -113,6 +113,7 @@ type TicketListResponse struct {
 type TicketReader interface {
 	ListTicketsByRequester(ctx context.Context, arg store.ListTicketsByRequesterParams) ([]store.Ticket, error)
 	GetTicketForRequester(ctx context.Context, arg store.GetTicketForRequesterParams) (store.Ticket, error)
+	ListTicketStatusHistoryForRequester(ctx context.Context, arg store.ListTicketStatusHistoryForRequesterParams) ([]store.TicketStatusHistory, error)
 }
 
 // encodeCursor packs the sort key of the last row on a page.
@@ -287,5 +288,52 @@ func GetTicketHandler(tickets TicketReader) http.Handler {
 		}
 
 		writeJSON(w, r, http.StatusOK, NewTicketResponse(row))
+	})
+}
+
+// TicketHistorySuffix is appended to a ticket's path.
+const TicketHistorySuffix = "/history"
+
+// GetTicketHistoryHandler serves GET /api/tickets/{id}/history.
+//
+// Mount behind RequireAuth. The requester predicate lives in the query's JOIN,
+// so this handler has no ownership check to forget.
+//
+// An empty result is a 404, not an empty timeline. Every ticket has at least
+// the entry recording its creation, so nothing comes back only when the ticket
+// does not exist or is not the caller's — and the query cannot tell those
+// apart, which is exactly why this can answer 404 for both without confirming
+// that the id names a real ticket (docs/spec.md §11).
+func GetTicketHistoryHandler(tickets TicketReader) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		caller, ok := auth.UserFromContext(r.Context())
+		if !ok {
+			httperr.Write(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+
+		var id pgtype.UUID
+		if err := id.Scan(chi.URLParam(r, "id")); err != nil {
+			httperr.Write(w, http.StatusBadRequest, "the ticket id is not a UUID")
+			return
+		}
+
+		rows, err := tickets.ListTicketStatusHistoryForRequester(r.Context(),
+			store.ListTicketStatusHistoryForRequesterParams{
+				TicketID:    id,
+				RequesterID: caller.ID,
+			})
+		if err != nil {
+			slog.ErrorContext(r.Context(), "reading a ticket history failed", "error", err)
+			httperr.WriteInternal(w)
+			return
+		}
+
+		if len(rows) == 0 {
+			httperr.Write(w, http.StatusNotFound, "no such ticket")
+			return
+		}
+
+		writeJSON(w, r, http.StatusOK, NewTicketHistoryResponse(rows))
 	})
 }

@@ -155,3 +155,48 @@ func uuidString(id pgtype.UUID) string {
 	b := id.Bytes
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
+
+// TicketHistoryEntry is one status change, as a requester is allowed to see it.
+//
+// Not store.TicketStatusHistory. That row carries ActorID — another user's
+// primary key — and a customer has no use for it: it hands out an identifier to
+// enumerate and links their view of a ticket to the agent roster. The role is
+// what a timeline is actually for. "An agent resolved this" is the information;
+// which agent is not.
+//
+// The row's own id is left out for the same kind of reason. It is a sequence
+// number a client could count with, and nothing in the UI addresses an entry.
+type TicketHistoryEntry struct {
+	// FromStatus is null on the entry that records the ticket's creation, which
+	// is the only entry that moved from nowhere.
+	FromStatus *ticket.Status `json:"from_status"`
+	ToStatus   ticket.Status  `json:"to_status"`
+	ActorRole  ticket.Role    `json:"actor_role"`
+	Reason     *string        `json:"reason"`
+	CreatedAt  time.Time      `json:"created_at"`
+}
+
+// TicketHistoryResponse is a ticket's timeline, oldest first.
+//
+// An object rather than a bare array: a top-level JSON array cannot grow a
+// field later without breaking every client, and this one will want paging or a
+// count eventually.
+type TicketHistoryResponse struct {
+	Entries []TicketHistoryEntry `json:"entries"`
+}
+
+func NewTicketHistoryResponse(rows []store.TicketStatusHistory) TicketHistoryResponse {
+	// make, so an empty timeline encodes as [] rather than null — though the
+	// handler answers 404 before it can be empty.
+	entries := make([]TicketHistoryEntry, 0, len(rows))
+	for _, row := range rows {
+		entries = append(entries, TicketHistoryEntry{
+			FromStatus: row.FromStatus,
+			ToStatus:   row.ToStatus,
+			ActorRole:  row.ActorRole,
+			Reason:     row.Reason,
+			CreatedAt:  row.CreatedAt,
+		})
+	}
+	return TicketHistoryResponse{Entries: entries}
+}

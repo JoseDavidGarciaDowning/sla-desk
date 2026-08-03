@@ -102,13 +102,22 @@ func TestTheClerkWebhookIsNotBehindRequireAuth(t *testing.T) {
 // The mirror image: the ticket routes must not be reachable without a session.
 // clerkhttp.WithHeaderAuthorization on its own would let all of these through,
 // so this is what proves RequireAuth is mounted behind it.
+//
+// It also proves each route is mounted at all, which is not obvious and is
+// worth stating: a path inside this group that no handler is registered for
+// answers 404, because chi routes before it runs the group's middleware. So a
+// 401 here means the route exists *and* is protected, and a handler someone
+// forgot to wire — which happened between T8 and T10 — shows up as a 404.
 func TestTheTicketRoutesRequireASession(t *testing.T) {
 	router := testRouter(t)
+
+	const someTicket = "/44444444-4444-4444-4444-444444444444"
 
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodPost, TicketsPath},
 		{http.MethodGet, TicketsPath},
-		{http.MethodGet, TicketsPath + "/44444444-4444-4444-4444-444444444444"},
+		{http.MethodGet, TicketsPath + someTicket},
+		{http.MethodGet, TicketsPath + someTicket + TicketHistorySuffix},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -248,4 +257,10 @@ func (routerFakeReader) ListTicketsByRequester(context.Context, store.ListTicket
 
 func (routerFakeReader) GetTicketForRequester(context.Context, store.GetTicketForRequesterParams) (store.Ticket, error) {
 	return store.Ticket{}, nil
+}
+
+func (routerFakeReader) ListTicketStatusHistoryForRequester(
+	context.Context, store.ListTicketStatusHistoryForRequesterParams,
+) ([]store.TicketStatusHistory, error) {
+	return nil, nil
 }
