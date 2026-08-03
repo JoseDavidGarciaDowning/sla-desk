@@ -168,3 +168,124 @@ func policyFrom(row SlaPolicy) (sla.Policy, error) {
 		Schedule: schedule,
 	}, nil
 }
+
+// ErrTicketNotFound means no ticket has that id.
+var ErrTicketNotFound = errors.New("store: no ticket with that id")
+
+// StatusChange is a request to move a ticket.
+type StatusChange struct {
+	TicketID  pgtype.UUID
+	Target    ticket.Status
+	ActorID   pgtype.UUID
+	ActorRole ticket.Role
+	Reason    *string
+}
+
+// Transition moves a ticket and rebuilds its SLA clock, in one transaction.
+//
+// The order is fixed by docs/adr/0001 and is the reason this method exists
+// rather than a handler doing four calls:
+//
+//  1. insert the history row
+//  2. read the ticket's full history — after the insert, never before
+//  3. rebuild the clock from it
+//  4. write the cache
+//
+// Reading the history before the insert leaves the cache exactly one event
+// behind: a plausible-looking corruption that no unit test of the arithmetic
+// would ever find, because the arithmetic is right and the input is stale.
+func (r *TicketRepo) Transition(ctx context.Context, in StatusChange) (Ticket, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return Ticket{}, fmt.Errorf("begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	q := New(tx)
+
+	now, err := q.TransactionTime(ctx)
+	if err != nil {
+		return Ticket{}, fmt.Errorf("reading the transaction time: %w", err)
+	}
+
+	current, err := q.GetTicketForUpdate(ctx, in.TicketID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Ticket{}, ErrTicketNotFound
+		}
+		return Ticket{}, fmt.Errorf("locking the ticket: %w", err)
+	}
+
+	// Legality and permission are decided by the domain, which touches no
+	// database and knows nothing about this transaction.
+	target, err := ticket.Transition(current.Status, in.Target, in.ActorRole)
+	if err != nil {
+		return Ticket{}, err
+	}
+
+	policy, err := r.policyOf(ctx, q, current.SlaPolicyID)
+	if err != nil {
+		return Ticket{}, err
+	}
+
+	// 1. The fact.
+	from := current.Status
+	if _, err := q.InsertTicketStatusHistory(ctx, InsertTicketStatusHistoryParams{
+		TicketID:   in.TicketID,
+		FromStatus: &from,
+		ToStatus:   target,
+		ActorID:    in.ActorID,
+		ActorRole:  in.ActorRole,
+		Reason:     in.Reason,
+		CreatedAt:  now,
+	}); err != nil {
+		return Ticket{}, fmt.Errorf("inserting the history row: %w", err)
+	}
+
+	// 2. The whole history, including the row just written.
+	rows, err := q.ListTicketStatusHistory(ctx, in.TicketID)
+	if err != nil {
+		return Ticket{}, fmt.Errorf("reading the history: %w", err)
+	}
+
+	// 3. The clock, from the fact rather than from the previous cache.
+	history := make([]sla.StatusChange, len(rows))
+	for i, row := range rows {
+		history[i] = sla.StatusChange{To: row.ToStatus, At: row.CreatedAt}
+	}
+	state, err := sla.Reconstruct(policy, history)
+	if err != nil {
+		return Ticket{}, fmt.Errorf("rebuilding the clock: %w", err)
+	}
+
+	// 4. The cache.
+	updated, err := q.UpdateTicketClock(ctx, UpdateTicketClockParams{
+		ID:                in.TicketID,
+		Status:            target,
+		SlaConsumedMicros: state.BudgetUsed.Microseconds(),
+		SlaClockStartedAt: state.RunningSince,
+		SlaDueAt:          state.DueAt,
+		UpdatedAt:         now,
+	})
+	if err != nil {
+		return Ticket{}, fmt.Errorf("updating the cache: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return Ticket{}, fmt.Errorf("commit: %w", err)
+	}
+	return updated, nil
+}
+
+// policyOf reads the policy a ticket was created under.
+//
+// By id, not by priority: the policy is snapshotted at creation precisely so
+// that editing one does not silently move the deadlines of tickets that already
+// exist.
+func (r *TicketRepo) policyOf(ctx context.Context, q *Queries, id int64) (sla.Policy, error) {
+	row, err := q.GetSLAPolicyByID(ctx, id)
+	if err != nil {
+		return sla.Policy{}, fmt.Errorf("reading policy %d: %w", id, err)
+	}
+	return policyFrom(row)
+}

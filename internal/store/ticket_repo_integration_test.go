@@ -353,3 +353,158 @@ func TestCursorSeparatesTicketsSharingATimestamp(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+// The fact and the cache are one write or neither. docs/spec.md §4.1: no
+// history row, no transition.
+//
+// The cache update is forced to fail by pointing the ticket at a policy whose
+// schedule internal/sla cannot interpret, which fails after the history row has
+// already been inserted. If the two were in separate transactions the history
+// row would survive and the ticket would carry a status its history never
+// records.
+func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
+	f := newRepoFixture(t)
+	q := store.New(f.pool)
+
+	tk, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	before, err := q.ListTicketStatusHistory(f.ctx, tk.ID)
+	if err != nil {
+		t.Fatalf("reading history: %v", err)
+	}
+
+	// A policy the code cannot interpret. The CHECK constraint normally makes
+	// this impossible, which is why it has to be introduced deliberately.
+	if _, err := f.pool.Exec(f.ctx,
+		`ALTER TABLE sla_policies DROP CONSTRAINT sla_policies_schedule_mode_valid`); err != nil {
+		t.Fatalf("relaxing the constraint: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := f.pool.Exec(context.Background(),
+			`UPDATE sla_policies SET schedule_mode = '24x7' WHERE schedule_mode <> '24x7';
+			 ALTER TABLE sla_policies ADD CONSTRAINT sla_policies_schedule_mode_valid
+			   CHECK (schedule_mode IN ('24x7'))`); err != nil {
+			t.Errorf("restoring the constraint: %v", err)
+		}
+	})
+	if _, err := f.pool.Exec(f.ctx,
+		`UPDATE sla_policies SET schedule_mode = 'business_hours' WHERE id = $1`, tk.SlaPolicyID); err != nil {
+		t.Fatalf("breaking the policy: %v", err)
+	}
+
+	if _, err := f.repo.Transition(f.ctx, store.StatusChange{
+		TicketID:  tk.ID,
+		Target:    ticket.StatusPending,
+		ActorID:   f.requester,
+		ActorRole: ticket.RoleAdmin,
+	}); !errors.Is(err, store.ErrUnsupportedSchedule) {
+		t.Fatalf("err = %v, want ErrUnsupportedSchedule", err)
+	}
+
+	after, err := q.ListTicketStatusHistory(f.ctx, tk.ID)
+	if err != nil {
+		t.Fatalf("reading history: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("history grew from %d to %d rows on a transition that failed", len(before), len(after))
+	}
+
+	stored, err := q.GetTicketForRequester(f.ctx, store.GetTicketForRequesterParams{
+		ID: tk.ID, RequesterID: f.requester,
+	})
+	if err != nil {
+		t.Fatalf("reading the ticket: %v", err)
+	}
+	if stored.Status != ticket.StatusOpen {
+		t.Errorf("status = %q, want it unchanged at open", stored.Status)
+	}
+}
+
+// A closed ticket is terminal, and the database is not the thing enforcing it —
+// the domain is. This is the end-to-end proof that the pure state machine is
+// actually consulted by the write path.
+func TestTransitionRefusesToLeaveClosed(t *testing.T) {
+	f := newRepoFixture(t)
+
+	tk, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	for _, target := range []ticket.Status{ticket.StatusResolved, ticket.StatusClosed} {
+		tk, err = f.repo.Transition(f.ctx, store.StatusChange{
+			TicketID: tk.ID, Target: target, ActorID: f.requester, ActorRole: ticket.RoleAdmin,
+		})
+		if err != nil {
+			t.Fatalf("moving to %s: %v", target, err)
+		}
+	}
+
+	_, err = f.repo.Transition(f.ctx, store.StatusChange{
+		TicketID: tk.ID, Target: ticket.StatusOpen, ActorID: f.requester, ActorRole: ticket.RoleAdmin,
+	})
+	if !errors.Is(err, ticket.ErrInvalidTransition) {
+		t.Errorf("err = %v, want ErrInvalidTransition — closed is terminal", err)
+	}
+}
+
+// Pausing stops the clock and clears the deadline; resuming starts it again
+// from the budget already spent. This is the behaviour the whole SLA model
+// exists for, and until now nothing exercised it.
+func TestPausingStopsTheClockAndResumingKeepsWhatWasSpent(t *testing.T) {
+	f := newRepoFixture(t)
+
+	tk, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityUrgent))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+
+	paused, err := f.repo.Transition(f.ctx, store.StatusChange{
+		TicketID: tk.ID, Target: ticket.StatusPending, ActorID: f.requester, ActorRole: ticket.RoleAdmin,
+	})
+	if err != nil {
+		t.Fatalf("pausing: %v", err)
+	}
+
+	if paused.SlaDueAt != nil {
+		t.Error("a pending ticket carries a deadline and can therefore breach")
+	}
+	if paused.SlaClockStartedAt != nil {
+		t.Error("a pending ticket still has a running clock")
+	}
+	spent := paused.SlaConsumedMicros
+	if spent <= 0 {
+		t.Fatalf("consumed = %d micros after time passed in open", spent)
+	}
+
+	// Time spent waiting on the customer must not consume budget.
+	time.Sleep(20 * time.Millisecond)
+
+	resumed, err := f.repo.Transition(f.ctx, store.StatusChange{
+		TicketID: tk.ID, Target: ticket.StatusOpen, ActorID: f.requester, ActorRole: ticket.RoleCustomer,
+	})
+	if err != nil {
+		t.Fatalf("resuming: %v", err)
+	}
+
+	if resumed.SlaConsumedMicros != spent {
+		t.Errorf("consumed = %d micros after the pause, was %d before — the pause was billed",
+			resumed.SlaConsumedMicros, spent)
+	}
+	if resumed.SlaDueAt == nil {
+		t.Fatal("no deadline after resuming")
+	}
+
+	// The deadline is what is left of the budget, counted from now — not the
+	// original deadline shifted, and not the full budget again.
+	remaining := 60*time.Minute - time.Duration(spent)*time.Microsecond
+	want := resumed.SlaClockStartedAt.Add(remaining)
+	if !resumed.SlaDueAt.Equal(want) {
+		t.Errorf("deadline %v, want %v (%v of budget left)", resumed.SlaDueAt, want, remaining)
+	}
+}

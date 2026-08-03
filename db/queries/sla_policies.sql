@@ -12,3 +12,10 @@ WHERE priority = $1
 SELECT * FROM sla_policies
 WHERE active
 ORDER BY budget_minutes;
+
+-- name: GetSLAPolicyByID :one
+-- The policy a ticket was snapshotted with. Looked up by id rather than by
+-- priority so that editing a policy does not retroactively move the deadlines
+-- of tickets created under the old budget.
+SELECT * FROM sla_policies
+WHERE id = $1;

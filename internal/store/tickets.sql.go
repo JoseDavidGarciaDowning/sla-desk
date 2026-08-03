@@ -118,6 +118,45 @@ func (q *Queries) GetTicketForRequester(ctx context.Context, arg GetTicketForReq
 	return i, err
 }
 
+const getTicketForUpdate = `-- name: GetTicketForUpdate :one
+SELECT id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at FROM tickets
+WHERE id = $1
+FOR UPDATE
+`
+
+// Reads a ticket and holds it for the rest of the transaction.
+//
+// FOR UPDATE, not a plain read. Two transitions arriving at once — an agent
+// resolving while the customer replies — would otherwise both read the same
+// current status, both compute a clock from it, and the second commit would
+// overwrite the first with a cache that never accounted for it. The lock makes
+// them queue.
+//
+// Not scoped by requester: an agent transitions tickets that are not theirs.
+// Authorisation for that lives in the RBAC matrix, not in this query.
+func (q *Queries) GetTicketForUpdate(ctx context.Context, id pgtype.UUID) (Ticket, error) {
+	row := q.db.QueryRow(ctx, getTicketForUpdate, id)
+	var i Ticket
+	err := row.Scan(
+		&i.ID,
+		&i.RequesterID,
+		&i.AssigneeID,
+		&i.Title,
+		&i.Description,
+		&i.Category,
+		&i.Priority,
+		&i.Status,
+		&i.SlaPolicyID,
+		&i.SlaConsumedMicros,
+		&i.SlaClockStartedAt,
+		&i.SlaDueAt,
+		&i.SlaBreachedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listTicketsByRequester = `-- name: ListTicketsByRequester :many
 SELECT id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at FROM tickets
 WHERE requester_id = $1
@@ -186,4 +225,61 @@ func (q *Queries) ListTicketsByRequester(ctx context.Context, arg ListTicketsByR
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateTicketClock = `-- name: UpdateTicketClock :one
+UPDATE tickets
+SET status               = $1,
+    sla_consumed_micros  = $2,
+    sla_clock_started_at = $3,
+    sla_due_at           = $4,
+    updated_at           = $5
+WHERE id = $6
+RETURNING id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at
+`
+
+type UpdateTicketClockParams struct {
+	Status            ticket.Status
+	SlaConsumedMicros int64
+	SlaClockStartedAt *time.Time
+	SlaDueAt          *time.Time
+	UpdatedAt         time.Time
+	ID                pgtype.UUID
+}
+
+// Writes the derived cache. Step 4 of the order fixed by docs/adr/0001, and it
+// runs only after the history row exists and the clock has been rebuilt from
+// the history including it.
+//
+// The two CHECK constraints on tickets mean this cannot store an incoherent
+// pair: a status other than open with a running clock, or a clock without a
+// deadline, is rejected by the database rather than trusted to the caller.
+func (q *Queries) UpdateTicketClock(ctx context.Context, arg UpdateTicketClockParams) (Ticket, error) {
+	row := q.db.QueryRow(ctx, updateTicketClock,
+		arg.Status,
+		arg.SlaConsumedMicros,
+		arg.SlaClockStartedAt,
+		arg.SlaDueAt,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	var i Ticket
+	err := row.Scan(
+		&i.ID,
+		&i.RequesterID,
+		&i.AssigneeID,
+		&i.Title,
+		&i.Description,
+		&i.Category,
+		&i.Priority,
+		&i.Status,
+		&i.SlaPolicyID,
+		&i.SlaConsumedMicros,
+		&i.SlaClockStartedAt,
+		&i.SlaDueAt,
+		&i.SlaBreachedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

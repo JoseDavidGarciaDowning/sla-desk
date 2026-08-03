@@ -50,3 +50,35 @@ WHERE requester_id = @requester_id
   )
 ORDER BY created_at DESC, id DESC
 LIMIT @page_size;
+
+-- name: GetTicketForUpdate :one
+-- Reads a ticket and holds it for the rest of the transaction.
+--
+-- FOR UPDATE, not a plain read. Two transitions arriving at once — an agent
+-- resolving while the customer replies — would otherwise both read the same
+-- current status, both compute a clock from it, and the second commit would
+-- overwrite the first with a cache that never accounted for it. The lock makes
+-- them queue.
+--
+-- Not scoped by requester: an agent transitions tickets that are not theirs.
+-- Authorisation for that lives in the RBAC matrix, not in this query.
+SELECT * FROM tickets
+WHERE id = $1
+FOR UPDATE;
+
+-- name: UpdateTicketClock :one
+-- Writes the derived cache. Step 4 of the order fixed by docs/adr/0001, and it
+-- runs only after the history row exists and the clock has been rebuilt from
+-- the history including it.
+--
+-- The two CHECK constraints on tickets mean this cannot store an incoherent
+-- pair: a status other than open with a running clock, or a clock without a
+-- deadline, is rejected by the database rather than trusted to the caller.
+UPDATE tickets
+SET status               = @status,
+    sla_consumed_micros  = @sla_consumed_micros,
+    sla_clock_started_at = @sla_clock_started_at,
+    sla_due_at           = @sla_due_at,
+    updated_at           = @updated_at
+WHERE id = @id
+RETURNING *;

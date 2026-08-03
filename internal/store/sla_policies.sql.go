@@ -35,6 +35,29 @@ func (q *Queries) GetActiveSLAPolicyByPriority(ctx context.Context, priority tic
 	return i, err
 }
 
+const getSLAPolicyByID = `-- name: GetSLAPolicyByID :one
+SELECT id, name, priority, budget_minutes, schedule_mode, active, created_at FROM sla_policies
+WHERE id = $1
+`
+
+// The policy a ticket was snapshotted with. Looked up by id rather than by
+// priority so that editing a policy does not retroactively move the deadlines
+// of tickets created under the old budget.
+func (q *Queries) GetSLAPolicyByID(ctx context.Context, id int64) (SlaPolicy, error) {
+	row := q.db.QueryRow(ctx, getSLAPolicyByID, id)
+	var i SlaPolicy
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Priority,
+		&i.BudgetMinutes,
+		&i.ScheduleMode,
+		&i.Active,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listActiveSLAPolicies = `-- name: ListActiveSLAPolicies :many
 SELECT id, name, priority, budget_minutes, schedule_mode, active, created_at FROM sla_policies
 WHERE active
