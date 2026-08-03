@@ -63,7 +63,10 @@ func Reconstruct(p Policy, history []StatusChange) (ClockState, error) {
 
 	// Accumulate closed open-state intervals. Keep the current interval open.
 	for _, change := range history {
-		running := change.To == ticket.StatusOpen
+		// The status decides, not this package: which statuses consume budget
+		// is a fact about tickets, and duplicating it here is how the two
+		// drift apart.
+		running := change.To.RunsClock()
 
 		switch {
 		case running && runningSince == nil:
