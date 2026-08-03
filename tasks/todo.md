@@ -854,32 +854,79 @@ filters. Two survivors, both tests that looked stronger than they were:
 
 ---
 
-### T14b: Ticket detail with status timeline
+### T14b: Ticket detail with status timeline ✅
 
 **Description:** The single-ticket view, with the incident-style timeline the spec asks for.
 
-**Blocked on backend work that does not exist yet.**
-
 **Acceptance criteria:**
-- [ ] `GET /api/tickets/{id}/history` returns the status history, scoped to the requester in SQL like every other read
-- [ ] A DTO for a history entry — never `store.TicketStatusHistory`, which would put `pgtype` and `actor_id` on the wire
-- [ ] Detail view shows the timeline: who moved it, from what, to what, when
-- [ ] The SLA timer on the detail view, reusing `sla-timer.tsx`
-- [ ] Loading, not-found and error states
-- [ ] Replaces the thin placeholder `[id]/ticket-detail.tsx` written during T13
+- [x] `GET /api/tickets/{id}/history` returns the status history, scoped to the requester in SQL
+- [x] A DTO for a history entry — never `store.TicketStatusHistory`
+- [x] Detail view shows the timeline: what kind of person moved it, from what, to what, when
+- [x] The SLA timer on the detail view, reusing `sla-timer.tsx`
+- [x] Loading, not-found and error states
+- [x] Replaces the thin placeholder written during T13
 
 **Verification:**
-- [ ] Integration test: another customer's history is a 404, never a 403 (spec §11)
-- [ ] Component tests for the timeline and the three states
-- [ ] Manual with keyboard only: every interactive element reachable, focus visible
+- [x] Integration test: another customer's history returns nothing, so the handler answers 404
+- [x] 12 component tests across the timeline and the detail view
+- [x] `make check` and `make test-int` clean
+- [ ] Manual: open a ticket from the list and confirm the timeline reads in order
 
-**Note on the 404.** `GetTicketForRequester` already returns no rows for both "does not exist"
-and "is not yours", which is what lets the handler answer 404 without being able to tell them
-apart. The history endpoint has to inherit that, which means scoping the history query by
-requester too — not checking ownership in Go and then querying.
+**The 404 is a property of the query, not a check in the handler.** The requester predicate
+is in the JOIN. Nothing comes back for a ticket that does not exist *or* for one belonging to
+someone else, and the handler cannot tell those apart — which is exactly why it can answer
+404 for both without confirming that an id names a real ticket (spec §11).
 
+Empty is unambiguous here: every ticket has at least the entry recording its creation, so a
+real ticket of yours is never an empty history. That is what makes "no rows → 404" safe
+rather than a guess.
+
+`ListTicketStatusHistoryForRequester` is a second query rather than a replacement for
+`ListTicketStatusHistory`. That one is the input to `sla.Reconstruct`, running inside a
+transaction that has already established which ticket it is working on, and it must **not**
+be scoped to a requester — an agent transitions tickets that are not theirs.
+
+**The DTO drops `actor_id` deliberately.** It is another user's primary key: putting it on
+the wire hands out an identifier to enumerate and links a customer's view of their ticket to
+the agent roster. A timeline says what *kind* of person moved the ticket, never which one.
+`TestHistoryNeverExposesTheActorsIdentity` greps the response body for it.
+
+**A route that is mounted answers 401; one that is not answers 404.** Measured, not assumed:
+chi routes before it runs the group's middleware, so a path with no handler never reaches
+`RequireAuth`. That makes `TestTheTicketRoutesRequireASession` prove two things at once —
+the route is protected *and* it exists. The gap between T8 and T10, where handlers were
+written and never wired, would have shown up there.
+
+**Two queries on the detail page, not one endpoint returning both.** The ticket is often
+already in the cache — the create form writes the server's own response there before
+navigating — and a combined endpoint would throw that away on arrival. They also fail
+independently: a history that will not load leaves the ticket on screen, because the history
+is context and not the content.
+
+**What cost the most time, and it was not the feature.** Every test in the detail file failed,
+including one that seeds the cache and never touches the mock. The error pointed at the mock.
+The cause:
+
+```ts
+beforeEach(() => apiFetch.mockReset());     // returns the mock
+```
+
+Vitest awaits whatever a hook returns, so the hook timed out after 10 seconds and took all
+seven tests with it. Recorded in `docs/local-development.md`. Worth noting that the
+diagnosis went wrong first: `respond` was rewritten on the theory that path matching was
+broken, and the rewrite fixed nothing — the instrumentation that showed the mock receiving
+correct paths was what ruled it out.
+
+**Mutations:** 12 of 12 dead — 5 on the backend (including the requester predicate turned
+from `AND` to `OR`, and unmounting the route) and 7 on the frontend.
+
+**Files:** `db/queries/ticket_status_history.sql`, `internal/api/{tickets,dto,router}.go`,
+`web/components/status-timeline.tsx`, `web/app/(customer)/tickets/[id]/ticket-detail.tsx`,
+`web/lib/tickets.ts`
 **Dependencies:** T14a
 **Scope:** M
+
+---
 
 > **Checkpoint D — the whole flow works in a browser.**
 

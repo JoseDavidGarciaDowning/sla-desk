@@ -161,6 +161,19 @@ hit in production mode is probably just not being logged.
 Dropping `required` from the title left the test green. Every required-field test fills
 the other fields, so only the field under test can be what blocks it.
 
+**Never write a Vitest hook with a concise arrow body that returns something.**
+
+```ts
+beforeEach(() => apiFetch.mockReset());   // hangs for 10s, then every test fails
+beforeEach(() => { apiFetch.mockReset(); });  // correct
+```
+
+`mockReset()` returns the mock, the arrow returns it, and Vitest awaits whatever a hook
+returns. The hook times out after 10 seconds and **every test in the file fails**, each with
+an error pointing at the hook rather than at the arrow — so the symptom looks like the
+component or the mock being broken. It cost a while to find. The same applies to
+`afterEach(() => vi.clearAllMocks())`.
+
 ---
 
 ## 6. Checking things by hand
