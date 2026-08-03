@@ -362,6 +362,7 @@ func TestCreationHistoryRowHasNoFromStatus(t *testing.T) {
 		ToStatus:   ticket.StatusOpen,
 		ActorID:    actor,
 		ActorRole:  ticket.RoleCustomer,
+		CreatedAt:  time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatalf("inserting the creation row: %v", err)
@@ -387,6 +388,7 @@ func TestSelfTransitionIsRejected(t *testing.T) {
 		ToStatus:   ticket.StatusOpen,
 		ActorID:    actor,
 		ActorRole:  ticket.RoleCustomer,
+		CreatedAt:  time.Now().UTC(),
 	})
 
 	if name := rejectedBy(t, err); name != "ticket_status_history_is_a_real_transition" {
@@ -426,7 +428,7 @@ func TestHistoryComesBackInTransitionOrder(t *testing.T) {
 	for _, s := range sequence {
 		if _, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
 			TicketID: tk.ID, FromStatus: s.from, ToStatus: s.to,
-			ActorID: actor, ActorRole: ticket.RoleAgent,
+			ActorID: actor, ActorRole: ticket.RoleAgent, CreatedAt: time.Now().UTC(),
 		}); err != nil {
 			t.Fatalf("inserting %v -> %s: %v", s.from, s.to, err)
 		}
@@ -457,14 +459,14 @@ func TestHistoryIsOrderedByEventTimeNotByID(t *testing.T) {
 
 	first, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
 		TicketID: tk.ID, FromStatus: nil, ToStatus: ticket.StatusOpen,
-		ActorID: actor, ActorRole: ticket.RoleAgent,
+		ActorID: actor, ActorRole: ticket.RoleAgent, CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatalf("first row: %v", err)
 	}
 	second, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
 		TicketID: tk.ID, FromStatus: ptr(ticket.StatusOpen), ToStatus: ticket.StatusPending,
-		ActorID: actor, ActorRole: ticket.RoleAgent,
+		ActorID: actor, ActorRole: ticket.RoleAgent, CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatalf("second row: %v", err)
@@ -503,7 +505,7 @@ func TestActorRoleIsRecordedIndependentlyOfTheUsersCurrentRole(t *testing.T) {
 
 	if _, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
 		TicketID: tk.ID, FromStatus: nil, ToStatus: ticket.StatusOpen,
-		ActorID: actor, ActorRole: ticket.RoleCustomer,
+		ActorID: actor, ActorRole: ticket.RoleCustomer, CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("inserting history: %v", err)
 	}

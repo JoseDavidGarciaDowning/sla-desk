@@ -7,6 +7,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	ticket "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -19,9 +20,10 @@ INSERT INTO ticket_status_history (
     to_status,
     actor_id,
     actor_role,
-    reason
+    reason,
+    created_at
 )
-VALUES ($1, $2, $3, $4, $5, $6)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING id, ticket_id, from_status, to_status, actor_id, actor_role, reason, created_at
 `
 
@@ -32,6 +34,7 @@ type InsertTicketStatusHistoryParams struct {
 	ActorID    pgtype.UUID
 	ActorRole  ticket.Role
 	Reason     *string
+	CreatedAt  time.Time
 }
 
 // Written in the same transaction as the ticket update it describes. This table
@@ -39,6 +42,14 @@ type InsertTicketStatusHistoryParams struct {
 // cache of it (docs/spec.md §4.2).
 //
 // from_status is NULL only on the row that records creation.
+//
+// created_at is a parameter rather than the column default, and that is what
+// makes the SLA clock reconstructible. The clock is rebuilt by measuring
+// intervals between these timestamps, and the sla_* columns on tickets cache
+// the result. If the cache were computed from one instant and this row stamped
+// with another, the two would disagree by that difference and the consistency
+// test in docs/spec.md §9 could never hold. The caller reads now() once per
+// transaction and passes the same value to both.
 func (q *Queries) InsertTicketStatusHistory(ctx context.Context, arg InsertTicketStatusHistoryParams) (TicketStatusHistory, error) {
 	row := q.db.QueryRow(ctx, insertTicketStatusHistory,
 		arg.TicketID,
@@ -47,6 +58,7 @@ func (q *Queries) InsertTicketStatusHistory(ctx context.Context, arg InsertTicke
 		arg.ActorID,
 		arg.ActorRole,
 		arg.Reason,
+		arg.CreatedAt,
 	)
 	var i TicketStatusHistory
 	err := row.Scan(

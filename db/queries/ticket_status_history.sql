@@ -4,15 +4,24 @@
 -- cache of it (docs/spec.md §4.2).
 --
 -- from_status is NULL only on the row that records creation.
+--
+-- created_at is a parameter rather than the column default, and that is what
+-- makes the SLA clock reconstructible. The clock is rebuilt by measuring
+-- intervals between these timestamps, and the sla_* columns on tickets cache
+-- the result. If the cache were computed from one instant and this row stamped
+-- with another, the two would disagree by that difference and the consistency
+-- test in docs/spec.md §9 could never hold. The caller reads now() once per
+-- transaction and passes the same value to both.
 INSERT INTO ticket_status_history (
     ticket_id,
     from_status,
     to_status,
     actor_id,
     actor_role,
-    reason
+    reason,
+    created_at
 )
-VALUES ($1, $2, $3, $4, $5, $6)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
 -- name: ListTicketStatusHistory :many
