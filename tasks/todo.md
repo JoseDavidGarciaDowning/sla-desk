@@ -693,25 +693,92 @@ status.
 
 ---
 
-### T13: Create-ticket form
+### T13: Create-ticket form ✅
 
 **Description:** The form, with client validation matching the server's rules.
 
 **Acceptance criteria:**
-- [ ] Fields: title, description, category, priority — validated with a schema shared in one place
-- [ ] Server-side `400` field errors render next to their fields
-- [ ] The submit button is disabled while in flight; double submission is impossible
-- [ ] On success, the ticket list cache is invalidated and the user lands on the new ticket
-- [ ] Error state is recoverable — a failure never loses what the user typed
+- [x] Fields: title, description, category, priority — validated with a schema shared in one place
+- [x] Server-side `400` field errors render next to their fields
+- [x] The submit button is disabled while in flight; double submission is impossible
+- [x] On success, the ticket list cache is invalidated and the user lands on the new ticket
+- [x] Error state is recoverable — a failure never loses what the user typed
 
 **Verification:**
-- [ ] Component tests: invalid input blocks submit; server errors render
-- [ ] `pnpm build` and `pnpm lint` clean
+- [x] Component tests: invalid input blocks submit; server errors render
+- [x] `pnpm build` and `pnpm lint` clean
 - [ ] Manual: create a ticket end to end against the deployed API
 
+**What "a schema shared in one place" turned out to mean.**
+
+Not a Zod schema. The task was written expecting one, and a Zod schema restating
+`maxTitleLength`, the category list and the priority list in TypeScript is precisely the copy
+that drifts: the server tightens a bound, the form keeps accepting the old one, and a user
+meets a `400` the form promised could not happen.
+
+The forcing observation is that **the copy is not optional**. A form cannot render a category
+select without knowing the categories. So the question was never whether to duplicate, only
+whether the duplicate is generated or transcribed.
+
+`cmd/gencontract` writes `web/lib/contract.ts` from the same declarations `internal/api`
+validates against. `TestGeneratedContractIsUpToDate` fails while the file is stale, and
+`TestContractBoundsAreTheOnesValidationEnforces` proves the published bounds by **calling
+`Validate` at each boundary** rather than comparing a constant to itself — a contract that
+said 100 while the server enforced 200 would fail there.
+
+Client-side validation is then only `required` and `maxlength`, both native, both fed from the
+generated file. Everything else — trimming, whitespace-only text, the exact count — is the
+API's, and its sentences are rendered verbatim from the RFC 9457 `errors` member, which
+`ApiError.fieldErrors` now carries.
+
+**Why there is no optimistic update, despite §9 listing one.**
+
+`docs/spec.md` §9 lists "optimistic update + rollback paths" under frontend tests. That row
+belongs to **replies**, in slice 2 — the project brief said "UI optimista para las
+respuestas". It does not fit creation.
+
+Optimism pays when the client can predict the result and the user stays where they are.
+Creating a ticket satisfies neither: the server assigns the id, the status, the timestamps and
+the SLA deadline. An optimistic row would be mostly invented, would visibly change shape once
+the real one arrived, and the id it lacks is the one thing needed to navigate to it.
+
+What replaces it costs less and lies about nothing: the response is the real ticket, so it is
+written straight into the detail cache and the page it lands on renders with no fetch.
+Optimism's benefit, no rollback path to maintain. `invalidateQueries` targets
+`ticketKeys.list()` and **not** `ticketKeys.all` — `all` is a prefix of `list`, so it looks
+equivalent and passes the obvious test, while also marking the ticket seeded one line earlier
+as stale.
+
+**What the mutations caught.** Eight of eleven died first time. The three that survived were
+each a test that looked stronger than it was:
+
+| Mutation | Why it survived | Fix |
+|---|---|---|
+| Drop `required` from the title | The empty-form test was blocked by `description` and `category` anyway | One case per field, every other field filled |
+| Neutralise the `ApiError` branch of the form-level message | The test only asserted an alert existed, not what it said | Assert the status appears; add the network-failure case |
+| `ticketKeys.list()` → `ticketKeys.all` | `all` is a prefix, so the list is still invalidated | Also assert the seeded detail is **not** invalidated |
+
+**Found while verifying, not fixed:** `internal/auth/middleware.go:52` and `:58` write a bare
+`401` and `500` with no body, while every other error in the API is an RFC 9457 problem
+document. Confirmed against the running API — `POST /api/tickets` with no token returns
+`Content-Length: 0`. It cannot be fixed by calling `api.WriteProblem`, because `api` imports
+`auth` and the reverse would be an import cycle; it needs the problem writer moved somewhere
+both can import, or passed in. **Nothing in T13 is blocked by it** — a bodyless response gives
+`ApiError.fieldErrors === {}`, which is correct, and the form has its own 401 message. Worth a
+task of its own.
+
+**Deliberately out of scope.** `/tickets/[id]` exists but is thin — T14 owns it. It was built
+now because the form navigates to the ticket it created, and a success path that leads to a
+404 is not a finished success path. `Ticket` and `TicketPage` are hand-mirrored in
+`web/lib/tickets.ts`, which §8 permits; generating DTO types too would need a Go→TS type
+mapping table that no drift test could check, unlike the vocabularies.
+
 **Dependencies:** T9, T12
-**Files:** `web/app/(customer)/tickets/new/page.tsx`, `web/components/ticket-form.tsx`, `web/lib/schemas.ts`
-**Scope:** M
+**Files:** `internal/api/contract.go`, `cmd/gencontract/main.go`, `web/lib/contract.ts`,
+`web/lib/api.ts`, `web/lib/tickets.ts`, `web/lib/use-tickets.ts`,
+`web/components/ticket-form.tsx`, `web/app/(customer)/tickets/new/page.tsx`,
+`web/app/(customer)/tickets/[id]/`, `web/vitest.config.mts`
+**Scope:** L — larger than planned, because it also brought up the frontend test harness
 
 ---
 

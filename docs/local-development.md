@@ -79,11 +79,13 @@ make migrate-status
 make migrate-new name=add_comments
 
 make sqlc            # regenerate internal/store from db/queries
+make contract        # regenerate web/lib/contract.ts from the API's own bounds
 make api             # run the API
 
 make check           # lint + tests. Must pass before every commit
 make test-go         # unit tests, no database
 make test-int        # integration tests — needs `make up` first
+make web-test        # Vitest — needs `make web-install` first
 ```
 
 `goose` and `sqlc` are pinned as tool dependencies in `go.mod` and run through `go tool`.
@@ -94,7 +96,20 @@ cd web
 pnpm dev             # 3000
 pnpm build           # also type-checks
 pnpm lint
+pnpm test            # Vitest, one run
+pnpm test:watch      # Vitest, watching
 ```
+
+### The generated contract
+
+`web/lib/contract.ts` is written by `cmd/gencontract` and must never be edited by hand.
+It carries the category and priority vocabularies and the field length limits, read from
+the same declarations `internal/api` validates against — the form needs them to render
+its selects at all, so the only question was whether that copy is generated or
+transcribed.
+
+Change a bound or add a category in `internal/api/dto.go`, then run `make contract`.
+Forgetting fails `TestGeneratedContractIsUpToDate`, which `make check` runs.
 
 ---
 
@@ -140,6 +155,11 @@ disappears in a private window.
 
 **`pnpm start` logs no requests.** Only `pnpm dev` does. A route that appears not to be
 hit in production mode is probably just not being logged.
+
+**A form test that submits an entirely empty form proves nothing.** jsdom does enforce
+`required`, so the submission is blocked — by whichever field still has the attribute.
+Dropping `required` from the title left the test green. Every required-field test fills
+the other fields, so only the field under test can be what blocks it.
 
 ---
 
