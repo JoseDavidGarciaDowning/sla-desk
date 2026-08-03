@@ -853,3 +853,43 @@ mapping table that no drift test could check, unlike the vocabularies.
 **Scope:** M
 
 > **Checkpoint E — Slice 1 complete. Do not start Slice 2 until every box above is checked.**
+
+---
+
+## Refactor: one way to report an HTTP failure
+
+Not a numbered task — it came out of T13's verification, and closes the bare-401 note
+recorded there.
+
+**What was wrong.** Three ways to report an error in a service that claimed to have one:
+`WriteProblem` (problem+json, 7 calls), `http.Error` (text/plain, 6 calls in
+`webhooks.go`), and `w.WriteHeader` with no body at all (2 calls in `auth/middleware.go`).
+The third was forced: the writer lived in `internal/api`, which imports `internal/auth`, so
+the middleware could not reach it.
+
+**What was done.** `internal/httperr` now owns it, and every layer calls the same three
+functions. The webhook's `http.Error` calls went with it. Verified live:
+
+```
+POST /api/tickets, no token
+  before: 401, Content-Length: 0
+  after:  401, application/problem+json, 94 bytes
+```
+
+**The name.** `internal/shared` was proposed and rejected — see
+[ADR 0004](../docs/adr/0004-one-way-to-report-an-http-failure.md). A package named for
+being shared has an admission rule that can never reject anything. `httperr` has one that
+can: does this decide how an error appears in a response?
+
+**Also from the same investigation.** `api.contains[T ~string]` deleted — `slices.Contains`
+already did it, and `internal/ticket/transition.go` was already using it. `uuidString`,
+`join`, `encodeCursor`, `decodeCursor` and `pageSize` all checked and left alone: one
+consumer each.
+
+**The test that carries the weight** is `TestHTTPErrDependsOnNothingInThisModule`, which
+walks the import graph. Adding a single `internal/ticket` import to `httperr` kills it —
+verified by mutation. Without that test the package can drift back above a layer that needs
+it, and nothing else would notice.
+
+**Mutations:** 5 of 5 dead. Reverting either `auth` call site, reverting one webhook call,
+changing the content type, and importing `internal/ticket` into `httperr`.

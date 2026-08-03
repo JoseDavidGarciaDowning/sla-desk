@@ -463,6 +463,7 @@ Single Go module at the root (idiomatic Go), Next.js app in `web/`.
 ├── internal/
 │   ├── ticket/                # DOMAIN: state machine. No DB, no HTTP.
 │   ├── sla/                   # DOMAIN: the only deadline arithmetic. No DB, no HTTP.
+│   ├── httperr/               # what a failure looks like on the wire. Imports nothing here
 │   ├── auth/                  # Clerk verification + RBAC middleware
 │   ├── store/                 # sqlc-generated code + hand-written repos
 │   ├── api/                   # chi handlers, DTOs, request validation
@@ -491,6 +492,18 @@ Single Go module at the root (idiomatic Go), Next.js app in `web/`.
 `store`, `api`, or `database/sql`. They are pure domain and unit-testable with no
 Docker running. If a deadline calculation ever appears outside `internal/sla`, that is a
 review blocker.
+
+**The mirror rule, for `internal/httperr`:** it imports nothing from this module. It is not
+a domain package — it is allowed `net/http`, which the domain is not — but it is a leaf, and
+it has to stay one. Every layer above it reports failures through it, and a single import
+would put it above whatever it imported, out of reach of the layer that needed it next. Both
+rules are enforced by the import-graph walker in `internal/ticket/architecture_test.go`.
+See [ADR 0004](adr/0004-one-way-to-report-an-http-failure.md).
+
+**Packages are named for what they provide, never for the fact that several callers use
+them.** A package named `shared`, `common` or `util` has an admission rule that can never
+reject anything, so it only grows and its name says nothing. If an extraction is proposed as
+"shared", the concern behind it has not been identified yet.
 
 ---
 
