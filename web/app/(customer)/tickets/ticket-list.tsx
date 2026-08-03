@@ -1,36 +1,25 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import Link from "next/link";
 
 import { ApiError } from "@/lib/api";
+import { type TicketPage, ticketKeys } from "@/lib/tickets";
 import { useApiFetch } from "@/lib/use-api";
 
-/** Mirrors TicketResponse in internal/api/dto.go. */
-type Ticket = {
-  id: string;
-  title: string;
-  status: string;
-  priority: string;
-  sla_due_at: string | null;
-};
-
-type TicketPage = {
-  tickets: Ticket[];
-  next_cursor: string | null;
-};
-
 /**
- * The first authenticated call this app makes.
+ * The customer's own tickets.
  *
- * T14 replaces it with the real list. It exists now because until something
- * calls the API with a token, the token plumbing is code that has never run —
- * and an auth path nobody has exercised is not one to build a form on top of.
+ * Scoping is not done here and cannot be: the API filters by requester in SQL,
+ * so another customer's row never arrives to be filtered out.
+ *
+ * T14 owns the real version — SLA remaining, filters in the URL, pagination.
  */
 export function TicketList() {
   const apiFetch = useApiFetch();
 
   const { data, error, isPending } = useQuery({
-    queryKey: ["tickets"],
+    queryKey: ticketKeys.list(),
     queryFn: () => apiFetch<TicketPage>("/api/tickets"),
   });
 
@@ -51,8 +40,11 @@ export function TicketList() {
   if (data.tickets.length === 0) {
     return (
       <p className="text-muted-foreground">
-        No tickets yet — the create form arrives in T13. The API answered, which
-        means the session token reached it and it recognised you.
+        No tickets yet.{" "}
+        <Link href="/tickets/new" className="underline underline-offset-4">
+          Raise one
+        </Link>{" "}
+        and the SLA clock starts.
       </p>
     );
   }
@@ -60,9 +52,16 @@ export function TicketList() {
   return (
     <ul className="divide-y rounded-md border">
       {data.tickets.map((ticket) => (
-        <li key={ticket.id} className="flex justify-between px-4 py-3">
-          <span>{ticket.title}</span>
-          <span className="text-muted-foreground text-sm">{ticket.status}</span>
+        <li key={ticket.id}>
+          <Link
+            href={`/tickets/${ticket.id}`}
+            className="hover:bg-muted/50 flex items-center justify-between gap-4 px-4 py-3"
+          >
+            <span className="truncate">{ticket.title}</span>
+            <span className="text-muted-foreground shrink-0 text-sm">
+              {ticket.status}
+            </span>
+          </Link>
         </li>
       ))}
     </ul>
