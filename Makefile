@@ -55,6 +55,9 @@ migrate-new: ## Create a migration: make migrate-new name=add_tickets
 sqlc: ## Regenerate the type-safe query code from db/queries
 	go tool sqlc generate
 
+contract: ## Regenerate web/lib/contract.ts from the API's own bounds and vocabularies
+	go run ./cmd/gencontract
+
 # ── Go ───────────────────────────────────────────────────────────────────────
 
 api: ## Run the API (requires `make up`)
@@ -114,10 +117,15 @@ web-build: ## Build the Next.js app
 web-lint: ## Lint the web sources
 	cd web && pnpm lint
 
+web-test: ## Run the Vitest suites (requires `make web-install`)
+	cd web && pnpm test
+
 # ── Gates ────────────────────────────────────────────────────────────────────
 
 test: test-go ## Run every test suite
-	@if [ -d web/node_modules ]; then cd web && pnpm build; fi
+	@# The build is a test too: `next build` type-checks, and a type error is a
+	@# broken deploy. Guarded on node_modules so a Go-only clone still passes.
+	@if [ -d web/node_modules ]; then cd web && pnpm test && pnpm build; fi
 
 check: lint test ## Everything that must pass before a commit
 	@echo "check: ok"
