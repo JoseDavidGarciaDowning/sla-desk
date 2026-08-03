@@ -1,0 +1,17 @@
+{
+  "type": "user.created",
+  "object": "event",
+  "data": {
+    "id": "user_2abcDEF123",
+    "object": "user",
+    "first_name": "Grace",
+    "last_name": "Hopper",
+    "primary_email_address_id": "idn_primary",
+    "email_addresses": [
+      {"id": "idn_other", "object": "email_address", "email_address": "other@example.test"},
+      {"id": "idn_primary", "object": "email_address", "email_address": "grace@example.test"}
+    ],
+    "created_at": 1654012591514,
+    "updated_at": 1654012591514
+  }
+}
