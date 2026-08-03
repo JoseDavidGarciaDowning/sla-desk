@@ -42,8 +42,37 @@ WHERE id = $1
 -- The key is (created_at, id), not created_at alone: two tickets created in the
 -- same transaction share a timestamp, and a cursor on a non-unique key can
 -- either skip rows or repeat them.
+--
+-- status and priority are optional filters, applied here rather than in the
+-- browser. Filtering a loaded page on the client filters only that page, so
+-- with pagination it lies: "you have 3 open tickets" because the other seven
+-- were on page two. One query rather than four, so the cursor means the same
+-- thing under every combination of filters.
+--
+-- These two parameters come out as *string rather than as *ticket.Status and
+-- *ticket.Priority, and that is the least bad of three measured options. Every
+-- other column in this file carries its domain type; these do not, because
+-- sqlc will give a nullable parameter either the right type or the right
+-- nullability, not both:
+--
+--   sqlc.narg(status)::text              -> *string          (this one)
+--   status = COALESCE(sqlc.narg(status), status)
+--                                        -> ticket.Status, NOT a pointer.
+--                                           An absent filter is then the zero
+--                                           value, pgx sends '' rather than
+--                                           NULL, COALESCE('', status) is '',
+--                                           and asking for no filter returns
+--                                           no rows. Silently.
+--   ...COALESCE(NULLIF(narg, ''), col)   -> interface{}. Inference gives up.
+--
+-- A pointer says "absent" and cannot be confused with a value. Losing the
+-- domain type on two parameters costs one conversion in the handler, which the
+-- handler has to do anyway: it validates the incoming query string against the
+-- vocabulary before it gets here.
 SELECT * FROM tickets
 WHERE requester_id = @requester_id
+  AND (sqlc.narg(status)::text IS NULL OR status = sqlc.narg(status)::text)
+  AND (sqlc.narg(priority)::text IS NULL OR priority = sqlc.narg(priority)::text)
   AND (
     sqlc.narg(after_created_at)::timestamptz IS NULL
     OR (created_at, id) < (sqlc.narg(after_created_at)::timestamptz, sqlc.narg(after_id)::uuid)

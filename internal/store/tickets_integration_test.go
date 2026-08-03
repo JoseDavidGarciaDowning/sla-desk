@@ -5,6 +5,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -537,5 +538,184 @@ func TestHistoryForAnUnknownTicketIsEmpty(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("returned %d rows, want none", len(rows))
+	}
+}
+
+// newTicketWith creates a ticket at a given priority, and optionally moves it
+// out of open. Moving it is a direct UPDATE rather than a transition because
+// what is under test here is the query's WHERE clause, not the clock: going
+// through TicketRepo.Transition would drag the whole SLA reconstruction into a
+// test about filtering.
+//
+// Both clock columns are cleared along with the status, because the CHECK
+// constraints in migration 003 refuse a paused ticket that still has a running
+// clock. The test would fail on the constraint rather than on the filter.
+func newTicketWith(t *testing.T, c testContext, requester pgtype.UUID, title string,
+	priority ticket.Priority, status ticket.Status,
+) store.Ticket {
+	t.Helper()
+
+	started := time.Now().UTC()
+	due := started.Add(24 * time.Hour)
+
+	tk, err := c.q.CreateTicket(c.ctx, store.CreateTicketParams{
+		RequesterID:       requester,
+		Title:             title,
+		Description:       "body",
+		Category:          ticket.CategoryTechnical,
+		Priority:          priority,
+		SlaPolicyID:       policyIDFor(t, c, priority),
+		SlaClockStartedAt: &started,
+		SlaDueAt:          &due,
+	})
+	if err != nil {
+		t.Fatalf("creating ticket %q: %v", title, err)
+	}
+
+	if status == ticket.StatusOpen {
+		return tk
+	}
+
+	_, err = c.tx.Exec(c.ctx,
+		`UPDATE tickets
+		    SET status = $2, sla_clock_started_at = NULL, sla_due_at = NULL
+		  WHERE id = $1`,
+		tk.ID, status)
+	if err != nil {
+		t.Fatalf("moving ticket %q to %s: %v", title, status, err)
+	}
+	tk.Status = status
+	return tk
+}
+
+func policyIDFor(t *testing.T, c testContext, priority ticket.Priority) int64 {
+	t.Helper()
+	p, err := c.q.GetActiveSLAPolicyByPriority(c.ctx, priority)
+	if err != nil {
+		t.Fatalf("resolving the %s policy: %v", priority, err)
+	}
+	return p.ID
+}
+
+func titlesOf(rows []store.Ticket) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.Title
+	}
+	return out
+}
+
+// Filtering is done in SQL rather than in the browser. A page filtered on the
+// client only filters the rows already loaded, so with pagination it lies: the
+// customer sees "3 open tickets" because the other seven were on page two.
+func TestListTicketsByRequesterFiltersByStatusAndPriority(t *testing.T) {
+	c := setup(t)
+	alice := newUser(t, c, "user_alice_filters", ticket.RoleCustomer)
+
+	newTicketWith(t, c, alice, "open normal", ticket.PriorityNormal, ticket.StatusOpen)
+	newTicketWith(t, c, alice, "open urgent", ticket.PriorityUrgent, ticket.StatusOpen)
+	newTicketWith(t, c, alice, "pending normal", ticket.PriorityNormal, ticket.StatusPending)
+	newTicketWith(t, c, alice, "pending urgent", ticket.PriorityUrgent, ticket.StatusPending)
+
+	for _, tc := range []struct {
+		name     string
+		status   *string
+		priority *string
+		want     []string
+	}{
+		{
+			name: "no filter returns everything",
+			want: []string{"open normal", "open urgent", "pending normal", "pending urgent"},
+		},
+		{
+			name:   "status alone",
+			status: ptr(string(ticket.StatusOpen)),
+			want:   []string{"open normal", "open urgent"},
+		},
+		{
+			name:     "priority alone",
+			priority: ptr(string(ticket.PriorityUrgent)),
+			want:     []string{"open urgent", "pending urgent"},
+		},
+		{
+			name:     "both, which intersect",
+			status:   ptr(string(ticket.StatusPending)),
+			priority: ptr(string(ticket.PriorityUrgent)),
+			want:     []string{"pending urgent"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := c.q.ListTicketsByRequester(c.ctx, store.ListTicketsByRequesterParams{
+				RequesterID: alice,
+				Status:      tc.status,
+				Priority:    tc.priority,
+				PageSize:    50,
+			})
+			if err != nil {
+				t.Fatalf("ListTicketsByRequester: %v", err)
+			}
+
+			titles := titlesOf(got)
+			if len(titles) != len(tc.want) {
+				t.Fatalf("got %v, want %v", titles, tc.want)
+			}
+			for _, want := range tc.want {
+				if !slices.Contains(titles, want) {
+					t.Errorf("%q is missing from %v", want, titles)
+				}
+			}
+		})
+	}
+}
+
+// The requester predicate has to survive every filter, and every combination of
+// them. A WHERE clause is exactly where an AND becomes an OR, and the failure is
+// silent: the customer sees somebody else's ticket and nothing errors.
+//
+// One case per filter, not one case for the pair. Written first with only the
+// priority filter, this missed a mutation that bypassed the requester whenever
+// a *status* filter was present — the query was scoped for the case the test
+// happened to exercise and open for the one it did not.
+func TestFilteringNeverReachesAnotherCustomersTickets(t *testing.T) {
+	c := setup(t)
+	alice := newUser(t, c, "user_alice_scope", ticket.RoleCustomer)
+	bob := newUser(t, c, "user_bob_scope", ticket.RoleCustomer)
+
+	// Everything Bob has is what Alice's filters ask for. Everything Alice has
+	// is something else, so any row coming back is Bob's.
+	newTicketWith(t, c, bob, "bob's urgent open", ticket.PriorityUrgent, ticket.StatusOpen)
+	newTicketWith(t, c, alice, "alice's low pending", ticket.PriorityLow, ticket.StatusPending)
+
+	for _, tc := range []struct {
+		name     string
+		status   *string
+		priority *string
+	}{
+		{name: "no filter"},
+		{name: "status only", status: ptr(string(ticket.StatusOpen))},
+		{name: "priority only", priority: ptr(string(ticket.PriorityUrgent))},
+		{
+			name:     "both",
+			status:   ptr(string(ticket.StatusOpen)),
+			priority: ptr(string(ticket.PriorityUrgent)),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := c.q.ListTicketsByRequester(c.ctx, store.ListTicketsByRequesterParams{
+				RequesterID: alice,
+				Status:      tc.status,
+				Priority:    tc.priority,
+				PageSize:    50,
+			})
+			if err != nil {
+				t.Fatalf("ListTicketsByRequester: %v", err)
+			}
+
+			for _, row := range got {
+				if row.RequesterID != alice {
+					t.Errorf("returned %q, which is not Alice's", row.Title)
+				}
+			}
+		})
 	}
 }
