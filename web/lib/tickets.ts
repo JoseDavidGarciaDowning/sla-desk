@@ -80,6 +80,7 @@ export const ticketKeys = {
   lists: () => [...ticketKeys.all, "list"] as const,
   list: (filters: TicketFilters) => [...ticketKeys.lists(), filters] as const,
   detail: (id: string) => [...ticketKeys.all, "detail", id] as const,
+  history: (id: string) => [...ticketKeys.all, "history", id] as const,
 };
 
 /**
@@ -97,3 +98,24 @@ export function ticketQuery(filters: TicketFilters): string {
   const query = params.toString();
   return query ? `?${query}` : "";
 }
+
+/**
+ * One status change — TicketHistoryEntry in internal/api/dto.go.
+ *
+ * There is no actor id, deliberately, and none should be added: the API does
+ * not send one. A timeline says what kind of person moved the ticket, never
+ * which one.
+ */
+export type TicketHistoryEntry = {
+  /** Null on the entry that records creation — the only move from nowhere. */
+  from_status: string | null;
+  to_status: string;
+  actor_role: string;
+  reason: string | null;
+  created_at: string;
+};
+
+/** A ticket's timeline, oldest first. */
+export type TicketHistory = {
+  entries: TicketHistoryEntry[];
+};
