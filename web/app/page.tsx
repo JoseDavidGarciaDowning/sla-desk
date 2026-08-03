@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 import { ApiStatus } from "@/components/api-status";
 import { Button } from "@/components/ui/button";
 
@@ -8,9 +10,9 @@ import { Button } from "@/components/ui/button";
  * render, and the browser reaches the API on Cloud Run across origins. T12
  * replaces this with the real customer portal entry point.
  *
- * There is deliberately no link to /tickets yet. Next.js prefetches links on
- * sight, so a link to an unbuilt route produces a 404 in the console before
- * anyone clicks anything.
+ * The portal link is safe now that /tickets exists. Signed-out visitors who
+ * follow it are redirected by the (customer) layout rather than shown an empty
+ * shell.
  */
 export default function Home() {
   return (
@@ -32,6 +34,9 @@ export default function Home() {
       <ApiStatus />
 
       <div className="flex flex-wrap gap-3">
+        <Button size="lg" nativeButton={false} render={<Link href="/tickets" />}>
+          Open the portal
+        </Button>
         <Button
           size="lg"
           variant="outline"
@@ -47,10 +52,6 @@ export default function Home() {
           Read the design decisions
         </Button>
       </div>
-
-      <p className="text-sm text-muted-foreground">
-        The customer portal is not built yet — that is task T12.
-      </p>
     </main>
   );
 }
