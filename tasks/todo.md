@@ -423,22 +423,54 @@ confirmed so far.
 and write the initial history row — all in one transaction.
 
 **Acceptance criteria:**
-- [ ] Validates `title`, `description`, `category`, `priority`; invalid input returns `400` with per-field errors
-- [ ] `requester_id` comes from the auth context, **never** from the request body
-- [ ] The policy is looked up from `sla_policies` by priority and snapshotted into `sla_policy_id`
-- [ ] `sla_clock_started_at = now()` and `sla_due_at` computed by `internal/sla` — no arithmetic in the handler
-- [ ] The ticket row and the `NULL → open` history row are written in **one transaction**; a failure writes neither
+- [x] Validates `title`, `description`, `category`, `priority`; invalid input returns `400` with per-field errors
+- [x] `requester_id` comes from the auth context, **never** from the request body
+- [x] The policy is looked up from `sla_policies` by priority and snapshotted into `sla_policy_id`
+- [x] `sla_clock_started_at` and `sla_due_at` computed by `internal/sla` — no arithmetic in the handler
+- [x] The ticket row and the `NULL → open` history row are written in **one transaction**; a failure writes neither
 
 **Verification:**
-- [ ] Integration test: valid request returns `201` with the created ticket and a non-NULL `sla_due_at`
-- [ ] `sla_due_at` equals `now + policy budget` for an unpaused ticket, within tolerance
-- [ ] Each priority resolves to its seeded budget
-- [ ] A forced failure after the ticket insert leaves **zero** rows in both tables
-- [ ] A body containing `requester_id` for another user is ignored
+- [x] Valid request returns `201` with the created ticket, a `Location` header and a non-NULL `sla_due_at`
+- [x] `sla_due_at` equals `sla_clock_started_at + budget` **exactly** — not within a tolerance, because both instants are the same transaction timestamp
+- [x] Each priority resolves to its seeded budget
+- [x] An invalid actor role fails the history insert and leaves **zero** rows in both tables
+- [x] A body containing `requester_id` is ignored; the requester is the authenticated caller
+- [x] **The clock rebuilt from history equals the cached columns exactly** — the §9 property, at creation
+- [x] 10 of 11 mutations turn the matching test red; the eleventh is recorded below
 
 **Dependencies:** T5, T6, T7
-**Files:** `internal/api/tickets.go`, `internal/api/dto.go`, `internal/store/ticket_repo.go`, `internal/api/tickets_test.go`
+**Files:** `internal/api/tickets.go`, `internal/api/dto.go`, `internal/api/problem.go`,
+`internal/store/ticket_repo.go`, `db/queries/clock.sql`, plus tests
 **Scope:** M
+
+**Decisions taken during T9:**
+
+- **Time comes from Postgres, read once per transaction** (`TransactionTime`), and the same
+  instant is written to `sla_clock_started_at`, used to compute `sla_due_at`, and passed as the
+  history row's explicit `created_at`. `InsertTicketStatusHistory` gained a `created_at`
+  parameter for this. Left to the column default, the history row would carry the instant
+  Postgres stamped it and the cache the instant the deadline was computed from, and §9's
+  consistency test could never hold.
+- **Errors are RFC 9457 problem documents** (`application/problem+json`). Validation reports
+  every rejected field at once. A 500 carries no detail at all — Go error text accumulates
+  driver messages, table names and connection strings, and an error response is the cheapest
+  place to read them.
+- **`CreateTicketRequest` has no `requester_id`, `status` or `sla_*` field.** A value with
+  nowhere to land is dropped when the body is decoded, before any code can read it.
+- **A missing policy for a supported priority is a 500, not a 400.** Validation has already
+  established the priority is one of the four; no policy means our seed is wrong.
+- **The repo owns the transaction, the handler owns HTTP.** `TicketRepo.Create` is the atomic
+  unit: read the instant, resolve the policy, run it through `sla.Reconstruct`, write both rows.
+  Even the trivial "budget from zero" case goes through `Reconstruct`, so §4.2's promise that
+  deadline arithmetic exists in one place has no exception.
+
+**Known gap, deliberate:** no test covers the *choice* of clock. Swapping `TransactionTime` for
+`time.Now()` leaves the whole suite green, consistency test included, because the cache and the
+history would move together. What the app clock breaks is invisible here: the breach worker
+evaluates `sla_due_at < now()` on the database's clock, so a deadline from an API instance's
+clock is shifted by that instance's drift — measured at 928µs against a database on the same
+machine, unbounded across Cloud Run instances and a managed Postgres. The reasoning is recorded
+at the call site.
 
 ---
 
