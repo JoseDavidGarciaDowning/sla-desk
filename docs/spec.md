@@ -41,6 +41,10 @@ Ships end to end (DB → API → UI → production) before anything else is star
   upsert fallback (§4.5).
 - Create a ticket: title, description, category, priority.
 - SLA policy resolved from priority; clock starts.
+- The ticket state machine and `ticket_status_history`, with the clock pausing in
+  `pending`. **Pulled forward from slice 3 during T11** — the consistency test this project
+  owes itself is over transition *sequences*, and a slice with no transitions cannot
+  produce one.
 - Customer ticket list and ticket detail (own tickets only).
 - Deployed and reachable.
 
@@ -54,7 +58,7 @@ Each slice is deployable on its own. Order is by dependency, not by interest.
 | Slice | Content | Unlocks |
 |---|---|---|
 | 2 | Agent role, agent ticket list, assignment | RBAC beyond ownership |
-| 3 | Ticket state machine + status history | The SLA clock's source of truth |
+| ~~3~~ | ~~Ticket state machine + status history~~ | **Delivered in slice 1** — see above |
 | 4 | Comments: public replies vs internal notes | Visibility rules |
 | 5 | SLA clock pause/resume + breach worker | Background work |
 | 6 | WebSocket updates, post-commit emission | Real-time + the dual-write problem |
@@ -103,26 +107,46 @@ This section is the heart of the spec. Everything else is plumbing.
 States: `open`, `pending`, `resolved`, `closed`.
 
 ```
-            ┌──────────────── customer replies ─────────────┐
-            │                                               │
-            ▼                                               │
-        ┌───────┐  agent sets pending   ┌─────────┐         │
-   ────▶│ open  │──────────────────────▶│ pending │─────────┘
- create └───────┘◀──────────────────────└─────────┘
-            │      agent reopens              │
-            │                                 │
-            │ agent resolves      agent resolves
-            ▼                                 │
-        ┌──────────┐◀─────────────────────────┘
-        │ resolved │
-        └──────────┘
-            │    ▲
-    close   │    │ reopen (customer or agent)
-            ▼    │
-        ┌────────┴─┐
-        │  closed  │   terminal — no transitions out
-        └──────────┘
+              ┌────────── customer replies, or agent reopens ─────────┐
+              │                                                       │
+              ▼                agent sets pending                     │
+ create   ┌────────┐ ───────────────────────────────────────▶ ┌─────────┐
+ ───────▶ │  open  │                                          │ pending │
+          └────────┘                                          └─────────┘
+            ▲    │                                                  │
+            │    │ agent resolves                    agent resolves │
+   reopen   │    ▼                                                  │
+            │  ┌──────────┐ ◀───────────────────────────────────────┘
+            └─ │ resolved │
+               └──────────┘
+                    │
+                    │ agent closes
+                    ▼
+               ┌──────────┐
+               │  closed  │   terminal — nothing leaves
+               └──────────┘
 ```
+
+The edges, exhaustively, with who may take each:
+
+| From | To | Roles | Why |
+|---|---|---|---|
+| `open` | `pending` | agent, admin | Waiting on the customer; the clock pauses |
+| `open` | `resolved` | agent, admin | Answered |
+| `pending` | `open` | **customer**, agent, admin | The customer replied; the clock resumes |
+| `pending` | `resolved` | agent, admin | Answered while waiting |
+| `resolved` | `open` | **customer**, agent, admin | Reopened — the answer did not land |
+| `resolved` | `closed` | agent, admin | Finished |
+| `closed` | — | — | Terminal |
+
+A customer never calls an endpoint that sets a status. The two edges they hold are
+consequences of replying and of reopening, which is what §4.3's "only implicitly, by
+replying" means.
+
+> **Corrected 2026-08-02 (T11).** An earlier version of the diagram labelled an arrow
+> "reopen (customer or agent)" and drew it touching `closed`, which contradicts the
+> terminality stated twice below it. The edge is `resolved → open`. The table above exists
+> so the next reader does not have to decide which of the two the code should follow.
 
 Rules:
 
@@ -308,7 +332,11 @@ Clerk signs webhooks with **Svix**, not with a Clerk-specific scheme. There is n
 equivalent of the JS `verifyWebhook` helper (verified 2026-07-31: Clerk's helper ships
 only for JS frameworks). In Go we verify the `svix-id` / `svix-timestamp` /
 `svix-signature` headers with `github.com/svix/svix-webhooks/go`. Local development uses
-`svix listen` to forward to localhost — no ngrok required.
+the Clerk CLI (`npx clerk@latest webhooks listen`) to relay deliveries to localhost — no
+ngrok required, and it supersedes the `svix listen` this section originally named.
+
+**Setup, the two request paths, and the failure modes that produce a silent `401` are
+documented in [clerk-integration.md](clerk-integration.md).**
 
 **The race this introduces.** The webhook is an independent HTTP request from Clerk's
 servers to ours. The browser, meanwhile, already holds a valid JWT the instant signup
