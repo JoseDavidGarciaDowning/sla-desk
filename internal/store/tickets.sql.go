@@ -121,12 +121,39 @@ func (q *Queries) GetTicketForRequester(ctx context.Context, arg GetTicketForReq
 const listTicketsByRequester = `-- name: ListTicketsByRequester :many
 SELECT id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at FROM tickets
 WHERE requester_id = $1
-ORDER BY created_at DESC
+  AND (
+    $2::timestamptz IS NULL
+    OR (created_at, id) < ($2::timestamptz, $3::uuid)
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT $4
 `
 
-// Matches the (requester_id, created_at DESC) index exactly.
-func (q *Queries) ListTicketsByRequester(ctx context.Context, requesterID pgtype.UUID) ([]Ticket, error) {
-	rows, err := q.db.Query(ctx, listTicketsByRequester, requesterID)
+type ListTicketsByRequesterParams struct {
+	RequesterID    pgtype.UUID
+	AfterCreatedAt *time.Time
+	AfterID        pgtype.UUID
+	PageSize       int32
+}
+
+// One page of the caller's tickets, newest first.
+//
+// Keyset pagination, not OFFSET. OFFSET counts rows from the start every time,
+// so a ticket created while someone is paging shifts everything down and they
+// see a row twice — and the cost grows with the offset. Carrying the last row's
+// sort key instead makes each page independent of what happened to the ones
+// before it, and the predicate rides the (requester_id, created_at DESC) index.
+//
+// The key is (created_at, id), not created_at alone: two tickets created in the
+// same transaction share a timestamp, and a cursor on a non-unique key can
+// either skip rows or repeat them.
+func (q *Queries) ListTicketsByRequester(ctx context.Context, arg ListTicketsByRequesterParams) ([]Ticket, error) {
+	rows, err := q.db.Query(ctx, listTicketsByRequester,
+		arg.RequesterID,
+		arg.AfterCreatedAt,
+		arg.AfterID,
+		arg.PageSize,
+	)
 	if err != nil {
 		return nil, err
 	}

@@ -303,7 +303,7 @@ func TestListTicketsByRequesterExcludesOtherCustomers(t *testing.T) {
 	newTicket(t, c, alice, "Alice two")
 	newTicket(t, c, bob, "Bob one")
 
-	got, err := c.q.ListTicketsByRequester(c.ctx, alice)
+	got, err := c.q.ListTicketsByRequester(c.ctx, store.ListTicketsByRequesterParams{RequesterID: alice, PageSize: 50})
 	if err != nil {
 		t.Fatalf("ListTicketsByRequester: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestListTicketsByRequesterReturnsNewestFirst(t *testing.T) {
 	}
 	newTicket(t, c, alice, "Newer")
 
-	got, err := c.q.ListTicketsByRequester(c.ctx, alice)
+	got, err := c.q.ListTicketsByRequester(c.ctx, store.ListTicketsByRequesterParams{RequesterID: alice, PageSize: 50})
 	if err != nil {
 		t.Fatalf("ListTicketsByRequester: %v", err)
 	}

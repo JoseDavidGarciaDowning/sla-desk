@@ -243,3 +243,113 @@ func TestCreateReportsAnUnservedPriority(t *testing.T) {
 		t.Errorf("err = %v, want ErrNoPolicyForPriority", err)
 	}
 }
+
+// The stability keyset pagination exists for. Reading page one, then inserting
+// a ticket, then reading page two with the cursor must not repeat or skip a row
+// — which is exactly what OFFSET would do, because the new ticket sorts first
+// and pushes everything down by one.
+func TestPaginationIsStableAcrossAnInsert(t *testing.T) {
+	f := newRepoFixture(t)
+	q := store.New(f.pool)
+
+	const total = 5
+	for range total {
+		if _, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityNormal)); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+
+	page := func(after *store.Ticket, size int32) []store.Ticket {
+		t.Helper()
+		params := store.ListTicketsByRequesterParams{RequesterID: f.requester, PageSize: size}
+		if after != nil {
+			params.AfterCreatedAt = &after.CreatedAt
+			params.AfterID = after.ID
+		}
+		rows, err := q.ListTicketsByRequester(f.ctx, params)
+		if err != nil {
+			t.Fatalf("ListTicketsByRequester: %v", err)
+		}
+		return rows
+	}
+
+	first := page(nil, 2)
+	if len(first) != 2 {
+		t.Fatalf("first page returned %d rows, want 2", len(first))
+	}
+
+	// A ticket arrives between the two reads. With OFFSET 2 the second page
+	// would start one row too late and the caller would never see one of the
+	// original tickets.
+	if _, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityUrgent)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	second := page(&first[len(first)-1], 10)
+
+	seen := map[string]bool{}
+	for _, row := range append(append([]store.Ticket{}, first...), second...) {
+		id := string(row.ID.Bytes[:])
+		if seen[id] {
+			t.Errorf("ticket %v appeared on both pages", row.ID)
+		}
+		seen[id] = true
+	}
+
+	// The five that existed when paging started must all be accounted for. The
+	// one inserted in between sorts ahead of the cursor and is legitimately not
+	// in either page.
+	if len(seen) < total {
+		t.Errorf("saw %d distinct tickets across both pages, want at least the %d that existed", len(seen), total)
+	}
+}
+
+// Two tickets created in the same transaction share created_at exactly, which
+// is the tie the cursor's id component exists to break. Without it a page
+// boundary landing on the tie would drop a row or repeat one.
+func TestCursorSeparatesTicketsSharingATimestamp(t *testing.T) {
+	f := newRepoFixture(t)
+	q := store.New(f.pool)
+
+	// Each Create is its own transaction, so force the tie instead.
+	for range 3 {
+		if _, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityNormal)); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+	}
+	if _, err := f.pool.Exec(f.ctx,
+		`UPDATE tickets SET created_at = now() WHERE requester_id = $1`, f.requester); err != nil {
+		t.Fatalf("flattening the timestamps: %v", err)
+	}
+
+	var collected []store.Ticket
+	var after *store.Ticket
+	for range 5 { // bounded, so a cursor that fails to advance cannot spin
+		params := store.ListTicketsByRequesterParams{RequesterID: f.requester, PageSize: 1}
+		if after != nil {
+			params.AfterCreatedAt = &after.CreatedAt
+			params.AfterID = after.ID
+		}
+		rows, err := q.ListTicketsByRequester(f.ctx, params)
+		if err != nil {
+			t.Fatalf("ListTicketsByRequester: %v", err)
+		}
+		if len(rows) == 0 {
+			break
+		}
+		collected = append(collected, rows[0])
+		after = &rows[0]
+	}
+
+	if len(collected) != 3 {
+		t.Fatalf("walked %d tickets one page at a time, want 3 — the cursor cannot separate equal timestamps", len(collected))
+	}
+	seen := map[string]bool{}
+	for _, row := range collected {
+		id := string(row.ID.Bytes[:])
+		if seen[id] {
+			t.Errorf("ticket %v came back twice", row.ID)
+		}
+		seen[id] = true
+	}
+}

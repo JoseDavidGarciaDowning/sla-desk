@@ -31,7 +31,22 @@ WHERE id = $1
   AND requester_id = $2;
 
 -- name: ListTicketsByRequester :many
--- Matches the (requester_id, created_at DESC) index exactly.
+-- One page of the caller's tickets, newest first.
+--
+-- Keyset pagination, not OFFSET. OFFSET counts rows from the start every time,
+-- so a ticket created while someone is paging shifts everything down and they
+-- see a row twice — and the cost grows with the offset. Carrying the last row's
+-- sort key instead makes each page independent of what happened to the ones
+-- before it, and the predicate rides the (requester_id, created_at DESC) index.
+--
+-- The key is (created_at, id), not created_at alone: two tickets created in the
+-- same transaction share a timestamp, and a cursor on a non-unique key can
+-- either skip rows or repeat them.
 SELECT * FROM tickets
-WHERE requester_id = $1
-ORDER BY created_at DESC;
+WHERE requester_id = @requester_id
+  AND (
+    sqlc.narg(after_created_at)::timestamptz IS NULL
+    OR (created_at, id) < (sqlc.narg(after_created_at)::timestamptz, sqlc.narg(after_id)::uuid)
+  )
+ORDER BY created_at DESC, id DESC
+LIMIT @page_size;
