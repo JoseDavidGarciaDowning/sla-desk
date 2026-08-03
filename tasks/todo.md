@@ -538,21 +538,53 @@ path *produces* the cache by calling `Reconstruct` would be tautological. It tar
 **write path** instead.
 
 **Acceptance criteria:**
-- [ ] Consistency test, against a real database: the values stored in `tickets.sla_*` equal `Reconstruct` over the rows stored in `ticket_status_history` for that ticket
-- [ ] It is property-based over generated transition sequences, not a handful of examples
-- [ ] It detects each of these write-path defects, verified by deliberately introducing them: cache update skipped; fact and cache written in separate transactions; history read *before* the new row was inserted (cache one event behind); partial write committed
-- [ ] Architecture test: `internal/sla` and `internal/ticket` import nothing from `internal/store`, `internal/api`, or `database/sql`
-- [ ] Architecture test: **`internal/ticket` never imports `internal/sla`** — the dependency runs one way only ([ADR 0002](../docs/adr/0002-validation-ownership-between-sla-and-ticket.md))
-- [ ] All wired into `make check`
+- [x] Consistency test, against a real database: the values stored in `tickets.sla_*` equal `Reconstruct` over the rows stored in `ticket_status_history` for that ticket
+- [x] It is property-based over generated transition sequences, not a handful of examples — 15 sequences, up to 6 transitions each, checked after **every** step
+- [x] It detects each of these write-path defects, verified by deliberately introducing them: cache update skipped; fact and cache written in separate transactions; history read *before* the new row was inserted (cache one event behind); partial write committed — **all four red**
+- [x] Architecture test: `internal/sla` and `internal/ticket` import nothing from `internal/store`, `internal/api`, or `database/sql`
+- [x] Architecture test: **`internal/ticket` never imports `internal/sla`** — the dependency runs one way only ([ADR 0002](../docs/adr/0002-validation-ownership-between-sla-and-ticket.md))
+- [x] All wired into `make check` (architecture) and `make test-int` (consistency, needs a database)
 
 **Verification:**
-- [ ] `make test-int` passes
-- [ ] Deliberately corrupting `sla_consumed_minutes` in a fixture makes the consistency test **fail** — a test that cannot fail proves nothing
-- [ ] Adding an import of `database/sql` to `internal/sla` makes the architecture test fail
+- [x] `make test-int` passes
+- [x] Each of the four write-path defects makes the consistency test fail; so does deleting the call to the state machine, and so does making `closed` non-terminal
+- [x] Adding an import of `database/sql` to `internal/sla` makes the architecture test fail — verified during T10 with `net/http` and `pgx`, and the failure propagates to `internal/sla` through `internal/ticket`
 
 **Dependencies:** T9, T10
-**Files:** `internal/sla/consistency_int_test.go`, `internal/architecture_test.go`
-**Scope:** S
+**Files:** `internal/ticket/transition.go`, `internal/ticket/transition_test.go`,
+`internal/store/ticket_repo.go`, `internal/store/consistency_integration_test.go`,
+`internal/ticket/architecture_test.go` (written earlier, before T7)
+**Scope:** L — the state machine had to be built first, see below
+
+**Scope note — T11 could not be met as written.** It asks for a property test over *generated
+transition sequences*, and slice 1 had no transitions: `Create` was the only write path, so
+every ticket's history was one row long and a "sequence" was a single element. Simulating
+transitions inside the test would have produced exactly the tautology ADR 0001 warns about.
+
+The state machine and its write path were therefore pulled forward from slice 3, with the
+decision recorded in `docs/spec.md` §2. Two things fell out of that which slice 1 did not have
+before: the SLA clock can now **pause and resume**, which is the headline behaviour of the whole
+domain, and `TestPausingStopsTheClockAndResumingKeepsWhatWasSpent` proves that time spent
+waiting on a customer does not consume budget.
+
+**Also corrected: the §4.1 diagram contradicted its own rules.** It labelled an arrow "reopen
+(customer or agent)" and drew it touching `closed`, while the prose states twice that `closed`
+is terminal. The prose wins — the edge is `resolved → open`. The section now carries an
+exhaustive edge table so the next reader does not have to choose.
+
+**What the write path looks like**, and why it is a repo method rather than four handler calls
+— the order is the whole point (ADR 0001):
+
+```
+1. insert the ticket_status_history row
+2. read the ticket's full history      ← after the insert, never before
+3. rebuild the clock from it
+4. write the tickets.sla_* cache
+```
+
+`GetTicketForUpdate` takes `FOR UPDATE`: two transitions arriving at once would otherwise both
+read the same current status and the second commit would overwrite the first with a cache that
+never accounted for it.
 
 > **Checkpoint C — review with human before Phase 3.**
 
