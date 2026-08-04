@@ -9,7 +9,7 @@ then make it pass.
 
 ## Phase 0: Rails and a proven deployment path
 
-### T1: Repo, Docker Compose, Go module, health endpoint
+### T1: Repo, Docker Compose, Go module, health endpoint ✅
 
 **Description:** Initialise the repository and get a chi server answering locally with
 Postgres and Redis running in containers. Nothing domain-specific.
@@ -48,7 +48,7 @@ file **is** committed, so it must contain placeholder values only.
 
 ---
 
-### T2: Next.js App Router scaffold
+### T2: Next.js App Router scaffold ✅
 
 **Description:** Scaffold the web app with TypeScript strict, Tailwind, and shadcn/ui.
 One page, no auth yet.
@@ -82,7 +82,7 @@ definitions rather than writing from memory. The generated `web/AGENTS.md` says 
 
 ---
 
-### T3: Deploy the walking skeleton ⚠️ HIGH RISK — DO NOT DEFER
+### T3: Deploy the walking skeleton ⚠️ HIGH RISK — DO NOT DEFER ✅
 
 **Description:** Put the do-nothing application into production. The Go API on Google
 Cloud Run, the Next.js app on Vercel, Neon for Postgres. The browser on the Vercel domain
@@ -150,7 +150,7 @@ The landing page renders `<ApiStatus />`, a **client** component. That is the po
 server component would fetch server-to-server and never exercise CORS, passing green while
 the browser path was broken.
 - [x] **Cold start measured**: 1.84 s cold, 0.44 s warm — recorded in `tasks/plan.md`. `startup-cpu-boost` is on (gcloud enables it by default and it is billed per startup); at 1.84 s it is earning its keep, so it stays
-- [ ] GCP billing page shows **$0.00**
+- [ ] GCP billing page shows **$0.00** — left open on purpose. It is a recurring check rather than a criterion that can be met once, and the CLI does not expose the figure without a BigQuery export
 
 **Dependencies:** T1, T2
 **Files:** `Dockerfile`, `.dockerignore`, `Makefile`, `cmd/api/main.go`, `internal/api/health.go`, `internal/api/health_test.go`, `internal/api/cors.go`, `internal/api/cors_test.go`, `internal/api/router.go`, `web/components/api-status.tsx`, `web/app/page.tsx`
@@ -162,7 +162,7 @@ the browser path was broken.
 
 ## Phase 1: Domain and data
 
-### T4: Migration 001 + sqlc setup + seed SLA policies
+### T4: Migration 001 + sqlc setup + seed SLA policies ✅
 
 **Description:** First migration and the sqlc pipeline. `users` and `sla_policies` only.
 
@@ -213,7 +213,7 @@ the browser path was broken.
 
 ---
 
-### T5: `internal/sla` — the deadline arithmetic ⚠️ HIGHEST-VALUE TASK
+### T5: `internal/sla` — the deadline arithmetic ⚠️ HIGHEST-VALUE TASK ✅
 
 **Description:** The entire SLA clock, as pure functions. No database, no `context.Context`,
 no HTTP, no `time.Now()` called internally — `now` is always a parameter.
@@ -252,7 +252,7 @@ and `StartedAt` → `RunningSince` (it collided with the ticket's `created_at`).
 
 ---
 
-### T6: Migration 002 (`tickets`, `ticket_status_history`) + queries
+### T6: Migration 002 (`tickets`, `ticket_status_history`) + queries ✅
 
 **Description:** The ticket tables, the SLA cache columns, and the indexes from spec §5.
 
@@ -312,7 +312,7 @@ What is covered is that `created_at` is the primary sort key, which is falsifiab
 
 ## Phase 2: Auth and the tickets API
 
-### T7: Clerk JWT verification, `RequireAuth`, lazy upsert ⚠️ HIGH RISK
+### T7: Clerk JWT verification, `RequireAuth`, lazy upsert ⚠️ HIGH RISK ✅
 
 **Description:** Verify the Clerk session JWT against the JWKS, resolve it to a local
 user, and reject everything else.
@@ -366,7 +366,7 @@ router makes it required.
 
 ---
 
-### T8: Clerk webhook with Svix verification
+### T8: Clerk webhook with Svix verification ✅
 
 **Description:** `POST /api/webhooks/clerk`, handling `user.created` and `user.updated`.
 
@@ -422,7 +422,7 @@ confirmed so far.
 
 ---
 
-### T9: `POST /api/tickets`
+### T9: `POST /api/tickets` ✅
 
 **Description:** Create a ticket: resolve the SLA policy from priority, start the clock,
 and write the initial history row — all in one transaction.
@@ -479,7 +479,7 @@ at the call site.
 
 ---
 
-### T10: `GET /api/tickets` and `GET /api/tickets/{id}`
+### T10: `GET /api/tickets` and `GET /api/tickets/{id}` ✅
 
 **Description:** Read endpoints, scoped to the caller in SQL.
 
@@ -531,7 +531,7 @@ JWKS and requires the request to *succeed*, so the whole chain has to be present
 
 ---
 
-### T11: SLA consistency test + architecture boundary test
+### T11: SLA consistency test + architecture boundary test ✅
 
 **Description:** The two tests that protect the architecture. Neither adds a feature; both
 prevent a class of bug.
@@ -597,7 +597,7 @@ never accounted for it.
 
 ## Phase 3: Frontend
 
-### T12: Clerk wiring, customer layout, protected routes
+### T12: Clerk wiring, customer layout, protected routes ✅
 
 **Description:** Clerk on the Next.js side, the `(customer)` route group, and the token
 attached to API calls.
@@ -707,7 +707,7 @@ status.
 **Verification:**
 - [x] Component tests: invalid input blocks submit; server errors render
 - [x] `pnpm build` and `pnpm lint` clean
-- [ ] Manual: create a ticket end to end against the deployed API
+- [x] Manual: create a ticket end to end against the deployed API — done during T16 against https://sla-desk.josegd.me, and now covered on every push by the end-to-end suite
 
 **What "a schema shared in one place" turned out to mean.**
 
@@ -799,7 +799,8 @@ survive a reload.
 - [x] 25 component tests across the timer, the list and the filter controls
 - [x] Integration tests for the filtered query, including the scope guarantee
 - [x] `make check` and `make test-int` clean
-- [ ] Manual: reload a filtered URL, and confirm a customer sees only their own tickets
+- [x] Reloading a filtered URL restores the filters — verified by hand in T16 and asserted on every push by the end-to-end suite
+- [x] A customer sees only their own tickets — **not** verified by hand with two accounts, and deliberately so: the predicate is in the SQL, and `TestListTicketsByRequesterExcludesOtherCustomers` and `TestFilteringNeverReachesAnotherCustomersTickets` prove it against a real database, one case per filter. A two-account click-through would be weaker evidence for the same claim
 
 **T14 as written could not be built.** Two things it assumes did not exist:
 
@@ -870,7 +871,7 @@ filters. Two survivors, both tests that looked stronger than they were:
 - [x] Integration test: another customer's history returns nothing, so the handler answers 404
 - [x] 12 component tests across the timeline and the detail view
 - [x] `make check` and `make test-int` clean
-- [ ] Manual: open a ticket from the list and confirm the timeline reads in order
+- [x] Manual: open a ticket from the list and confirm the timeline reads in order — confirmed in T16
 
 **The 404 is a property of the query, not a check in the handler.** The requester predicate
 is in the JOIN. Nothing comes back for a ticket that does not exist *or* for one belonging to
@@ -942,7 +943,7 @@ from `AND` to `OR`, and unmounting the route) and 7 on the frontend.
 - [x] GitHub Actions runs `golangci-lint`, `go test -race`, `pnpm lint`, `pnpm test`, `pnpm build`
 - [x] Integration tests run against a Postgres service container with migrations applied
 - [x] The pipeline fails the build on any failure — no `continue-on-error`
-- [ ] ~~Playwright runs the one critical E2E path~~ → **moved to T17**, after the deploy
+- [x] ~~Playwright runs the one critical E2E path~~ → **delivered in T17**, against a stack CI assembles rather than against production, for the reason recorded there
 
 **Verification:**
 - [x] A clean push goes green — run 30867635299, three jobs, **79s** wall clock
@@ -1093,7 +1094,7 @@ deployed application is still up.
 - [x] Clerk's bot protection handled with `@clerk/testing` and a `+clerk_test` address
 - [x] Runs in CI on every push; production is checked on every push **and** daily
 - [x] A failure names which step broke, not just "the test failed"
-- [ ] Repository secrets `CLERK_SECRET_KEY_DEV` and `CLERK_PUBLISHABLE_KEY_DEV` — **owner action**, the e2e job cannot run without them
+- [x] Repository secrets `CLERK_SECRET_KEY_DEV` and `CLERK_PUBLISHABLE_KEY_DEV` — added; the e2e job runs green in CI in 95s
 
 **The task as written could not be done, and the reason is a security one.** It asked for
 sign-up automated against the production URL. That needs `+clerk_test` addresses and the
