@@ -42,7 +42,7 @@ func TestDomainsDoNotReachEachOther(t *testing.T) {
 		// The SLA module borrowed ticket's Status and Priority. It works in
 		// running and paused phases; which statuses burn budget is the ticket
 		// module's decision, and it already asks the status itself.
-		{"internal/modules/sla", "internal/ticket"},
+		{"internal/modules/sla", "internal/modules/ticket"},
 		{"internal/modules/sla", "internal/modules/identity"},
 
 		// The identity module owns users, and nothing about a ticket or an SLA.
@@ -52,8 +52,13 @@ func TestDomainsDoNotReachEachOther(t *testing.T) {
 		// auth-owned type made the generated store import auth — which already
 		// imported store, closing a cycle. The module generates its own queries
 		// against its own domain, and the cycle has nowhere to form.
-		{"internal/modules/identity", "internal/ticket"},
+		{"internal/modules/identity", "internal/modules/ticket"},
 		{"internal/modules/identity", "internal/modules/sla"},
+
+		// And the last pair. internal/ticket was the shared kernel every other
+		// package leaned on; it is now a module that leans on nobody.
+		{"internal/modules/ticket", "internal/modules/sla"},
+		{"internal/modules/ticket", "internal/modules/identity"},
 	}
 
 	for _, rule := range forbidden {
@@ -95,7 +100,13 @@ func TestModuleDomainsArePure(t *testing.T) {
 		"github.com/go-chi/chi",
 		"github.com/clerk/clerk-sdk-go",
 		"github.com/svix/svix-webhooks",
-		modulePath + "/internal/store",
+
+		// The packages above a domain. internal/ticket's own test forbade
+		// these before it was absorbed into this one, and dropping them here
+		// would have quietly weakened the rule while the test count still
+		// looked fine.
+		modulePath + "/internal/api",
+		modulePath + "/internal/config",
 	}
 
 	for _, pkg := range packagesUnder(t, root, "internal/modules") {
@@ -112,6 +123,65 @@ func TestModuleDomainsArePure(t *testing.T) {
 						shortName(pkg), imported)
 				}
 			}
+		}
+	}
+}
+
+// internal/httperr is the one package every layer may call: the domain does
+// not, but every module's transport and every adapter reports failures the
+// same way through it.
+// That only works while it sits below all of them, and it sits below them only
+// while it imports none of them.
+//
+// The rule is stricter than "no cycle today". Letting it import a domain
+// package to name a role in a message, say, would put it above that module —
+// and the next
+// module that wanted to answer a request would find httperr already spoken
+// for. It was extracted precisely because the auth middleware could not reach
+// the API's problem writer without a cycle; a package that can drift back into
+// the same position solves nothing.
+//
+// Note this is the opposite constraint to the domain rule above: httperr is
+// allowed net/http, which the domain is not. It is not a domain package. It is
+// a leaf that knows one thing, which is what an error looks like on the wire.
+func TestHTTPErrDependsOnNothingInThisModule(t *testing.T) {
+	root := moduleRoot(t)
+
+	for imported := range transitiveImports(t, root, modulePath+"/internal/httperr") {
+		if matches(imported, modulePath) {
+			t.Errorf("internal/httperr reaches %s\n\n"+
+				"It has to stay below every layer that reports an error, or the\n"+
+				"layer it now sits above cannot use it. Whatever this import was\n"+
+				"needed for belongs in the caller.", imported)
+		}
+	}
+}
+
+// Every module owns its own generated queries, and no config generates another
+// module's tables.
+//
+// The real guarantee is in each sqlc.yaml: omit_unused_structs means a module
+// only gets structs for tables its own queries touch, so the ticket module has
+// no User to reach for even though tickets references users. This asserts the
+// arrangement that guarantee depends on — one config per module, and none
+// shared.
+func TestEachModuleOwnsItsOwnSQLCConfig(t *testing.T) {
+	root := moduleRoot(t)
+
+	if _, err := os.Stat(filepath.Join(root, "sqlc.yaml")); err == nil {
+		t.Error("a root sqlc.yaml exists\n\n" +
+			"Queries belong to the module that owns the data. One shared config\n" +
+			"means one generated package every module can reach into, which is\n" +
+			"the arrangement this refactor removed.")
+	}
+
+	for _, m := range []string{"ticket", "sla", "identity"} {
+		dir := filepath.Join(root, "internal", "modules", m, "infrastructure", "postgres")
+		if _, err := os.Stat(dir); err != nil {
+			continue // a module need not own tables
+		}
+		if _, err := os.Stat(filepath.Join(dir, "sqlc.yaml")); err != nil {
+			t.Errorf("%s has infrastructure/postgres but no sqlc.yaml of its own", m)
 		}
 	}
 }
