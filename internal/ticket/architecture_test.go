@@ -60,18 +60,25 @@ func TestDomainPackagesDependOnNothingImpure(t *testing.T) {
 	}
 }
 
-// The direction is one way and only one way: sla knows about tickets, tickets
-// know nothing about SLAs. See docs/adr/0002 — internal/ticket owns transition
-// legality, internal/sla owns deadline arithmetic, and the budget for a
-// priority lives in the database rather than in either of them.
+// Neither package knows the other exists.
+//
+// This used to read "sla knows about tickets, tickets know nothing about SLAs",
+// and that arrow was removed in favour of no arrow at all: internal/sla now
+// works in running and paused phases, and whoever calls it supplies them. See
+// docs/adr/0005, which supersedes that half of docs/adr/0002.
+//
+// What is kept here is the half that never changed — internal/ticket owns
+// transition legality and must not reach for deadline arithmetic. The opposite
+// direction is asserted in internal/architecture, alongside the boundaries the
+// rest of the refactor adds.
 func TestTicketDoesNotImportSLA(t *testing.T) {
 	root := moduleRoot(t)
 
 	for imported := range transitiveImports(t, root, modulePath+"/internal/ticket") {
 		if matches(imported, modulePath+"/internal/sla") {
 			t.Errorf("internal/ticket reaches internal/sla\n\n" +
-				"The dependency runs the other way. A ticket does not know what an SLA\n" +
-				"is; the SLA clock reads a ticket's statuses.")
+				"A ticket does not know what an SLA is. Deadline arithmetic lives in\n" +
+				"internal/sla, which is handed a timeline and never the other way round.")
 		}
 	}
 }

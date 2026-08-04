@@ -5,45 +5,45 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
 
 const propertyIterations = 2000
 
-// randomHistory produces a history that satisfies Reconstruct's preconditions:
-// it starts in open and its timestamps never go backwards. Everything else —
-// length, statuses, gaps — is random.
-func randomHistory(rng *rand.Rand) []StatusChange {
-	statuses := []ticket.Status{
-		ticket.StatusOpen,
-		ticket.StatusPending,
-		ticket.StatusResolved,
-		ticket.StatusClosed,
-	}
-
-	history := []StatusChange{{To: ticket.StatusOpen, At: at(1, 9, 0)}}
-	cursor := history[0].At
+// randomTimeline produces a timeline that satisfies Reconstruct's
+// preconditions: it starts with the clock running and its timestamps never go
+// backwards. Everything else — length, phases, gaps — is random.
+//
+// This used to generate ticket statuses and let StatusOpen stand in for
+// "running". Generating the boolean directly is not merely a translation of
+// that: it explores every running/paused sequence, rather than only the ones
+// four particular statuses happen to produce. Which sequences a real ticket can
+// reach is the state machine's property, and internal/ticket already asserts it.
+func randomTimeline(rng *rand.Rand) []Phase {
+	timeline := []Phase{{At: at(1, 9, 0), Running: true}}
+	cursor := timeline[0].At
 
 	for range rng.IntN(10) {
 		// Zero gaps are allowed on purpose: equal consecutive timestamps are legal.
 		cursor = cursor.Add(time.Duration(rng.IntN(600)) * time.Minute)
-		history = append(history, StatusChange{
-			To: statuses[rng.IntN(len(statuses))],
-			At: cursor,
+		timeline = append(timeline, Phase{
+			At:      cursor,
+			Running: rng.IntN(2) == 0,
 		})
 	}
 
-	return history
+	return timeline
 }
 
-func dump(history []StatusChange) string {
+func dump(timeline []Phase) string {
 	var b strings.Builder
-	for _, c := range history {
+	for _, p := range timeline {
 		b.WriteString("\n  ")
-		b.WriteString(c.At.Format(time.RFC3339))
-		b.WriteString(" -> ")
-		b.WriteString(string(c.To))
+		b.WriteString(p.At.Format(time.RFC3339))
+		if p.Running {
+			b.WriteString(" -> running")
+		} else {
+			b.WriteString(" -> paused")
+		}
 	}
 	return b.String()
 }
@@ -57,50 +57,50 @@ func TestProperty_RunningAndPausedStatesAreConsistent(t *testing.T) {
 	p := normalPolicy(4 * time.Hour)
 
 	for i := range propertyIterations {
-		history := randomHistory(rng)
+		timeline := randomTimeline(rng)
 
-		got, err := Reconstruct(p, history)
+		got, err := Reconstruct(p, timeline)
 		if err != nil {
-			t.Fatalf("iteration %d: generated history was rejected: %v%s", i, err, dump(history))
+			t.Fatalf("iteration %d: generated timeline was rejected: %v%s", i, err, dump(timeline))
 		}
 
 		if (got.RunningSince == nil) != (got.DueAt == nil) {
 			t.Fatalf("iteration %d: RunningSince and DueAt disagree (%v / %v)%s",
-				i, got.RunningSince, got.DueAt, dump(history))
+				i, got.RunningSince, got.DueAt, dump(timeline))
 		}
 
-		// The clock runs exactly when the last entry left the ticket open.
-		wantRunning := history[len(history)-1].To == ticket.StatusOpen
+		// The clock runs exactly when the last phase left it running.
+		wantRunning := timeline[len(timeline)-1].Running
 		if gotRunning := got.RunningSince != nil; gotRunning != wantRunning {
-			t.Fatalf("iteration %d: running = %v, want %v (last status %q)%s",
-				i, gotRunning, wantRunning, history[len(history)-1].To, dump(history))
+			t.Fatalf("iteration %d: running = %v, want %v%s",
+				i, gotRunning, wantRunning, dump(timeline))
 		}
 	}
 }
 
 // Budget used is never negative, and never exceeds the wall-clock span the
-// history covers. A violation of the upper bound would mean time was counted
+// timeline covers. A violation of the upper bound would mean time was counted
 // twice; a violation of the lower bound would mean budget was handed back.
-func TestProperty_BudgetUsedStaysWithinTheHistorySpan(t *testing.T) {
+func TestProperty_BudgetUsedStaysWithinTheTimelineSpan(t *testing.T) {
 	rng := rand.New(rand.NewPCG(3, 4))
 	p := normalPolicy(4 * time.Hour)
 
 	for i := range propertyIterations {
-		history := randomHistory(rng)
+		timeline := randomTimeline(rng)
 
-		got, err := Reconstruct(p, history)
+		got, err := Reconstruct(p, timeline)
 		if err != nil {
-			t.Fatalf("iteration %d: generated history was rejected: %v%s", i, err, dump(history))
+			t.Fatalf("iteration %d: generated timeline was rejected: %v%s", i, err, dump(timeline))
 		}
 
-		span := history[len(history)-1].At.Sub(history[0].At)
+		span := timeline[len(timeline)-1].At.Sub(timeline[0].At)
 		switch {
 		case got.BudgetUsed < 0:
 			t.Fatalf("iteration %d: BudgetUsed = %s, must never be negative%s",
-				i, got.BudgetUsed, dump(history))
+				i, got.BudgetUsed, dump(timeline))
 		case got.BudgetUsed > span:
-			t.Fatalf("iteration %d: BudgetUsed = %s exceeds the %s the history spans%s",
-				i, got.BudgetUsed, span, dump(history))
+			t.Fatalf("iteration %d: BudgetUsed = %s exceeds the %s the timeline spans%s",
+				i, got.BudgetUsed, span, dump(timeline))
 		}
 	}
 }
@@ -116,28 +116,28 @@ func TestProperty_PausingNeverMovesTheDeadlineEarlier(t *testing.T) {
 	p := normalPolicy(4 * time.Hour)
 
 	for i := range propertyIterations {
-		history := randomHistory(rng)
+		timeline := randomTimeline(rng)
 
 		// Force the clock to be running, so there is a deadline to compare.
-		last := history[len(history)-1]
-		if last.To != ticket.StatusOpen {
-			history = append(history, StatusChange{
-				To: ticket.StatusOpen,
-				At: last.At.Add(time.Duration(rng.IntN(120)) * time.Minute),
+		last := timeline[len(timeline)-1]
+		if !last.Running {
+			timeline = append(timeline, Phase{
+				At:      last.At.Add(time.Duration(rng.IntN(120)) * time.Minute),
+				Running: true,
 			})
 		}
 
-		before, err := Reconstruct(p, history)
+		before, err := Reconstruct(p, timeline)
 		if err != nil {
-			t.Fatalf("iteration %d: %v%s", i, err, dump(history))
+			t.Fatalf("iteration %d: %v%s", i, err, dump(timeline))
 		}
 
 		// Insert a pause of a random length, then resume.
-		pausedAt := history[len(history)-1].At.Add(time.Duration(rng.IntN(300)) * time.Minute)
+		pausedAt := timeline[len(timeline)-1].At.Add(time.Duration(rng.IntN(300)) * time.Minute)
 		pauseFor := time.Duration(rng.IntN(5000)) * time.Minute
-		paused := append(history,
-			StatusChange{To: ticket.StatusPending, At: pausedAt},
-			StatusChange{To: ticket.StatusOpen, At: pausedAt.Add(pauseFor)},
+		paused := append(timeline,
+			Phase{At: pausedAt, Running: false},
+			Phase{At: pausedAt.Add(pauseFor), Running: true},
 		)
 
 		after, err := Reconstruct(p, paused)
@@ -162,17 +162,17 @@ func TestProperty_ReconstructIsDeterministic(t *testing.T) {
 	p := normalPolicy(4 * time.Hour)
 
 	for i := range propertyIterations {
-		history := randomHistory(rng)
+		timeline := randomTimeline(rng)
 
-		first, err1 := Reconstruct(p, history)
-		second, err2 := Reconstruct(p, history)
+		first, err1 := Reconstruct(p, timeline)
+		second, err2 := Reconstruct(p, timeline)
 
 		if err1 != nil || err2 != nil {
-			t.Fatalf("iteration %d: %v / %v%s", i, err1, err2, dump(history))
+			t.Fatalf("iteration %d: %v / %v%s", i, err1, err2, dump(timeline))
 		}
 		if first.BudgetUsed != second.BudgetUsed {
 			t.Fatalf("iteration %d: BudgetUsed differed between calls: %s vs %s%s",
-				i, first.BudgetUsed, second.BudgetUsed, dump(history))
+				i, first.BudgetUsed, second.BudgetUsed, dump(timeline))
 		}
 		assertInstant(t, "RunningSince", second.RunningSince, first.RunningSince)
 		assertInstant(t, "DueAt", second.DueAt, first.DueAt)

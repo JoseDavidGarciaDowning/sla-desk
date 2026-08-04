@@ -106,8 +106,11 @@ func (r *TicketRepo) Create(ctx context.Context, in NewTicket) (Ticket, error) {
 	// been running since that instant. Going through Reconstruct rather than
 	// adding the budget here keeps the promise in §4.2 that deadline arithmetic
 	// exists in exactly one place — including this, its simplest case.
-	state, err := sla.Reconstruct(policy, []sla.StatusChange{
-		{To: ticket.StatusOpen, At: now},
+	// The status decides whether the clock runs; the SLA package is only told
+	// the answer. That translation is this package's job today, and moves to
+	// the composition root once the modules are split.
+	state, err := sla.Reconstruct(policy, []sla.Phase{
+		{At: now, Running: ticket.StatusOpen.RunsClock()},
 	})
 	if err != nil {
 		return Ticket{}, fmt.Errorf("starting the clock: %w", err)
@@ -162,8 +165,11 @@ func policyFrom(row SlaPolicy) (sla.Policy, error) {
 	}
 
 	return sla.Policy{
-		ID:       row.ID,
-		Priority: row.Priority,
+		ID: row.ID,
+		// Same four strings, two vocabularies: how urgent a requester says a
+		// ticket is, and which row of the policy table applies. The CHECK
+		// constraints on both columns mean the conversion cannot widen either.
+		Priority: sla.Priority(row.Priority),
 		Budget:   time.Duration(row.BudgetMinutes) * time.Minute,
 		Schedule: schedule,
 	}, nil
@@ -249,11 +255,11 @@ func (r *TicketRepo) Transition(ctx context.Context, in StatusChange) (Ticket, e
 	}
 
 	// 3. The clock, from the fact rather than from the previous cache.
-	history := make([]sla.StatusChange, len(rows))
+	timeline := make([]sla.Phase, len(rows))
 	for i, row := range rows {
-		history[i] = sla.StatusChange{To: row.ToStatus, At: row.CreatedAt}
+		timeline[i] = sla.Phase{At: row.CreatedAt, Running: row.ToStatus.RunsClock()}
 	}
-	state, err := sla.Reconstruct(policy, history)
+	state, err := sla.Reconstruct(policy, timeline)
 	if err != nil {
 		return Ticket{}, fmt.Errorf("rebuilding the clock: %w", err)
 	}

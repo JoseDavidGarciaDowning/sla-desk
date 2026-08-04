@@ -4,15 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
 
-// Errors returned when status history cannot be reconstructed.
+// Errors returned when a timeline cannot be reconstructed.
 var (
-	ErrEmptyHistory         = errors.New("sla: status history is empty")
-	ErrUnorderedHistory     = errors.New("sla: status history is not in chronological order")
-	ErrHistoryMustStartOpen = errors.New("sla: status history must start in open")
+	ErrEmptyTimeline            = errors.New("sla: timeline is empty")
+	ErrUnorderedTimeline        = errors.New("sla: timeline is not in chronological order")
+	ErrTimelineMustStartRunning = errors.New("sla: timeline must start with the clock running")
 )
 
 // Schedule defines how SLA time is consumed and deadlines are calculated.
@@ -25,18 +23,48 @@ type Schedule interface {
 
 var _ Schedule = Always24x7{}
 
-// Policy defines the SLA budget and schedule applied to a ticket.
+// Priority is the key a budget is filed under.
+//
+// It deliberately duplicates the four strings the ticket package also declares,
+// because the two are not the same concept even though they read alike: a
+// ticket's priority is how urgent the requester says it is, and this one is
+// which row of the policy table applies. Sharing one type would mean one
+// package owning a vocabulary the other's schema constrains, and the boundary
+// would exist in the folder layout and nowhere else.
+//
+// Both columns carry a CHECK constraint, so the conversion between them cannot
+// widen either vocabulary.
+type Priority string
+
+const (
+	PriorityUrgent Priority = "urgent"
+	PriorityHigh   Priority = "high"
+	PriorityNormal Priority = "normal"
+	PriorityLow    Priority = "low"
+)
+
+// Policy defines the SLA budget and schedule applied under a priority.
 type Policy struct {
 	ID       int64
-	Priority ticket.Priority
+	Priority Priority
 	Budget   time.Duration
 	Schedule Schedule
 }
 
-// StatusChange represents a ticket status transition at a specific time.
-type StatusChange struct {
-	To ticket.Status
-	At time.Time
+// Phase is one segment of a timeline: the instant something changed, and
+// whether the clock was consuming budget from that instant on.
+//
+// This used to be a ticket status and a time, which meant this package had to
+// know that tickets exist, that they have statuses, and which of those statuses
+// the clock runs in. It never needed any of that — it needed a boolean.
+//
+// The division of labour is now exact, and it is why the import is gone rather
+// than merely redirected: the ticket package decides which statuses burn
+// budget; this package decides how much time that is. A fifth status is a
+// change over there and no change at all here.
+type Phase struct {
+	At      time.Time
+	Running bool
 }
 
 // ClockState is the derived SLA state stored for quick access.
@@ -48,11 +76,11 @@ type ClockState struct {
 	DueAt        *time.Time
 }
 
-// Reconstruct calculates the current SLA state from status history.
+// Reconstruct calculates the current SLA state from a timeline.
 //
 // It is the single source of truth for SLA deadline calculation.
-func Reconstruct(p Policy, history []StatusChange) (ClockState, error) {
-	if err := validate(history); err != nil {
+func Reconstruct(p Policy, timeline []Phase) (ClockState, error) {
+	if err := validate(timeline); err != nil {
 		return ClockState{}, err
 	}
 
@@ -61,19 +89,14 @@ func Reconstruct(p Policy, history []StatusChange) (ClockState, error) {
 		runningSince *time.Time
 	)
 
-	// Accumulate closed open-state intervals. Keep the current interval open.
-	for _, change := range history {
-		// The status decides, not this package: which statuses consume budget
-		// is a fact about tickets, and duplicating it here is how the two
-		// drift apart.
-		running := change.To.RunsClock()
-
+	// Accumulate closed running intervals. Keep the current interval open.
+	for _, phase := range timeline {
 		switch {
-		case running && runningSince == nil:
-			started := change.At
+		case phase.Running && runningSince == nil:
+			started := phase.At
 			runningSince = &started
-		case !running && runningSince != nil:
-			used += p.Schedule.Elapsed(*runningSince, change.At)
+		case !phase.Running && runningSince != nil:
+			used += p.Schedule.Elapsed(*runningSince, phase.At)
 			runningSince = nil
 		}
 	}
@@ -92,22 +115,32 @@ func Reconstruct(p Policy, history []StatusChange) (ClockState, error) {
 
 // validate checks the minimum guarantees required for reconstruction.
 //
-// Status transition rules are enforced by the ticket state machine.
-func validate(history []StatusChange) error {
-	if len(history) == 0 {
-		return ErrEmptyHistory
+// Transition rules are enforced by the ticket state machine, not here.
+func validate(timeline []Phase) error {
+	if len(timeline) == 0 {
+		return ErrEmptyTimeline
 	}
 
-	if first := history[0].To; first != ticket.StatusOpen {
-		return fmt.Errorf("%w: starts in %q", ErrHistoryMustStartOpen, first)
+	// This used to read `history[0].To != ticket.StatusOpen`, which is a rule
+	// about tickets wearing this package's name. The two are not the same
+	// statement, and separating them is the point:
+	//
+	//   "a ticket starts in open"                 — a ticket rule
+	//   "a timeline starts with the clock running" — an SLA rule
+	//
+	// Both are true, they agree because StatusOpen.RunsClock() is true, and
+	// neither has to know the other exists. What was one rule written in the
+	// wrong package turns out to be two rules, each already at home.
+	if !timeline[0].Running {
+		return ErrTimelineMustStartRunning
 	}
 
-	for i := 1; i < len(history); i++ {
-		if history[i].At.Before(history[i-1].At) {
+	for i := 1; i < len(timeline); i++ {
+		if timeline[i].At.Before(timeline[i-1].At) {
 			return fmt.Errorf("%w: entry %d (%s) precedes entry %d (%s)",
-				ErrUnorderedHistory,
-				i, history[i].At.Format(time.RFC3339),
-				i-1, history[i-1].At.Format(time.RFC3339))
+				ErrUnorderedTimeline,
+				i, timeline[i].At.Format(time.RFC3339),
+				i-1, timeline[i-1].At.Format(time.RFC3339))
 		}
 	}
 
