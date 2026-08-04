@@ -141,19 +141,30 @@ func TestModuleDomainsArePure(t *testing.T) {
 // the API's problem writer without a cycle; a package that can drift back into
 // the same position solves nothing.
 //
-// Note this is the opposite constraint to the domain rule above: httperr is
-// allowed net/http, which the domain is not. It is not a domain package. It is
-// a leaf that knows one thing, which is what an error looks like on the wire.
-func TestHTTPErrDependsOnNothingInThisModule(t *testing.T) {
+// internal/httpx joined it under the same rule when writeJSON turned out to be
+// needed by two transports at once.
+//
+// Note this is the opposite constraint to the domain rule above: both are
+// allowed net/http, which a domain is not. They are not domain packages. They
+// are leaves that know one thing each — what an error looks like on the wire,
+// and how a body gets onto it.
+func TestTheHTTPLeavesDependOnNothingInThisModule(t *testing.T) {
 	root := moduleRoot(t)
 
-	for imported := range transitiveImports(t, root, modulePath+"/internal/httperr") {
-		if matches(imported, modulePath) {
-			t.Errorf("internal/httperr reaches %s\n\n"+
-				"It has to stay below every layer that reports an error, or the\n"+
-				"layer it now sits above cannot use it. Whatever this import was\n"+
-				"needed for belongs in the caller.", imported)
-		}
+	for _, pkg := range []string{
+		modulePath + "/internal/httperr",
+		modulePath + "/internal/httpx",
+	} {
+		t.Run(shortName(pkg), func(t *testing.T) {
+			for imported := range transitiveImports(t, root, pkg) {
+				if matches(imported, modulePath) {
+					t.Errorf("%s reaches %s\n\n"+
+						"It has to stay below every layer that answers a request, or the\n"+
+						"layer it now sits above cannot use it. Whatever this import was\n"+
+						"needed for belongs in the caller.", shortName(pkg), imported)
+				}
+			}
+		})
 	}
 }
 
@@ -182,6 +193,32 @@ func TestEachModuleOwnsItsOwnSQLCConfig(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(dir, "sqlc.yaml")); err != nil {
 			t.Errorf("%s has infrastructure/postgres but no sqlc.yaml of its own", m)
+		}
+	}
+}
+
+// internal/app is a sink. Everything may be reached from it; nothing may reach
+// it back except the commands that build it.
+//
+// Compilation already refuses the direct case, because app imports every
+// module. What this catches is the indirect one — a package outside the module
+// tree that app does not import, quietly reaching into the wiring. A module
+// that reached the composition root would be depending on its own neighbours
+// through the back door, which is the whole arrangement this refactor removed.
+func TestNothingReachesTheCompositionRoot(t *testing.T) {
+	root := moduleRoot(t)
+
+	for _, dir := range []string{"internal/modules", "internal/httperr", "internal/httpx", "internal/config"} {
+		for _, pkg := range packagesUnder(t, root, dir) {
+			for imported := range transitiveImports(t, root, pkg) {
+				if matches(imported, modulePath+"/internal/app") {
+					t.Errorf("%s reaches internal/app\n\n"+
+						"The composition root is the only place that may know two modules\n"+
+						"exist, and only cmd may build it. A package needing something from\n"+
+						"another module declares a contract instead.",
+						shortName(pkg))
+				}
+			}
 		}
 	}
 }
