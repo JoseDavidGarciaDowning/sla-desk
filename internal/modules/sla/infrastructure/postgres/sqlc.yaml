@@ -1,0 +1,42 @@
+# The SLA module's own sqlc setup. It owns sla_policies and nothing else.
+#
+# See internal/modules/identity/infrastructure/postgres/sqlc.yaml for why the
+# schema points at the shared goose migrations rather than a local schema.sql,
+# and why omit_unused_structs is what turns per-module queries into a boundary
+# with no type to cross it: tickets references sla_policies with a foreign key,
+# and no Ticket struct is generated here.
+version: "2"
+
+sql:
+  - engine: "postgresql"
+    schema: "../../../../../db/migrations"
+    queries: "queries"
+    gen:
+      go:
+        package: "sladb"
+        out: "sladb"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        omit_unused_structs: true
+
+        overrides:
+          # The bare "timestamptz". See the root config for why the
+          # pg_catalog-qualified spelling silently matches nothing.
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+
+          # This module's own domain owns the priority vocabulary. It holds the
+          # same four strings the ticket module declares and is a different type
+          # on purpose — one is how urgent a requester says a ticket is, the
+          # other is which row of this table applies. See docs/adr/0005.
+          - column: "sla_policies.priority"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
+              package: "domain"
+              type: "Priority"

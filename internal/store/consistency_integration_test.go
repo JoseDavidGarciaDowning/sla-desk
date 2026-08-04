@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/sla"
+	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
+	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
@@ -18,7 +19,7 @@ import (
 //	in ticket_status_history for that ticket.
 //
 // Reframed per docs/adr/0001, this is not a test of the arithmetic. The unit
-// tests at the internal/sla seams cover that, and asserting Reconstruct(history)
+// tests at the the SLA module seams cover that, and asserting Reconstruct(history)
 // == cache when the write path *produces* the cache by calling Reconstruct
 // would be circular.
 //
@@ -27,7 +28,7 @@ import (
 // updated, the fact and the cache committed separately, the history read before
 // the new row was inserted so the clock is one event behind, or a partial write
 // left behind. None of those are reachable from a unit test, because none of
-// them are in internal/sla.
+// them are in the SLA module.
 //
 // Property-based over generated sequences rather than a handful of examples,
 // because the interesting failures live in particular shapes — a pause
@@ -101,22 +102,17 @@ func assertCacheMatchesHistory(t *testing.T, f repoFixture, q *store.Queries, tk
 		t.Fatalf("%s: the ticket has no history at all", when)
 	}
 
-	policyRow, err := q.GetSLAPolicyByID(f.ctx, stored.SlaPolicyID)
+	policy, err := slapostgres.NewPolicyRepository(f.pool).ByID(f.ctx, stored.SlaPolicyID)
 	if err != nil {
 		t.Fatalf("%s: reading the policy: %v", when, err)
 	}
 
-	timeline := make([]sla.Phase, len(rows))
+	timeline := make([]sladomain.Phase, len(rows))
 	for i, row := range rows {
-		timeline[i] = sla.Phase{At: row.CreatedAt, Running: row.ToStatus.RunsClock()}
+		timeline[i] = sladomain.Phase{At: row.CreatedAt, Running: row.ToStatus.RunsClock()}
 	}
 
-	state, err := sla.Reconstruct(sla.Policy{
-		ID:       policyRow.ID,
-		Priority: sla.Priority(policyRow.Priority),
-		Budget:   time.Duration(policyRow.BudgetMinutes) * time.Minute,
-		Schedule: sla.Always24x7{},
-	}, timeline)
+	state, err := sladomain.Reconstruct(policy, timeline)
 	if err != nil {
 		t.Fatalf("%s: Reconstruct over %d rows: %v", when, len(rows), err)
 	}

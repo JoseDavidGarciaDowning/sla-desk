@@ -6,7 +6,7 @@
 //
 // See docs/spec.md §4.2 for the clock model and docs/adr/0001 for why a single
 // calculation path exists.
-package sla
+package domain
 
 import "time"
 

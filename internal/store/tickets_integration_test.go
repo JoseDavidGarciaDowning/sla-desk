@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
+	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
@@ -20,7 +22,7 @@ import (
 // than hardcoded, because identity values depend on how often the seed has run.
 func normalPolicyID(t *testing.T, ctx testContext) int64 {
 	t.Helper()
-	p, err := ctx.q.GetActiveSLAPolicyByPriority(ctx.ctx, ticket.PriorityNormal)
+	p, err := slapostgres.NewPolicyRepository(ctx.tx).ActiveByPriority(ctx.ctx, sladomain.PriorityNormal)
 	if err != nil {
 		t.Fatalf("resolving the normal policy: %v", err)
 	}
@@ -590,7 +592,7 @@ func newTicketWith(t *testing.T, c testContext, requester pgtype.UUID, title str
 
 func policyIDFor(t *testing.T, c testContext, priority ticket.Priority) int64 {
 	t.Helper()
-	p, err := c.q.GetActiveSLAPolicyByPriority(c.ctx, priority)
+	p, err := slapostgres.NewPolicyRepository(c.tx).ActiveByPriority(c.ctx, sladomain.Priority(priority))
 	if err != nil {
 		t.Fatalf("resolving the %s policy: %v", priority, err)
 	}

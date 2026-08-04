@@ -49,15 +49,9 @@ sql:
           # database and the Go type enforces it in Go, and nothing has to
           # translate between them.
           #
-          # users.role is deliberately absent: the users table belongs to the
-          # identity module, which generates it from its own config against its
-          # own domain.
-          - column: "sla_policies.priority"
-            go_type:
-              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
-              package: "ticket"
-              type: "Priority"
-
+          # users.role and sla_policies.priority are deliberately absent: those
+          # tables belong to the identity and SLA modules, which generate them
+          # from their own configs against their own domains.
           - column: "tickets.priority"
             go_type:
               import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"

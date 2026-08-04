@@ -11,16 +11,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type SlaPolicy struct {
-	ID            int64
-	Name          string
-	Priority      ticket.Priority
-	BudgetMinutes int32
-	ScheduleMode  string
-	Active        bool
-	CreatedAt     time.Time
-}
-
 type Ticket struct {
 	ID                pgtype.UUID
 	RequesterID       pgtype.UUID

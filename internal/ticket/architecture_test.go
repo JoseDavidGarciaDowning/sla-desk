@@ -22,9 +22,12 @@ import (
 const modulePath = "github.com/JoseDavidGarciaDowning/sla-desk"
 
 // domainPackages must be pure: no database, no HTTP, no framework.
+//
+// internal/sla was here until it moved into internal/modules/sla. Its purity is
+// now asserted by TestModuleDomainsArePure in internal/architecture, over every
+// module's domain rather than over a list that has to be remembered.
 var domainPackages = []string{
 	modulePath + "/internal/ticket",
-	modulePath + "/internal/sla",
 }
 
 // forbidden are import paths a domain package must not reach, directly or
@@ -33,7 +36,6 @@ var domainPackages = []string{
 var forbidden = []string{
 	modulePath + "/internal/store",
 	modulePath + "/internal/api",
-	modulePath + "/internal/auth",
 	modulePath + "/internal/config",
 	"database/sql",
 	"github.com/jackc/pgx",
@@ -75,8 +77,8 @@ func TestTicketDoesNotImportSLA(t *testing.T) {
 	root := moduleRoot(t)
 
 	for imported := range transitiveImports(t, root, modulePath+"/internal/ticket") {
-		if matches(imported, modulePath+"/internal/sla") {
-			t.Errorf("internal/ticket reaches internal/sla\n\n" +
+		if matches(imported, modulePath+"/internal/modules/sla") {
+			t.Errorf("internal/ticket reaches the SLA module\n\n" +
 				"A ticket does not know what an SLA is. Deadline arithmetic lives in\n" +
 				"internal/sla, which is handed a timeline and never the other way round.")
 		}

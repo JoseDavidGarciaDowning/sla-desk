@@ -12,7 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/sla"
+	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
+	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
@@ -175,22 +176,17 @@ func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 		t.Errorf("to_status = %q, want open", rows[0].ToStatus)
 	}
 
-	policyRow, err := q.GetActiveSLAPolicyByPriority(f.ctx, tk.Priority)
+	policy, err := slapostgres.NewPolicyRepository(f.pool).ActiveByPriority(f.ctx, sladomain.Priority(tk.Priority))
 	if err != nil {
 		t.Fatalf("resolving the policy: %v", err)
 	}
 
-	timeline := make([]sla.Phase, len(rows))
+	timeline := make([]sladomain.Phase, len(rows))
 	for i, row := range rows {
-		timeline[i] = sla.Phase{At: row.CreatedAt, Running: row.ToStatus.RunsClock()}
+		timeline[i] = sladomain.Phase{At: row.CreatedAt, Running: row.ToStatus.RunsClock()}
 	}
 
-	state, err := sla.Reconstruct(sla.Policy{
-		ID:       policyRow.ID,
-		Priority: sla.Priority(policyRow.Priority),
-		Budget:   time.Duration(policyRow.BudgetMinutes) * time.Minute,
-		Schedule: sla.Always24x7{},
-	}, timeline)
+	state, err := sladomain.Reconstruct(policy, timeline)
 	if err != nil {
 		t.Fatalf("Reconstruct: %v", err)
 	}
@@ -358,7 +354,7 @@ func TestCursorSeparatesTicketsSharingATimestamp(t *testing.T) {
 // history row, no transition.
 //
 // The cache update is forced to fail by pointing the ticket at a policy whose
-// schedule internal/sla cannot interpret, which fails after the history row has
+// schedule the SLA module cannot interpret, which fails after the history row has
 // already been inserted. If the two were in separate transactions the history
 // row would survive and the ticket would carry a status its history never
 // records.
@@ -400,8 +396,8 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 		Target:    ticket.StatusPending,
 		ActorID:   f.requester,
 		ActorRole: ticket.RoleAdmin,
-	}); !errors.Is(err, store.ErrUnsupportedSchedule) {
-		t.Fatalf("err = %v, want ErrUnsupportedSchedule", err)
+	}); !errors.Is(err, slapostgres.ErrUnsupportedScheduleMode) {
+		t.Fatalf("err = %v, want ErrUnsupportedScheduleMode — the SLA module refuses a schedule it cannot compute with", err)
 	}
 
 	after, err := q.ListTicketStatusHistory(f.ctx, tk.ID)

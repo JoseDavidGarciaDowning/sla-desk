@@ -3,12 +3,12 @@
 //   sqlc v1.31.1
 // source: sla_policies.sql
 
-package store
+package sladb
 
 import (
 	"context"
 
-	ticket "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+	domain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 )
 
 const getActiveSLAPolicyByPriority = `-- name: GetActiveSLAPolicyByPriority :one
@@ -20,7 +20,7 @@ WHERE priority = $1
 // Resolves the policy for a new ticket. The partial unique index on
 // (priority) WHERE active guarantees this returns at most one row, so :one is
 // a claim the database enforces rather than an assumption.
-func (q *Queries) GetActiveSLAPolicyByPriority(ctx context.Context, priority ticket.Priority) (SlaPolicy, error) {
+func (q *Queries) GetActiveSLAPolicyByPriority(ctx context.Context, priority domain.Priority) (SlaPolicy, error) {
 	row := q.db.QueryRow(ctx, getActiveSLAPolicyByPriority, priority)
 	var i SlaPolicy
 	err := row.Scan(

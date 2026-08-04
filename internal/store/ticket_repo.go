@@ -4,28 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/sla"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla"
+	slaapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
+	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
 
-var (
-	// ErrNoPolicyForPriority means no active SLA policy serves that priority.
-	// A ticket cannot be created without one: the budget is data, and there is
-	// no default hiding in the code to fall back on.
-	ErrNoPolicyForPriority = errors.New("store: no active SLA policy for that priority")
-
-	// ErrUnsupportedSchedule means a policy names a schedule internal/sla does
-	// not implement. The CHECK constraint on schedule_mode should make this
-	// unreachable; it exists so that widening the constraint without shipping
-	// the schedule fails loudly instead of computing a wrong deadline.
-	ErrUnsupportedSchedule = errors.New("store: policy uses a schedule that is not implemented")
-)
+// ErrNoPolicyForPriority means no active SLA policy serves that priority.
+// A ticket cannot be created without one: the budget is data, and there is
+// no default hiding in the code to fall back on.
+var ErrNoPolicyForPriority = errors.New("store: no active SLA policy for that priority")
 
 // TicketRepo holds the writes that span more than one statement.
 //
@@ -89,16 +82,24 @@ func (r *TicketRepo) Create(ctx context.Context, in NewTicket) (Ticket, error) {
 		return Ticket{}, fmt.Errorf("reading the transaction time: %w", err)
 	}
 
-	policyRow, err := q.GetActiveSLAPolicyByPriority(ctx, in.Priority)
+	// The SLA module is built on this transaction's handle, so the policy read
+	// runs on the connection already held rather than taking a second one from
+	// the pool. pgxpool defaults to max(4, NumCPU); enough concurrent creates
+	// each holding two would wait on each other.
+	//
+	// Resolving before the transaction opens is the better shape and is what
+	// the ticket module will do once it owns this write. Today this package is
+	// still both the composition point and the transaction owner.
+	policy, err := sla.New(tx).Calculator.ForPriority(ctx, sladomain.Priority(in.Priority))
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return Ticket{}, fmt.Errorf("%w: %s", ErrNoPolicyForPriority, in.Priority)
+		// Translated rather than passed through. internal/api matches on this
+		// package's sentinel to answer 422 instead of 500, and making it match
+		// the SLA module's would mean importing that module to name an error —
+		// which is the coupling the contract exists to avoid. The original is
+		// kept wrapped so the cause still reaches the logs.
+		if errors.Is(err, slaapp.ErrNoPolicyForPriority) {
+			return Ticket{}, errors.Join(ErrNoPolicyForPriority, err)
 		}
-		return Ticket{}, fmt.Errorf("resolving the policy: %w", err)
-	}
-
-	policy, err := policyFrom(policyRow)
-	if err != nil {
 		return Ticket{}, err
 	}
 
@@ -109,7 +110,7 @@ func (r *TicketRepo) Create(ctx context.Context, in NewTicket) (Ticket, error) {
 	// The status decides whether the clock runs; the SLA package is only told
 	// the answer. That translation is this package's job today, and moves to
 	// the composition root once the modules are split.
-	state, err := sla.Reconstruct(policy, []sla.Phase{
+	state, err := sladomain.Reconstruct(policy, []sladomain.Phase{
 		{At: now, Running: ticket.StatusOpen.RunsClock()},
 	})
 	if err != nil {
@@ -148,31 +149,6 @@ func (r *TicketRepo) Create(ctx context.Context, in NewTicket) (Ticket, error) {
 		return Ticket{}, fmt.Errorf("commit: %w", err)
 	}
 	return created, nil
-}
-
-// policyFrom turns a stored policy into the domain one.
-//
-// It lives here rather than in internal/sla because that package must not know
-// this one exists: the dependency runs one way and an architecture test
-// enforces it.
-func policyFrom(row SlaPolicy) (sla.Policy, error) {
-	var schedule sla.Schedule
-	switch row.ScheduleMode {
-	case "24x7":
-		schedule = sla.Always24x7{}
-	default:
-		return sla.Policy{}, fmt.Errorf("%w: %q", ErrUnsupportedSchedule, row.ScheduleMode)
-	}
-
-	return sla.Policy{
-		ID: row.ID,
-		// Same four strings, two vocabularies: how urgent a requester says a
-		// ticket is, and which row of the policy table applies. The CHECK
-		// constraints on both columns mean the conversion cannot widen either.
-		Priority: sla.Priority(row.Priority),
-		Budget:   time.Duration(row.BudgetMinutes) * time.Minute,
-		Schedule: schedule,
-	}, nil
 }
 
 // ErrTicketNotFound means no ticket has that id.
@@ -229,7 +205,7 @@ func (r *TicketRepo) Transition(ctx context.Context, in StatusChange) (Ticket, e
 		return Ticket{}, err
 	}
 
-	policy, err := r.policyOf(ctx, q, current.SlaPolicyID)
+	policy, err := sla.New(tx).Calculator.ForPolicy(ctx, current.SlaPolicyID)
 	if err != nil {
 		return Ticket{}, err
 	}
@@ -255,11 +231,11 @@ func (r *TicketRepo) Transition(ctx context.Context, in StatusChange) (Ticket, e
 	}
 
 	// 3. The clock, from the fact rather than from the previous cache.
-	timeline := make([]sla.Phase, len(rows))
+	timeline := make([]sladomain.Phase, len(rows))
 	for i, row := range rows {
-		timeline[i] = sla.Phase{At: row.CreatedAt, Running: row.ToStatus.RunsClock()}
+		timeline[i] = sladomain.Phase{At: row.CreatedAt, Running: row.ToStatus.RunsClock()}
 	}
-	state, err := sla.Reconstruct(policy, timeline)
+	state, err := sladomain.Reconstruct(policy, timeline)
 	if err != nil {
 		return Ticket{}, fmt.Errorf("rebuilding the clock: %w", err)
 	}
@@ -281,17 +257,4 @@ func (r *TicketRepo) Transition(ctx context.Context, in StatusChange) (Ticket, e
 		return Ticket{}, fmt.Errorf("commit: %w", err)
 	}
 	return updated, nil
-}
-
-// policyOf reads the policy a ticket was created under.
-//
-// By id, not by priority: the policy is snapshotted at creation precisely so
-// that editing one does not silently move the deadlines of tickets that already
-// exist.
-func (r *TicketRepo) policyOf(ctx context.Context, q *Queries, id int64) (sla.Policy, error) {
-	row, err := q.GetSLAPolicyByID(ctx, id)
-	if err != nil {
-		return sla.Policy{}, fmt.Errorf("reading policy %d: %w", id, err)
-	}
-	return policyFrom(row)
 }

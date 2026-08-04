@@ -1,4 +1,4 @@
-package sla
+package domain
 
 import (
 	"errors"
