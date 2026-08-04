@@ -1,0 +1,138 @@
+name: CI
+
+# Every push and every pull request. A gate that only runs on one of them is a
+# gate someone can walk around.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch cancels the first. The older run's verdict is
+# about code nobody will merge.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Read once here so a version bump is one edit rather than four.
+  GO_VERSION: "1.26.1"
+  NODE_VERSION: "22"
+
+jobs:
+  # ── Go ──────────────────────────────────────────────────────────────────────
+  #
+  # Split from the integration job so a compile error or a failing unit test is
+  # reported in seconds, without waiting for Postgres to come up.
+  go:
+    name: Go — lint and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # `go tool`, not golangci-lint-action. The linter is pinned in go.mod
+      # alongside goose and sqlc, so this runs the same version a laptop does —
+      # an action that installs its own drifts, and the first anyone hears of it
+      # is a pull request that is red for nobody's mistake.
+      - name: Lint
+        run: make lint
+
+      # The generated frontend contract must match the Go declarations it comes
+      # from. This is the same TestGeneratedContractIsUpToDate that runs below;
+      # naming it here is what makes the failure legible when someone changes a
+      # bound and forgets `make contract`.
+      - name: Tests
+        run: go test ./... -race -cover
+
+      # A go.mod or go.sum that `go mod tidy` would change means the committed
+      # dependency set is not the one the code needs.
+      - name: Dependencies are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+  # ── Integration ─────────────────────────────────────────────────────────────
+  integration:
+    name: Go — integration tests
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sladesk
+          POSTGRES_PASSWORD: sladesk
+          POSTGRES_DB: sladesk
+        ports:
+          - 5432:5432
+        # Without this the job races the database: the first migration would
+        # fail against a container that has not finished starting.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # 5432 here, not the 5433 used locally. The local port is unusual because
+      # this machine runs another project; a CI runner has nothing to collide
+      # with.
+      DATABASE_URL: postgres://sladesk:sladesk@localhost:5432/sladesk?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # make test-int applies the migrations first, and refuses to run at all
+      # without DATABASE_URL — every integration test calls t.Skip without it,
+      # and `go test` would print ok for a run that asserted nothing.
+      - name: Integration tests
+        run: make test-int
+
+  # ── Web ─────────────────────────────────────────────────────────────────────
+  web:
+    name: Web — lint, tests and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      # --frozen-lockfile so a lockfile that disagrees with package.json fails
+      # here rather than quietly installing something nobody chose.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Tests
+        run: pnpm test
+
+      # The build type-checks, so this catches what tsc would. It needs no
+      # credentials: measured, not assumed — `next build` with every Clerk and
+      # API variable empty compiles and prerenders. The routes that need a
+      # session are dynamic and are never prerendered.
+      - name: Build
+        run: pnpm build
