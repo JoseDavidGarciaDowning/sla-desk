@@ -14,7 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/app"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
@@ -66,7 +66,7 @@ func run() error {
 	// Redis is intentionally not probed: nothing uses it until slice 5, and a
 	// health check that fails on an unused dependency would take the service
 	// down for no reason.
-	probes := map[string]api.Probe{
+	probes := map[string]app.Probe{
 		"database": pool.Ping,
 	}
 
@@ -85,13 +85,12 @@ func run() error {
 	// it as the contract it declared, never as the module itself: it is handed
 	// something that can resolve a clock, and does not learn where from.
 	slaModule := sla.New(pool)
-	ticketModule := ticket.New(pool, api.SLAPolicies{Calculator: slaModule.Calculator})
+	ticketModule := ticket.New(pool, app.SLAPolicies{Calculator: slaModule.Calculator})
 
-	handler, err := api.NewRouter(cfg, api.Deps{
+	handler, err := app.NewRouter(cfg, app.Deps{
 		Probes:   probes,
 		Identity: identityModule,
-		Tickets:  ticketModule.Service,
-		Reader:   ticketModule.Service,
+		Tickets:  ticketModule,
 	})
 	if err != nil {
 		// Configuration the router cannot work with, most likely a malformed

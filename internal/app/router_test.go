@@ -1,4 +1,4 @@
-package api
+package app
 
 import (
 	"context"
@@ -15,6 +15,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket"
+	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
+
 	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
@@ -23,13 +28,11 @@ import (
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
-	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
-	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 )
 
 func testRouter(t *testing.T) http.Handler {
 	t.Helper()
-	h, err := NewRouter(testConfig(), Deps{Identity: testIdentity(testConfig(), routerStubUsers{})})
+	h, err := NewRouter(testConfig(), Deps{Identity: testIdentity(testConfig(), routerStubUsers{}), Tickets: testTickets()})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -121,10 +124,10 @@ func TestTheTicketRoutesRequireASession(t *testing.T) {
 	const someTicket = "/44444444-4444-4444-4444-444444444444"
 
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodPost, TicketsPath},
-		{http.MethodGet, TicketsPath},
-		{http.MethodGet, TicketsPath + someTicket},
-		{http.MethodGet, TicketsPath + someTicket + TicketHistorySuffix},
+		{http.MethodPost, tickethttp.TicketsPath},
+		{http.MethodGet, tickethttp.TicketsPath},
+		{http.MethodGet, tickethttp.TicketsPath + someTicket},
+		{http.MethodGet, tickethttp.TicketsPath + someTicket + tickethttp.TicketHistorySuffix},
 	} {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
@@ -157,12 +160,17 @@ func TestRouterRefusesAnUnusableWebhookSecret(t *testing.T) {
 	// The identity module is supplied, and built from the same bad config, so
 	// this fails for the reason under test. Passing Deps{} would now fail on
 	// the missing module instead and the test would pass having proved nothing.
-	_, err := NewRouter(cfg, Deps{Identity: testIdentity(cfg, routerStubUsers{})})
+	_, err := NewRouter(cfg, Deps{Identity: testIdentity(cfg, routerStubUsers{}), Tickets: testTickets()})
 	if err == nil {
 		t.Fatal("expected an error — a bad secret must stop the process at startup")
 	}
-	if strings.Contains(err.Error(), "Deps.Identity") {
-		t.Errorf("failed on the missing module, not on the secret: %v", err)
+	// Both modules are supplied, and from the same bad config, so this fails
+	// for the reason under test. Omitting either would fail on the missing
+	// module instead and the test would pass having proved nothing.
+	for _, wrong := range []string{"Deps.Identity", "Deps.Tickets"} {
+		if strings.Contains(err.Error(), wrong) {
+			t.Errorf("failed on a missing module, not on the secret: %v", err)
+		}
 	}
 }
 
@@ -198,17 +206,16 @@ func TestASignedRequestReachesTheHandlerThroughTheRouter(t *testing.T) {
 	cfg.ClerkAPIURL = jwksServer.URL
 
 	caller := identitydomain.User{ClerkUserID: "user_router", Email: "router@example.test", Role: identitydomain.RoleCustomer}
-	reader := routerFakeReader{}
 
 	router, err := NewRouter(cfg, Deps{
 		Identity: testIdentity(cfg, routerStubUsers{user: caller}),
-		Reader:   reader,
+		Tickets:  ticket.NewWith(stubTicketRepo{}, stubSLA{}),
 	})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
 
-	r := httptest.NewRequest(http.MethodGet, TicketsPath, nil)
+	r := httptest.NewRequest(http.MethodGet, tickethttp.TicketsPath, nil)
 	r.Header.Set("Authorization", "Bearer "+mintRouterToken(t, key, kid, "user_router"))
 
 	rec := httptest.NewRecorder()
@@ -266,20 +273,6 @@ func (s routerStubUsers) Upsert(context.Context, string, identitydomain.Identity
 	return s.user, nil
 }
 
-type routerFakeReader struct{}
-
-func (routerFakeReader) List(context.Context, ticketapp.ListFilter) ([]ticketdomain.Ticket, error) {
-	return nil, nil
-}
-
-func (routerFakeReader) Get(context.Context, uuid.UUID, uuid.UUID) (ticketdomain.Ticket, error) {
-	return ticketdomain.Ticket{}, nil
-}
-
-func (routerFakeReader) History(context.Context, uuid.UUID, uuid.UUID) ([]ticketdomain.HistoryEntry, error) {
-	return nil, nil
-}
-
 // testIdentity builds the identity module the way NewRouter's caller does, so a
 // router test exercises the real middleware chain rather than a stand-in for
 // it. Only the users table and the JWKS endpoint are replaced.
@@ -294,3 +287,46 @@ func testIdentity(cfg config.Config, users identityapp.UserRepository) *identity
 		WebhookSecret: cfg.ClerkWebhookSecret,
 	})
 }
+
+// stubTicketRepo and stubSLA let the router be built with the real ticket
+// module — real handlers, real use cases — and no database.
+//
+// The router tests assert which middleware a route sits behind, so what the
+// handlers return does not matter; that they are the real ones does.
+// testTickets builds the real ticket module over stubs, so a router test
+// mounts the real handlers behind the real middleware.
+func testTickets() *ticket.Module {
+	return ticket.NewWith(stubTicketRepo{}, stubSLA{})
+}
+
+type stubTicketRepo struct{}
+
+func (stubTicketRepo) Create(context.Context, ticketapp.NewTicket, ticketapp.SLAClock) (ticketdomain.Ticket, error) {
+	return ticketdomain.Ticket{}, nil
+}
+
+func (stubTicketRepo) Transition(context.Context, ticketapp.StatusChange, ticketapp.SLAClock) (ticketdomain.Ticket, error) {
+	return ticketdomain.Ticket{}, nil
+}
+
+func (stubTicketRepo) PolicyIDOf(context.Context, uuid.UUID) (int64, error) { return 1, nil }
+
+func (stubTicketRepo) ListByRequester(context.Context, ticketapp.ListFilter) ([]ticketdomain.Ticket, error) {
+	return nil, nil
+}
+
+func (stubTicketRepo) GetForRequester(context.Context, uuid.UUID, uuid.UUID) (ticketdomain.Ticket, error) {
+	return ticketdomain.Ticket{}, nil
+}
+
+func (stubTicketRepo) HistoryForRequester(context.Context, uuid.UUID, uuid.UUID) ([]ticketdomain.HistoryEntry, error) {
+	return nil, nil
+}
+
+type stubSLA struct{}
+
+func (stubSLA) ForPriority(context.Context, ticketdomain.Priority) (ticketapp.SLAClock, error) {
+	return nil, nil
+}
+
+func (stubSLA) ForPolicy(context.Context, int64) (ticketapp.SLAClock, error) { return nil, nil }

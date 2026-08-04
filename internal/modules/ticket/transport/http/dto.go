@@ -1,4 +1,4 @@
-package api
+package http
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 )
 
 // Bounds mirror the CHECK constraints in migration 003. Validating here as well
@@ -26,26 +26,26 @@ const (
 // put one cannot be talked into it — the value is dropped when the body is
 // decoded, before any code has a chance to read it.
 type CreateTicketRequest struct {
-	Title       string                `json:"title"`
-	Description string                `json:"description"`
-	Category    ticketdomain.Category `json:"category"`
-	Priority    ticketdomain.Priority `json:"priority"`
+	Title       string          `json:"title"`
+	Description string          `json:"description"`
+	Category    domain.Category `json:"category"`
+	Priority    domain.Priority `json:"priority"`
 }
 
 var (
-	validCategories = []ticketdomain.Category{
-		ticketdomain.CategoryBilling, ticketdomain.CategoryTechnical, ticketdomain.CategoryAccount, ticketdomain.CategoryOther,
+	validCategories = []domain.Category{
+		domain.CategoryBilling, domain.CategoryTechnical, domain.CategoryAccount, domain.CategoryOther,
 	}
-	validPriorities = []ticketdomain.Priority{
-		ticketdomain.PriorityUrgent, ticketdomain.PriorityHigh, ticketdomain.PriorityNormal, ticketdomain.PriorityLow,
+	validPriorities = []domain.Priority{
+		domain.PriorityUrgent, domain.PriorityHigh, domain.PriorityNormal, domain.PriorityLow,
 	}
 
 	// Statuses are never accepted in a request body — a client does not choose
 	// what state a ticket is in — but they are accepted as a list filter, and
 	// the frontend needs them to render both the filter control and a status
 	// label. In the contract for that reason, and validated for the same one.
-	validStatuses = []ticketdomain.Status{
-		ticketdomain.StatusOpen, ticketdomain.StatusPending, ticketdomain.StatusResolved, ticketdomain.StatusClosed,
+	validStatuses = []domain.Status{
+		domain.StatusOpen, domain.StatusPending, domain.StatusResolved, domain.StatusClosed,
 	}
 )
 
@@ -106,15 +106,15 @@ func join[T ~string](values []T) string {
 
 // TicketResponse is a ticket as the API returns it.
 //
-// Not ticketdomain.Ticket: that would put pgtype values and every future column on the
+// Not domain.Ticket: that would put pgtype values and every future column on the
 // wire, and make a schema change a breaking API change.
 type TicketResponse struct {
-	ID          string                `json:"id"`
-	Title       string                `json:"title"`
-	Description string                `json:"description"`
-	Category    ticketdomain.Category `json:"category"`
-	Priority    ticketdomain.Priority `json:"priority"`
-	Status      ticketdomain.Status   `json:"status"`
+	ID          string          `json:"id"`
+	Title       string          `json:"title"`
+	Description string          `json:"description"`
+	Category    domain.Category `json:"category"`
+	Priority    domain.Priority `json:"priority"`
+	Status      domain.Status   `json:"status"`
 
 	// SLADueAt is null while the clock is paused, which is what makes a paused
 	// ticket unable to breach. The frontend renders the absence, not a zero.
@@ -125,7 +125,7 @@ type TicketResponse struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func NewTicketResponse(row ticketdomain.Ticket) TicketResponse {
+func NewTicketResponse(row domain.Ticket) TicketResponse {
 	return TicketResponse{
 		ID:          row.ID.String(),
 		Title:       row.Title,
@@ -142,7 +142,7 @@ func NewTicketResponse(row ticketdomain.Ticket) TicketResponse {
 
 // TicketHistoryEntry is one status change, as a requester is allowed to see it.
 //
-// Not ticketdomain.TicketStatusHistory. That row carries ActorID — another user's
+// Not domain.TicketStatusHistory. That row carries ActorID — another user's
 // primary key — and a customer has no use for it: it hands out an identifier to
 // enumerate and links their view of a ticket to the agent roster. The role is
 // what a timeline is actually for. "An agent resolved this" is the information;
@@ -153,11 +153,11 @@ func NewTicketResponse(row ticketdomain.Ticket) TicketResponse {
 type TicketHistoryEntry struct {
 	// FromStatus is null on the entry that records the ticket's creation, which
 	// is the only entry that moved from nowhere.
-	FromStatus *ticketdomain.Status `json:"from_status"`
-	ToStatus   ticketdomain.Status  `json:"to_status"`
-	ActorRole  ticketdomain.Role    `json:"actor_role"`
-	Reason     *string              `json:"reason"`
-	CreatedAt  time.Time            `json:"created_at"`
+	FromStatus *domain.Status `json:"from_status"`
+	ToStatus   domain.Status  `json:"to_status"`
+	ActorRole  domain.Role    `json:"actor_role"`
+	Reason     *string        `json:"reason"`
+	CreatedAt  time.Time      `json:"created_at"`
 }
 
 // TicketHistoryResponse is a ticket's timeline, oldest first.
@@ -169,7 +169,7 @@ type TicketHistoryResponse struct {
 	Entries []TicketHistoryEntry `json:"entries"`
 }
 
-func NewTicketHistoryResponse(rows []ticketdomain.HistoryEntry) TicketHistoryResponse {
+func NewTicketHistoryResponse(rows []domain.HistoryEntry) TicketHistoryResponse {
 	// make, so an empty timeline encodes as [] rather than null — though the
 	// handler answers 404 before it can be empty.
 	entries := make([]TicketHistoryEntry, 0, len(rows))

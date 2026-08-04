@@ -1,10 +1,12 @@
-package api
+package app
 
 import (
 	"context"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httpx"
 )
 
 // Probe reports whether one dependency is reachable.
@@ -62,6 +64,6 @@ func healthHandler(probes map[string]Probe) http.HandlerFunc {
 			status = http.StatusServiceUnavailable
 		}
 
-		writeJSON(w, r, status, body)
+		httpx.WriteJSON(w, r, status, body)
 	}
 }

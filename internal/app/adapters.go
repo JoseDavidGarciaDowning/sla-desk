@@ -1,47 +1,36 @@
-package api
+package app
 
 import (
 	"context"
 
-	"github.com/google/uuid"
-
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 )
 
 // This file is where the identity module's answers are translated into the
 // vocabulary the ticket handlers work in. It is the only place in this package
 // that names both modules.
 //
-// It exists here because internal/api is still the composition point. When
-// internal/app takes that job, this file moves there unchanged in substance —
-// which is the test of whether the translation is real work or ceremony.
-
-// Caller is the authenticated user as this package's handlers need them.
-type Caller struct {
-	// ID needs no conversion any more. Both modules carry uuid.UUID, because
-	// neither domain may import a database driver — the pgtype.UUID that used
-	// to be translated here was a property of the generated code, and it stopped
-	// leaking out of it when the ticket module got its own sqlc config.
-	ID uuid.UUID
-
-	// Role is what this actor was at the moment they acted, denormalised onto
-	// the audit trail. See actorRole.
-	Role ticketdomain.Role
-}
+// It moved here from internal/api unchanged in substance, which was the test
+// set for it when it was written: a translation that had to be rewritten when
+// the composition point moved would have been ceremony rather than work.
 
 // callerFromContext reads the authenticated user and converts them.
 //
 // The second result is false on any request that did not pass through the
 // identity module's middleware, which is the only thing that puts a user there.
-func callerFromContext(ctx context.Context) (Caller, bool) {
+// It satisfies tickethttp.CallerResolver, which is the contract the ticket
+// module declared for exactly this. That module never learns where a caller
+// comes from, and the identity module never learns what one is used for.
+func callerFromContext(ctx context.Context) (tickethttp.Caller, bool) {
 	user, ok := identityhttp.UserFromContext(ctx)
 	if !ok {
-		return Caller{}, false
+		return tickethttp.Caller{}, false
 	}
 
-	return Caller{
+	return tickethttp.Caller{
 		ID:   user.ID,
 		Role: actorRole(user.Role),
 	}, true

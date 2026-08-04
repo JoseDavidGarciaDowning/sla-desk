@@ -1,12 +1,18 @@
-// Package api wires HTTP routes to handlers. It owns transport concerns only:
-// status codes, serialisation and middleware. Business rules live in the domain
-// packages and are never decided here.
-package api
+// Package app is the composition root.
+//
+// It is the only package that may import more than one business module, and it
+// is what turns three modules that know nothing about each other into one
+// running service: it builds them, mounts their routes, and supplies each with
+// the contracts the others implement.
+//
+// Nothing here contains a business rule. If a decision has to be made, it
+// belongs in a module — this package only connects ends. Nothing may import it
+// back either, and an architecture test enforces that: a module reaching into
+// the wiring would be depending on its own neighbours through the back door.
+package app
 
 import (
-	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -15,6 +21,8 @@ import (
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket"
+	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 )
 
 // HealthPath is the health endpoint.
@@ -36,10 +44,10 @@ type Deps struct {
 	// collaborators, so this package never names what is inside it.
 	Identity *identity.Module
 
-	// Tickets writes; Reader reads. Two interfaces rather than one because the
-	// write path needs a transaction and the read path does not.
-	Tickets TicketCreator
-	Reader  TicketReader
+	// Tickets owns the ticket endpoints. Like Identity it is the built module,
+	// not its collaborators: this package supplies what the module declared it
+	// needs and does not reach inside it.
+	Tickets *ticket.Module
 }
 
 // NewRouter builds the HTTP handler. The config is held rather than read from
@@ -80,7 +88,10 @@ func NewRouter(cfg config.Config, deps Deps) (http.Handler, error) {
 	// dereference on the first request to reach a protected route — in
 	// production, at 3am, rather than here.
 	if deps.Identity == nil {
-		return nil, errors.New("api: Deps.Identity is required; every protected route sits behind it")
+		return nil, errors.New("app: Deps.Identity is required; every protected route sits behind it")
+	}
+	if deps.Tickets == nil {
+		return nil, errors.New("app: Deps.Tickets is required")
 	}
 
 	webhookPath, webhook, err := deps.Identity.WebhookRoute()
@@ -96,23 +107,11 @@ func NewRouter(cfg config.Config, deps Deps) (http.Handler, error) {
 		// (docs/spec.md §4.3).
 		r.Use(deps.Identity.Authenticate)
 
-		r.Method(http.MethodPost, TicketsPath, CreateTicketHandler(deps.Tickets))
-		r.Method(http.MethodGet, TicketsPath, ListTicketsHandler(deps.Reader))
-		r.Method(http.MethodGet, TicketsPath+"/{id}", GetTicketHandler(deps.Reader))
-		r.Method(http.MethodGet, TicketsPath+"/{id}"+TicketHistorySuffix, GetTicketHistoryHandler(deps.Reader))
+		// The module mounts its own routes on a router that already carries
+		// authentication. It cannot mount them anywhere else, which is what
+		// stops an endpoint being added outside this group by accident.
+		tickethttp.Routes(r, deps.Tickets.Service, callerFromContext)
 	})
 
 	return r, nil
-}
-
-func writeJSON(w http.ResponseWriter, r *http.Request, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		// The status line is already on the wire, so the client cannot be told.
-		// Log it rather than swallowing it silently.
-		slog.ErrorContext(r.Context(), "encoding response failed",
-			"error", err, "path", r.URL.Path)
-	}
 }

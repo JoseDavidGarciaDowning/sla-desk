@@ -1,21 +1,21 @@
-package api_test
+package http_test
 
 import (
 	"encoding/json"
 	"strings"
 	"testing"
 
-	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
+	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 )
 
-func validCreateTicket() api.CreateTicketRequest {
-	return api.CreateTicketRequest{
+func validCreateTicket() tickethttp.CreateTicketRequest {
+	return tickethttp.CreateTicketRequest{
 		Title:       "Cannot download my invoice",
 		Description: "The download button returns a 500.",
-		Category:    ticketdomain.CategoryBilling,
-		Priority:    ticketdomain.PriorityNormal,
+		Category:    domain.CategoryBilling,
+		Priority:    domain.PriorityNormal,
 	}
 }
 
@@ -26,7 +26,7 @@ func TestValidRequestHasNoFieldErrors(t *testing.T) {
 }
 
 func TestValidationReportsEveryBadFieldAtOnce(t *testing.T) {
-	req := api.CreateTicketRequest{
+	req := tickethttp.CreateTicketRequest{
 		Title:       "",
 		Description: "",
 		Category:    "sales",
@@ -82,7 +82,7 @@ func TestRequesterIDInTheBodyHasNowhereToLand(t *testing.T) {
 		"sla_due_at": "2000-01-01T00:00:00Z"
 	}`)
 
-	var req api.CreateTicketRequest
+	var req tickethttp.CreateTicketRequest
 	if err := json.Unmarshal(body, &req); err != nil {
 		t.Fatalf("decoding: %v", err)
 	}

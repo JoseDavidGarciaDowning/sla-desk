@@ -1,4 +1,4 @@
-package api
+package http
 
 import (
 	"context"
@@ -19,8 +19,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
-	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
-	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httpx"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 )
 
 // TicketsPath is the collection endpoint.
@@ -33,7 +34,7 @@ const maxTicketBody = 64 << 10 // 64 KiB
 // TicketCreator is the slice of the store this handler needs. Declared by the
 // consumer, per docs/spec.md §8; the ticket module's Service satisfies it.
 type TicketCreator interface {
-	Create(ctx context.Context, in ticketapp.NewTicket) (ticketdomain.Ticket, error)
+	Create(ctx context.Context, in application.NewTicket) (domain.Ticket, error)
 }
 
 // CreateTicketHandler serves POST /api/tickets.
@@ -41,9 +42,9 @@ type TicketCreator interface {
 // It must be mounted behind RequireAuth. The requester is read from the request
 // context and never from the body — docs/spec.md §4.3 — and CreateTicketRequest
 // has no field one could arrive in anyway.
-func CreateTicketHandler(tickets TicketCreator) http.Handler {
+func CreateTicketHandler(tickets TicketCreator, resolve CallerResolver) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := callerFromContext(r.Context())
+		caller, ok := resolve(r.Context())
 		if !ok {
 			// Only reachable if this route is mounted without RequireAuth in
 			// front of it, which is a wiring mistake rather than a bad request.
@@ -65,7 +66,7 @@ func CreateTicketHandler(tickets TicketCreator) http.Handler {
 		}
 		req = req.Normalised()
 
-		created, err := tickets.Create(r.Context(), ticketapp.NewTicket{
+		created, err := tickets.Create(r.Context(), application.NewTicket{
 			RequesterID: caller.ID,
 			ActorRole:   caller.Role,
 			Title:       req.Title,
@@ -77,7 +78,7 @@ func CreateTicketHandler(tickets TicketCreator) http.Handler {
 			// A priority with no policy is our seed being wrong, not the
 			// caller's request: validation has already established that the
 			// priority is one of the four the system supports.
-			if errors.Is(err, ticketapp.ErrNoSLAPolicy) {
+			if errors.Is(err, application.ErrNoSLAPolicy) {
 				slog.ErrorContext(r.Context(), "no active SLA policy serves a supported priority",
 					"priority", req.Priority, "error", err)
 			} else {
@@ -88,7 +89,7 @@ func CreateTicketHandler(tickets TicketCreator) http.Handler {
 		}
 
 		w.Header().Set("Location", TicketsPath+"/"+created.ID.String())
-		writeJSON(w, r, http.StatusCreated, NewTicketResponse(created))
+		httpx.WriteJSON(w, r, http.StatusCreated, NewTicketResponse(created))
 	})
 }
 
@@ -111,9 +112,9 @@ type TicketListResponse struct {
 
 // TicketReader is the slice of the store the read endpoints need.
 type TicketReader interface {
-	List(ctx context.Context, f ticketapp.ListFilter) ([]ticketdomain.Ticket, error)
-	Get(ctx context.Context, id, requesterID uuid.UUID) (ticketdomain.Ticket, error)
-	History(ctx context.Context, ticketID, requesterID uuid.UUID) ([]ticketdomain.HistoryEntry, error)
+	List(ctx context.Context, f application.ListFilter) ([]domain.Ticket, error)
+	Get(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error)
+	History(ctx context.Context, ticketID, requesterID uuid.UUID) ([]domain.HistoryEntry, error)
 }
 
 // encodeCursor packs the sort key of the last row on a page.
@@ -189,16 +190,16 @@ func filterParam[T ~string](q url.Values, name string, valid []T) (*string, stri
 // arrives to be filtered out — and that stays true with filters applied,
 // because they are further predicates on the same query rather than a
 // replacement for it.
-func ListTicketsHandler(tickets TicketReader) http.Handler {
+func ListTicketsHandler(tickets TicketReader, resolve CallerResolver) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := callerFromContext(r.Context())
+		caller, ok := resolve(r.Context())
 		if !ok {
 			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 
 		query := r.URL.Query()
-		params := ticketapp.ListFilter{RequesterID: caller.ID}
+		params := application.ListFilter{RequesterID: caller.ID}
 
 		// Both filters are read before either is rejected, so a request with
 		// two bad ones is told about two rather than about the first.
@@ -208,12 +209,12 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 		if raw, problem = filterParam(query, "status", validStatuses); problem != "" {
 			filterErrs["status"] = problem
 		} else {
-			params.Status = (*ticketdomain.Status)(raw)
+			params.Status = (*domain.Status)(raw)
 		}
 		if raw, problem = filterParam(query, "priority", validPriorities); problem != "" {
 			filterErrs["priority"] = problem
 		} else {
-			params.Priority = (*ticketdomain.Priority)(raw)
+			params.Priority = (*domain.Priority)(raw)
 		}
 		if len(filterErrs) > 0 {
 			httperr.WriteValidation(w, filterErrs)
@@ -257,7 +258,7 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 			out = append(out, NewTicketResponse(row))
 		}
 
-		writeJSON(w, r, http.StatusOK, TicketListResponse{Tickets: out, NextCursor: next})
+		httpx.WriteJSON(w, r, http.StatusOK, TicketListResponse{Tickets: out, NextCursor: next})
 	})
 }
 
@@ -267,9 +268,9 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 // A 403 would confirm that the id names a real ticket, which is exactly what
 // the caller must not be able to learn. The query returns no rows for both
 // cases, so the handler cannot tell them apart either.
-func GetTicketHandler(tickets TicketReader) http.Handler {
+func GetTicketHandler(tickets TicketReader, resolve CallerResolver) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := callerFromContext(r.Context())
+		caller, ok := resolve(r.Context())
 		if !ok {
 			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return
@@ -286,7 +287,7 @@ func GetTicketHandler(tickets TicketReader) http.Handler {
 			// The module reports "not yours" and "does not exist" as the same
 			// error, on purpose: a 403 would confirm that an id names a real
 			// ticket (docs/spec.md §11).
-			if errors.Is(err, ticketapp.ErrTicketNotFound) {
+			if errors.Is(err, application.ErrTicketNotFound) {
 				httperr.Write(w, http.StatusNotFound, "no such ticket")
 				return
 			}
@@ -295,7 +296,7 @@ func GetTicketHandler(tickets TicketReader) http.Handler {
 			return
 		}
 
-		writeJSON(w, r, http.StatusOK, NewTicketResponse(row))
+		httpx.WriteJSON(w, r, http.StatusOK, NewTicketResponse(row))
 	})
 }
 
@@ -312,9 +313,9 @@ const TicketHistorySuffix = "/history"
 // does not exist or is not the caller's — and the query cannot tell those
 // apart, which is exactly why this can answer 404 for both without confirming
 // that the id names a real ticket (docs/spec.md §11).
-func GetTicketHistoryHandler(tickets TicketReader) http.Handler {
+func GetTicketHistoryHandler(tickets TicketReader, resolve CallerResolver) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := callerFromContext(r.Context())
+		caller, ok := resolve(r.Context())
 		if !ok {
 			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return
@@ -328,7 +329,7 @@ func GetTicketHistoryHandler(tickets TicketReader) http.Handler {
 
 		rows, err := tickets.History(r.Context(), id, caller.ID)
 		if err != nil {
-			if errors.Is(err, ticketapp.ErrTicketNotFound) {
+			if errors.Is(err, application.ErrTicketNotFound) {
 				httperr.Write(w, http.StatusNotFound, "no such ticket")
 				return
 			}
@@ -342,6 +343,6 @@ func GetTicketHistoryHandler(tickets TicketReader) http.Handler {
 			return
 		}
 
-		writeJSON(w, r, http.StatusOK, NewTicketHistoryResponse(rows))
+		httpx.WriteJSON(w, r, http.StatusOK, NewTicketHistoryResponse(rows))
 	})
 }

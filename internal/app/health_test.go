@@ -1,4 +1,4 @@
-package api
+package app
 
 import (
 	"context"
@@ -14,7 +14,7 @@ func healthRequest(t *testing.T, probes map[string]Probe) *httptest.ResponseReco
 	t.Helper()
 
 	rec := httptest.NewRecorder()
-	router, err := NewRouter(testConfig(), Deps{Probes: probes, Identity: testIdentity(testConfig(), routerStubUsers{})})
+	router, err := NewRouter(testConfig(), Deps{Probes: probes, Identity: testIdentity(testConfig(), routerStubUsers{}), Tickets: testTickets()})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
