@@ -28,7 +28,16 @@ web/.vercel/
 .claude/skills/
 skills-lock.json
 
-# Personal operational notes. They contain deployment specifics and study notes
-# rather than project code, and are kept out of the repository by choice.
-sla-desk-gcloud-cli-cheatsheet.md
+# Personal operational notes. They hold deployment specifics, credentials and
+# study notes rather than project code, and are kept out of the repository by
+# choice.
+#
+# Patterns rather than filenames, and that is not tidiness. This list named two
+# specific files, and a third — sla-desk-secrets-runbook.md — appeared later and
+# was not covered by either. It was caught before any commit, but only because
+# `git status` was read carefully; a list of exact names has to be updated by
+# whoever creates the next one, and that person is busy writing down a secret.
+*runbook*.md
+*cheatsheet*.md
+*secrets*.md
 docs/deploy-runbook.md

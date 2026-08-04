@@ -5,12 +5,19 @@ SHELL := /bin/bash
 export
 
 .DEFAULT_GOAL := help
-.PHONY: help up down logs ps api test test-go test-int lint fmt tidy check \
+.PHONY: help up down logs ps api test test-go test-int e2e smoke lint fmt tidy check \
         migrate-up migrate-down migrate-reset migrate-status migrate-new sqlc \
         web web-install web-build web-lint docker-build docker-run
 
 help: ## Show the available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	@# -h suppresses the filename. MAKEFILE_LIST holds two entries whenever a
+	@# .env exists — the -include above adds it — and with more than one file
+	@# grep prefixes every line, so awk split on "Makefile:" and printed that as
+	@# the target name for everything. It worked on a fresh clone and nowhere
+	@# else.
+	@#
+	@# [0-9] in the class as well, or a target like e2e never appears.
+	@grep -hE '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
 # ── Local infrastructure ─────────────────────────────────────────────────────
@@ -88,6 +95,7 @@ lint: ## Lint every source, Go and web
 	@# Build-tagged files are invisible to the run above, so the integration
 	@# tests would rot unnoticed until someone next ran them.
 	go tool golangci-lint run --build-tags=integration ./...
+	go tool golangci-lint run --build-tags=smoke ./...
 	@# The web sources too. This was missing until T15, and the gap was not
 	@# theoretical: ESLint had been reporting a React purity error in
 	@# sla-timer.tsx that nothing ran, so nothing saw. A linter that only one
@@ -120,6 +128,12 @@ web-lint: ## Lint the web sources
 
 web-test: ## Run the Vitest suites (requires `make web-install`)
 	cd web && pnpm test
+
+e2e: ## Run the end-to-end suite (requires `make up`, `make api`, and a dev Clerk instance)
+	cd web && pnpm e2e
+
+smoke: ## Check the deployed application. Reads only — safe against production
+	go test -tags=smoke ./smoke/... -count=1
 
 # ── Gates ────────────────────────────────────────────────────────────────────
 

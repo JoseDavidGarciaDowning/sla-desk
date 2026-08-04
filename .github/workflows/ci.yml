@@ -143,3 +143,108 @@ jobs:
       # session are dynamic and are never prerendered.
       - name: Build
         run: pnpm build
+
+  # ── End to end ──────────────────────────────────────────────────────────────
+  #
+  # The only test here that crosses every boundary at once: a real browser, a
+  # real Clerk instance, a real HTTP call to the Go API, and a real row in
+  # Postgres. Everything else mocks one of them.
+  #
+  # It runs against a **development** Clerk instance, never production. Signing
+  # up needs `+clerk_test` addresses and the 424242 code, which only work while
+  # Clerk's test mode is on — and turning test mode on in production lets
+  # anybody bypass email verification on the live application. Production is
+  # watched by the smoke workflow instead, which reads and never writes.
+  e2e:
+    name: End to end
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sladesk
+          POSTGRES_PASSWORD: sladesk
+          POSTGRES_DB: sladesk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://sladesk:sladesk@localhost:5432/sladesk?sslmode=disable
+      # The browser talks to the API from localhost:3000, so the API has to
+      # allow exactly that. The first local run of this suite used a different
+      # port and every request was refused — the symptom was an empty ticket
+      # list, not a CORS error, which is why the test now says so itself.
+      CORS_ALLOWED_ORIGIN: http://localhost:3000
+      NEXT_PUBLIC_API_URL: http://localhost:8080
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Apply migrations
+        run: make migrate-up
+
+      # No webhook is delivered during this run, but the API refuses to start
+      # without a parseable signing secret — deliberately, so a bad one stops a
+      # deploy rather than turning into 500s nobody is watching. A syntactically
+      # valid value is all this needs, so it is not a secret.
+      - name: Start the API
+        env:
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY_DEV }}
+          CLERK_WEBHOOK_SECRET: whsec_lzIrAAiI15CsoFs852lFmxfJ1xYXoQ5x
+        run: |
+          go run ./cmd/api &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8080/health >/dev/null && exit 0
+            sleep 1
+          done
+          echo "The API never became healthy." >&2
+          exit 1
+
+      - name: Install web dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Install the browser
+        working-directory: web
+        run: pnpm exec playwright install chromium --with-deps
+
+      # Playwright's own webServer builds and starts Next. NEXT_PUBLIC_ values
+      # are inlined at build time, so they have to be present here rather than
+      # only when the server starts.
+      - name: Run the end-to-end suite
+        working-directory: web
+        env:
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY_DEV }}
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PUBLISHABLE_KEY_DEV }}
+        run: pnpm e2e
+
+      # The trace is the only way to see what the page looked like, and it only
+      # exists for a run that failed.
+      - name: Keep the trace of a failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-trace
+          path: web/test-results/
+          retention-days: 7
