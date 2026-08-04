@@ -1,6 +1,7 @@
-package auth_test
+package identity_test
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -14,9 +15,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/auth"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 )
 
 // These tests exercise the real verification path: a real RSA signature, a real
@@ -140,17 +142,58 @@ func sessionClaims(subject string, expiry time.Time) map[string]any {
 	}
 }
 
-// chain builds the production middleware stack: the SDK verifies and caches,
+// chain builds the production middleware stack, through the module's own front
+// door rather than by reassembling it here: the SDK verifies and caches,
 // RequireAuth rejects and resolves.
-func chain(t *testing.T, stub *clerkStub, users auth.Provisioner, next http.Handler) http.Handler {
+//
+// Going through Module.Authenticate is the point. A test that composed the two
+// middlewares itself would keep passing if that method ever mounted only the
+// first one — which is the exact failure docs/spec.md §4.3 warns about, because
+// the token check alone rejects nothing.
+func chain(t *testing.T, stub *clerkStub, users application.UserRepository, next http.Handler) http.Handler {
 	t.Helper()
 
-	cfg := auth.Config{
+	cfg := clerk.Config{
 		SecretKey:       "sk_test_not_a_real_key",
 		AuthorizedParty: testOrigin,
 		APIURL:          stub.URL,
 	}
-	return auth.Middleware(cfg)(auth.RequireAuth(users, auth.NewIdentityFetcher(cfg))(next))
+	m := identity.NewWith(users, clerk.NewIdentityProvider(cfg), identity.Config{Clerk: cfg})
+	return m.Authenticate(next)
+}
+
+// reached records whether the protected handler ran. Every rejection test
+// asserts on it: a middleware that returns 401 but still calls the handler has
+// not protected anything.
+type reached struct{ called bool }
+
+func (r *reached) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		r.called = true
+		w.WriteHeader(http.StatusOK)
+	})
+}
+
+// fakeStore stands in for the users table.
+type fakeStore struct {
+	user   domain.User
+	getErr error
+
+	upserts int
+}
+
+var _ application.UserRepository = (*fakeStore)(nil)
+
+func (f *fakeStore) ByClerkID(context.Context, string) (domain.User, error) {
+	if f.getErr != nil {
+		return domain.User{}, f.getErr
+	}
+	return f.user, nil
+}
+
+func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Identity) (domain.User, error) {
+	f.upserts++
+	return domain.User{ClerkUserID: clerkUserID, Email: id.Email, Role: domain.RoleCustomer}, nil
 }
 
 func request(token string) *http.Request {
@@ -174,7 +217,7 @@ const knownUserJSON = `{
 
 func TestVerifiedTokenReachesTheHandler(t *testing.T) {
 	f := newFixture(t)
-	users := &fakeStore{user: store.User{ClerkUserID: "user_known", Role: ticket.RoleCustomer}}
+	users := &fakeStore{user: domain.User{ClerkUserID: "user_known", Role: domain.RoleCustomer}}
 
 	var protected reached
 	handler := chain(t, f.stub, users, protected.handler())
@@ -255,7 +298,7 @@ func TestEveryAuthenticationFailureAnswers401(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			users := &fakeStore{user: store.User{ClerkUserID: "user_known", Role: ticket.RoleCustomer}}
+			users := &fakeStore{user: domain.User{ClerkUserID: "user_known", Role: domain.RoleCustomer}}
 
 			var protected reached
 			handler := chain(t, stub, users, protected.handler())
@@ -298,7 +341,7 @@ func tamper(t *testing.T, token string) string {
 func TestTheJWKIsFetchedOnceAndCached(t *testing.T) {
 	f := newFixture(t)
 
-	users := &fakeStore{user: store.User{ClerkUserID: "user_known", Role: ticket.RoleCustomer}}
+	users := &fakeStore{user: domain.User{ClerkUserID: "user_known", Role: domain.RoleCustomer}}
 	handler := chain(t, f.stub, users, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -322,7 +365,7 @@ func TestTheJWKIsFetchedOnceAndCached(t *testing.T) {
 func TestIdentityFetcherReadsThePrimaryEmail(t *testing.T) {
 	f := newFixture(t)
 
-	fetcher := auth.NewIdentityFetcher(auth.Config{
+	fetcher := clerk.NewIdentityProvider(clerk.Config{
 		SecretKey: "sk_test_not_a_real_key",
 		APIURL:    f.stub.URL,
 	})

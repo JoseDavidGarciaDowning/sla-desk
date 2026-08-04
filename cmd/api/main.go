@@ -16,6 +16,8 @@ import (
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 )
 
@@ -71,11 +73,22 @@ func run() error {
 	// statements that have to commit together.
 	queries := store.New(pool)
 
+	// The identity module builds its own repository and Clerk client from the
+	// handle and its own config. This is the only place that knows both exist.
+	identityModule := identity.New(pool, identity.Config{
+		Clerk: clerk.Config{
+			SecretKey:       cfg.ClerkSecretKey,
+			AuthorizedParty: cfg.ClerkAuthorizedParty,
+			APIURL:          cfg.ClerkAPIURL,
+		},
+		WebhookSecret: cfg.ClerkWebhookSecret,
+	})
+
 	handler, err := api.NewRouter(cfg, api.Deps{
-		Probes:  probes,
-		Users:   queries,
-		Tickets: store.NewTicketRepo(pool),
-		Reader:  queries,
+		Probes:   probes,
+		Identity: identityModule,
+		Tickets:  store.NewTicketRepo(pool),
+		Reader:   queries,
 	})
 	if err != nil {
 		// Configuration the router cannot work with, most likely a malformed
