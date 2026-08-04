@@ -88,7 +88,22 @@ make check           # lint + tests. Must pass before every commit
 make test-go         # unit tests, no database
 make test-int        # integration tests — needs `make up` first
 make web-test        # Vitest — needs `make web-install` first
+make e2e             # Playwright, end to end — see below
+make smoke           # check the deployed application. Reads only
 ```
+
+### The end-to-end suite
+
+`make e2e` drives a real browser through sign-up, creating a ticket, and finding it in the
+list. It needs the whole stack up — `make up`, `make api`, and a Clerk **development**
+instance, whose keys it reads from `web/.env.local`.
+
+**It must run on the port the API's `CORS_ALLOWED_ORIGIN` names**, which is `3000` by
+default. Run it anywhere else and every request from the browser is refused; the test says
+so rather than reporting a missing element, but the fix is the port and not the test.
+
+`make smoke` checks `sla-desk.josegd.me` instead — health, the sign-out redirect, the CORS
+origin, and Clerk's certificate. Every check is a read, so it is safe to run at any time.
 
 `goose`, `sqlc` and `golangci-lint` are pinned as tool dependencies in `go.mod` and run
 through `go tool`. A fresh clone needs nothing installed beyond Go, and CI lints with the
@@ -168,6 +183,16 @@ hit in production mode is probably just not being logged.
 `required`, so the submission is blocked — by whichever field still has the attribute.
 Dropping `required` from the title left the test green. Every required-field test fills
 the other fields, so only the field under test can be what blocks it.
+
+**`make help` printed "Makefile" as the name of every target.** `-include .env` puts a second
+entry in `MAKEFILE_LIST`, and grep prefixes each line with the filename once it has more than
+one file — so `awk` split on `Makefile:` instead of on the target. It worked on a fresh clone
+and nowhere else. `grep -h` fixes it. The same target's pattern also lacked `[0-9]`, so `e2e`
+never appeared at all.
+
+**Vitest runs `*.spec.ts`, which is also what Playwright calls its files.** Until `e2e/**`
+was excluded in `vitest.config.mts`, `make check` tried to run the browser suite inside jsdom
+and failed on the `@playwright/test` import.
 
 **Never write a Vitest hook with a concise arrow body that returns something.**
 

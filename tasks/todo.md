@@ -1083,33 +1083,77 @@ Its own domain, its own route.
 
 ---
 
-### T17: End-to-end test against the deployed application
+### T17: End-to-end test, and a watch on production ✅
 
-**Description:** One Playwright run of the whole path, against the real URL.
+**Description:** One Playwright run of the whole path, plus a read-only check that the
+deployed application is still up.
 
 **Acceptance criteria:**
-- [ ] `sign up → create ticket → see it listed` passes against the production URL
-- [ ] Clerk's bot protection handled with `@clerk/testing` and a `+clerk_test` address
-- [ ] Runs in CI on a schedule and before a release, with the Clerk keys as repository secrets
-- [ ] A failure names which step broke, not just "the test failed"
+- [x] `sign up → create ticket → see it listed` passes, unmocked, against a real browser, a real Clerk instance, the real Go API and a real Postgres
+- [x] Clerk's bot protection handled with `@clerk/testing` and a `+clerk_test` address
+- [x] Runs in CI on every push; production is checked on every push **and** daily
+- [x] A failure names which step broke, not just "the test failed"
+- [ ] Repository secrets `CLERK_SECRET_KEY_DEV` and `CLERK_PUBLISHABLE_KEY_DEV` — **owner action**, the e2e job cannot run without them
 
-**Why it is here and not in T15.** It needs real Clerk credentials as repository secrets, and
-until T16 there is no production instance to issue them from. It is also the one test worth
-running against what a user actually reaches rather than against a stack assembled in a
-runner — every other test in this project already mocks a boundary, and this is the one that
-should not.
+**The task as written could not be done, and the reason is a security one.** It asked for
+sign-up automated against the production URL. That needs `+clerk_test` addresses and the
+`424242` code, which only work while Clerk's **test mode** is on — and Clerk's documentation
+says of enabling it in production: *"this is highly discouraged."*
 
-**The gap this leaves in the meantime, stated plainly:** T16 deploys with no automated proof
-that the whole flow works outside a development machine. What stands in for it is the
-integration suite — every endpoint against a real Postgres — plus manual verification.
+The reason is concrete rather than procedural: with test mode on, anyone who knows the
+pattern signs up with a `+clerk_test` address and **bypasses email verification on the live
+application**. Asking for this test against production was asking to open that.
 
+So it splits in two, by what each half can honestly prove:
+
+| | Where | What it proves | Runs |
+|---|---|---|---|
+| `web/e2e/create-ticket.spec.ts` | a stack CI assembles, dev Clerk instance | the pieces work together | every push |
+| `smoke/production_test.go` | `sla-desk.josegd.me` | the deployment is still up | every push + daily |
+
+**The smoke suite reads and never writes**, which is what makes it safe against production
+and why it carries no secrets. It checks health through to Neon, that an unauthenticated
+write is refused with a problem document, that the API's CORS origin still matches where the
+frontend is served from, that a signed-out visitor is sent to **this application's** sign-in
+route, and that Clerk's certificate is valid and not inside its renewal window.
+
+Two of those are worth naming. The CORS check exists because the origin is configured in two
+different systems — Cloud Run and Vercel — and nothing notices when they stop agreeing; the
+symptom is every authenticated request failing while both services look healthy. The redirect
+check is the T12 regression, and it earns a permanent place because **both answers are a
+307**: only the Location header distinguishes "our sign-in page" from "Clerk's hosted pages".
+
+Each smoke check was verified to fail by pointing it at the wrong thing — including an
+expired certificate, which reproduced the exact failure mode the check exists for.
+
+**A product bug found by writing the test.** Clerk's default sends a newly signed-up user to
+`/`, the marketing page, rather than into the application they just authenticated to reach.
+Fixed with `fallbackRedirectUrl` — **not** `forceRedirectUrl`, which would send someone who
+deep-linked to a ticket to the list instead and quietly lose where they were going.
+
+**Three failures found by running things rather than reading them.**
+
+The first run of the e2e suite failed at "no tickets yet was not found". The cause was the
+port: it ran on 3100, the API allows 3000, and every request was refused. The test now
+distinguishes the three things the list can render and says which happened — the AC asking
+for a failure that names the step is what made this worth fixing rather than working around.
+
+`make check` then failed because **Vitest also matches `*.spec.ts`** and tried to run the
+Playwright suite inside jsdom. `e2e/**` is excluded now.
+
+And `make help` printed `Makefile` as the name of every target. `-include .env` puts a second
+entry in `MAKEFILE_LIST`, grep prefixes lines once it has more than one file, and awk split
+on the wrong colon. Pre-existing, invisible on a fresh clone, and nobody had run it.
+
+**Files:** `smoke/production_test.go`, `web/playwright.config.ts`, `web/e2e/`,
+`.github/workflows/{ci,smoke}.yml`, `Makefile`, `web/vitest.config.mts`
 **Dependencies:** T16
-**Files:** `web/e2e/create-ticket.spec.ts`, `web/playwright.config.ts`, `.github/workflows/e2e.yml`
 **Scope:** M
 
 ---
 
-> **Checkpoint E — Slice 1 complete. Do not start Slice 2 until every box above is checked.**
+> **Checkpoint E — Slice 1 complete.** Every box above is checked, apart from the two
+> repository secrets the end-to-end job needs, which only the repository owner can add.
 
 ---
 

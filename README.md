@@ -165,6 +165,13 @@ It has repeatedly caught tests that looked strong and proved nothing:
 
 Two of these were data-scoping bugs that a green suite was hiding.
 
+Above all of that sits one test that mocks nothing: a real browser signs up, raises a ticket
+and finds it in the list, against a real Clerk instance, the real Go API and a real Postgres.
+It runs on every push, against a Clerk **development** instance — signing up needs test mode,
+and turning test mode on in production would let anyone bypass email verification on the live
+application. Production is watched separately by a suite that only reads: health, the
+signed-out redirect, the CORS origin, and Clerk's certificate, daily and on every push.
+
 **Some things are deliberately untested, and saying so is part of the record.** Swapping the
 Postgres clock for `time.Now()` leaves every test green, because the cache and the history
 move together — the comment at that call site says so rather than implying coverage that does
@@ -243,7 +250,7 @@ and intentionally absent, rather than forgotten.
 | Real-time updates | Slice 6, and it needs an answer to the dual-write problem first (`docs/spec.md` §12) |
 | Full-text search, saved filters | Slice 7 |
 | Rate limiting | Slice 9. Deliberately *not* faked with `X-Forwarded-For`, which is spoofable — a limit that can be bypassed with a forged header is worse than none, because it looks like protection |
-| End-to-end browser test | T17, against the deployed URL rather than a stack assembled in a runner |
+| Agent-side end-to-end coverage | The customer path is covered end to end; the agent experience does not exist yet |
 
 ---
 
