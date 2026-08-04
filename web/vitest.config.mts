@@ -31,7 +31,9 @@ export default defineConfig({
     },
 
     // The Next app is a separate build; its output must never be scanned for
-    // tests.
-    exclude: ["node_modules/**", ".next/**"],
+    // tests. e2e/ belongs to Playwright — Vitest matches *.spec.ts too, and
+    // picked those up until this line existed, failing on an import of
+    // @playwright/test that has no business being in a jsdom run.
+    exclude: ["node_modules/**", ".next/**", "e2e/**"],
   },
 });
