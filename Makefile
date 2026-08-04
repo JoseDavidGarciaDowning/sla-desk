@@ -59,8 +59,17 @@ migrate-new: ## Create a migration: make migrate-new name=add_tickets
 	@test -n "$(name)" || { echo "usage: make migrate-new name=add_tickets"; exit 1; }
 	go tool goose -dir db/migrations create $(name) sql
 
-sqlc: ## Regenerate the type-safe query code from db/queries
-	go tool sqlc generate
+# One config per module, each owning its own tables. There is no root sqlc.yaml
+# on purpose: adding a module means adding a config next to that module's
+# queries, not editing a shared file every module has to agree about.
+SQLC_CONFIGS := $(shell find internal/modules -name sqlc.yaml | sort)
+
+sqlc: ## Regenerate the type-safe query code for every module
+	@test -n "$(SQLC_CONFIGS)" || { echo "no module sqlc.yaml found"; exit 1; }
+	@for cfg in $(SQLC_CONFIGS); do \
+		echo "sqlc: $$cfg"; \
+		go tool sqlc -f $$cfg generate || exit 1; \
+	done
 
 contract: ## Regenerate web/lib/contract.ts from the API's own bounds and vocabularies
 	go run ./cmd/gencontract
@@ -72,6 +81,16 @@ api: ## Run the API (requires `make up`)
 
 test-go: ## Run the Go tests with the race detector
 	go test ./... -race -cover
+
+arch: ## Check the module boundaries and layer direction
+	@# Named separately from `make test` — which already runs it — so the
+	@# failure has somewhere to be reproduced from, and so `make arch` is the
+	@# obvious thing to run after moving a package.
+	@#
+	@# This is the transitive half. The fast half is depguard, in `make lint`:
+	@# it catches a direct illegal import in seconds, and misses a module
+	@# reached through two hops. Both gates run in CI.
+	go test ./internal/architecture/ -count=1 -v
 
 test-int: ## Run the integration tests against the local Postgres (requires `make up`)
 	@# Without DATABASE_URL every integration test calls t.Skip and `go test`

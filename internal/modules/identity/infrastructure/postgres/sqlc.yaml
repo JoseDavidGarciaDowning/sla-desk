@@ -1,0 +1,55 @@
+# The identity module's own sqlc setup. It owns users and nothing else.
+#
+# See the SLA module's sqlc.yaml for why `schema` points at the shared goose
+# migrations rather than a local schema.sql, and why omit_unused_structs is what
+# turns per-module queries into a real boundary: tickets references users with a
+# foreign key, yet no Ticket struct is generated here to reach for.
+version: "2"
+
+sql:
+  - engine: "postgresql"
+    schema: "../../../../../db/migrations"
+    queries: "queries"
+    gen:
+      go:
+        package: "identitydb"
+        out: "identitydb"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        omit_unused_structs: true
+
+        overrides:
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+
+          # Consistent long form for both, or sqlc emits the import twice and
+          # the generated file does not compile. See the root note in the SLA
+          # module's config.
+          - db_type: "uuid"
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "UUID"
+
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "UUID"
+              pointer: true
+
+          # The module's own domain owns this vocabulary. The CHECK constraint
+          # enforces the value set in the database and domain.Role enforces it
+          # in Go, so nothing has to translate between them.
+          - column: "users.role"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+              package: "domain"
+              type: "Role"

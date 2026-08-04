@@ -19,6 +19,13 @@ linters:
     # Enforces that context.Context is the first parameter.
     - containedctx
     - govet
+    # The architecture rules. depguard is the fast half — it catches a direct
+    # illegal import in seconds, on every file, in every `make lint` and every
+    # CI run. The slow half is the architecture test in internal/architecture,
+    # which follows the import graph transitively and so catches a module
+    # reached through two hops. Neither subsumes the other, and a rule enforced
+    # by only one of them is a rule that holds until someone adds a hop.
+    - depguard
 
   # govet's `shadow` analyzer is deliberately NOT enabled. It was, briefly, and
   # it produced two findings — both on `if err := f(); err != nil`, which is the
@@ -28,12 +35,200 @@ linters:
   # an outer err that is never checked because an inner one took its name — is
   # already caught by errcheck.
 
+  settings:
+    depguard:
+      # ── Architecture rules (docs/adr/0005) ─────────────────────────────────
+      #
+      # Every `deny` below is a rule someone would otherwise have to remember.
+      # The messages say what to do instead, because a lint failure that only
+      # says "forbidden" gets suppressed rather than fixed.
+      #
+      # `files` patterns match the file being linted; `deny.pkg` is a prefix on
+      # the import path. Test files are covered deliberately: a test that
+      # reaches across a boundary is a boundary that does not hold, and the one
+      # place tests legitimately see two modules at once is internal/app, which
+      # no rule below applies to.
+      rules:
+        # ── Module boundaries ─────────────────────────────────────────────────
+        #
+        # A module never imports another module. What it needs, it declares as a
+        # contract in its own application or transport layer, and internal/app
+        # connects the two ends.
+        ticket-module:
+          files:
+            - "**/internal/modules/ticket/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla
+              desc: >-
+                The ticket module must not import the SLA module. Declare what
+                you need as a contract in ticket/application (see SLAPolicies)
+                and wire the implementation in internal/app.
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity
+              desc: >-
+                The ticket module must not import the identity module. It
+                declares CallerResolver in ticket/transport/http for exactly
+                this; internal/app supplies one.
+
+        sla-module:
+          files:
+            - "**/internal/modules/sla/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket
+              desc: >-
+                The SLA module must not import the ticket module. It works in
+                running/paused phases, not in ticket statuses — which statuses
+                burn budget is the ticket module's decision (docs/adr/0005).
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity
+              desc: The SLA module has no business knowing who a user is.
+
+        identity-module:
+          files:
+            - "**/internal/modules/identity/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket
+              desc: >-
+                The identity module must not import the ticket module. It
+                answers who someone is; what that means on a ticket is decided
+                in internal/app.
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla
+              desc: The identity module has no business knowing about SLAs.
+
+        # ── The composition root is a sink, never a source ────────────────────
+        #
+        # internal/app may import every module. Nothing may import it back: a
+        # module that reached into the wiring would be depending on its own
+        # neighbours through the back door.
+        nothing-imports-the-composition-root:
+          files:
+            - "**"
+            - "!**/internal/app/**"
+            - "!**/cmd/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/app
+              desc: >-
+                internal/app is the composition root. Only cmd may build it.
+                A module needing something from another module declares a
+                contract instead.
+
+        # ── Shared code stays cross-cutting ──────────────────────────────────
+        #
+        # internal/platform holds logging, config, HTTP mechanics and the
+        # database handle. The moment it imports a module it stops being
+        # infrastructure and becomes the dumping ground every "shared" package
+        # turns into.
+        platform-knows-no-business:
+          files:
+            - "**/internal/platform/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules
+              desc: >-
+                internal/platform must not import a business module. If it needs
+                to know what a ticket is, it is not platform code — move it into
+                the module whose concept it is.
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/app
+              desc: internal/platform sits below the composition root, not above it.
+
+        # ── Layer direction inside a module ──────────────────────────────────
+        #
+        # transport -> application -> domain, and infrastructure implements the
+        # application's contracts. The arrows only point one way.
+        domain-depends-on-nothing:
+          files:
+            - "**/internal/modules/*/domain/**"
+          deny:
+            # The sibling layers, module by module. Not the whole
+            # internal/modules prefix: an external test package (package
+            # domain_test) has to import the very package it tests, and a
+            # blanket prefix denies that too. Cross-module imports are already
+            # refused by the three module rules above, so what is left to state
+            # here is the layer direction.
+            - pkg: &ticket-app github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application
+              desc: &domain-layer >-
+                A domain package imports no other layer, not even its own
+                application. Everything it needs is an argument — that is what
+                keeps it testable with nothing running.
+            - pkg: &ticket-infra github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure
+              desc: *domain-layer
+            - pkg: &ticket-transport github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport
+              desc: *domain-layer
+            - pkg: &sla-app github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application
+              desc: *domain-layer
+            - pkg: &sla-infra github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure
+              desc: *domain-layer
+            - pkg: &identity-app github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application
+              desc: *domain-layer
+            - pkg: &identity-infra github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure
+              desc: *domain-layer
+            - pkg: &identity-transport github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport
+              desc: *domain-layer
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/app
+              desc: A domain package must not know the composition root exists.
+            - pkg: github.com/jackc/pgx
+              desc: >-
+                The domain has no database. A driver type in a domain struct is
+                how "testable with nothing running" stops being true.
+            - pkg: database/sql
+              desc: The domain has no database.
+            - pkg: net/http
+              desc: >-
+                The domain has no HTTP. Status codes and request shapes belong
+                in transport.
+            - pkg: github.com/go-chi/chi
+              desc: The domain has no router.
+            - pkg: github.com/clerk/clerk-sdk-go
+              desc: The domain has no third-party SDK.
+
+        application-depends-on-no-implementation:
+          files:
+            - "**/internal/modules/*/application/**"
+          deny:
+            - pkg: *ticket-infra
+              desc: &app-infra >-
+                The application layer declares contracts; it must not import
+                anything that implements them. The dependency runs the other
+                way, and internal/app does the wiring.
+            - pkg: *ticket-transport
+              desc: &app-transport >-
+                The application layer sits below transport. A use case that
+                imports a handler has the arrow backwards.
+            - pkg: *sla-infra
+              desc: *app-infra
+            - pkg: *identity-infra
+              desc: *app-infra
+            - pkg: *identity-transport
+              desc: *app-transport
+            - pkg: github.com/jackc/pgx
+              desc: >-
+                The application layer names no driver type. If a port needs an
+                id, give it one the domain owns.
+            - pkg: net/http
+              desc: >-
+                The application layer decides no status codes. Return an error
+                the transport layer can map.
+            - pkg: github.com/go-chi/chi
+              desc: The application layer has no router.
+
+        infrastructure-is-below-transport:
+          files:
+            - "**/internal/modules/*/infrastructure/**"
+          deny:
+            - pkg: *ticket-transport
+              desc: &infra-transport >-
+                Infrastructure implements the application's contracts; it sits
+                below transport, not beside it.
+            - pkg: *identity-transport
+              desc: *infra-transport
+
   exclusions:
-    # The generated store is sqlc's output. Linting code we do not write means
-    # either editing generated files — which the next `make sqlc` discards — or
-    # carrying suppressions for somebody else's style.
+    # sqlc's output. Linting code we do not write means either editing generated
+    # files — which the next `make sqlc` discards — or carrying suppressions for
+    # somebody else's style.
+    #
+    # The architecture rules still reach it: the generated package is only
+    # excluded from *style* linters here, and the architecture test walks it
+    # regardless of what golangci-lint is told to skip.
     paths:
-      - internal/store/.*\.sql\.go$
+      - internal/modules/.*/infrastructure/postgres/.*db/.*\.go$
 
     rules:
       # QF1008 wants key.PublicKey.N shortened to key.N, because PublicKey is
@@ -74,4 +269,4 @@ formatters:
 
   exclusions:
     paths:
-      - internal/store/.*\.sql\.go$
+      - internal/modules/.*/infrastructure/postgres/.*db/.*\.go$

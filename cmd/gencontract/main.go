@@ -4,7 +4,7 @@
 // come from the same declarations the API validates against, instead of being
 // transcribed and then quietly drifting. Run it with `make contract`; a test in
 // internal/api fails while the generated file is out of date, so forgetting is
-// caught rather than shipped.
+// forgetting is caught rather than shipped.
 package main
 
 import (
@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
+	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 )
 
 // defaultOut is relative to the repository root, which is where make runs.
@@ -25,7 +25,7 @@ func main() {
 	// 0o644, and the file is rewritten whole rather than appended to: the
 	// generator's output is the entire content, and a partial write would leave
 	// TypeScript that does not parse.
-	if err := os.WriteFile(*out, []byte(api.TicketContract().TypeScript()), 0o644); err != nil {
+	if err := os.WriteFile(*out, []byte(tickethttp.TicketContract().TypeScript()), 0o644); err != nil {
 		fmt.Fprintf(os.Stderr, "gencontract: writing %s: %v\n", *out, err)
 		os.Exit(1)
 	}
