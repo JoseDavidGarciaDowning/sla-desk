@@ -78,20 +78,16 @@ test-int: ## Run the integration tests against the local Postgres (requires `mak
 	go test ./... -race -tags=integration -count=1
 
 fmt: ## Format the Go sources
-	gofmt -w .
+	go tool golangci-lint fmt ./...
 
 tidy: ## Prune and verify module requirements
 	go mod tidy
 
-lint: ## Vet the Go sources and check formatting
-	go vet ./...
-	@# Build-tagged files are invisible to the line above, so the integration
+lint: ## Lint the Go sources, including formatting
+	go tool golangci-lint run ./...
+	@# Build-tagged files are invisible to the run above, so the integration
 	@# tests would rot unnoticed until someone next ran them.
-	go vet -tags=integration ./...
-	@unformatted=$$(gofmt -l .); \
-	if [ -n "$$unformatted" ]; then \
-		echo "gofmt would change:"; echo "$$unformatted"; exit 1; \
-	fi
+	go tool golangci-lint run --build-tags=integration ./...
 
 # ── Container ────────────────────────────────────────────────────────────────
 

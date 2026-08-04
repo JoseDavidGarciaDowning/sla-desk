@@ -1,0 +1,77 @@
+version: "2"
+
+# Pinned as a tool dependency in go.mod and run through `go tool`, like goose
+# and sqlc. That is what keeps `make lint` and CI on the same version: a linter
+# installed separately in CI drifts from the one on a laptop, and the first
+# anyone hears of it is a pull request that is red for nobody's mistake.
+
+linters:
+  # The default set plus the ones below. Not "enable-all": a linter nobody
+  # chose is a linter nobody can justify, and the noise gets suppressed rather
+  # than fixed.
+  enable:
+    # Unchecked errors. The one that actually finds bugs.
+    - errcheck
+    # Reports errors created with fmt.Errorf that could wrap instead.
+    - errorlint
+    # Finds sync.WaitGroup and loop-variable mistakes in tests.
+    - testifylint
+    # Enforces that context.Context is the first parameter.
+    - containedctx
+    - govet
+
+  # govet's `shadow` analyzer is deliberately NOT enabled. It was, briefly, and
+  # it produced two findings — both on `if err := f(); err != nil`, which is the
+  # most common idiom in the language and is safe precisely because the shadowed
+  # binding cannot escape the if. Satisfying it would mean rewriting correct
+  # code, or carrying suppressions next to it. The bug it is meant to catch —
+  # an outer err that is never checked because an inner one took its name — is
+  # already caught by errcheck.
+
+  exclusions:
+    # The generated store is sqlc's output. Linting code we do not write means
+    # either editing generated files — which the next `make sqlc` discards — or
+    # carrying suppressions for somebody else's style.
+    paths:
+      - internal/store/.*\.sql\.go$
+
+    rules:
+      # QF1008 wants key.PublicKey.N shortened to key.N, because PublicKey is
+      # embedded. In internal/api/router_test.go the explicit selector is the
+      # point: that test builds a JWKS, and naming PublicKey is what says only
+      # the public half of the key is being published. Shorter, and less clear
+      # about the one thing worth being clear about.
+      #
+      # A style quickfix, not a correctness check, and this is the disagreement
+      # rather than an oversight.
+      - linters: [staticcheck]
+        text: "QF1008"
+
+      # Test files may ignore errors from helpers whose failure the assertions
+      # would catch anyway. Production code may not.
+      - path: _test\.go
+        linters: [errcheck]
+
+      # containedctx exists because a Context stored on a long-lived object ties
+      # one request's cancellation and deadline to something that outlives it.
+      # The integration tests' testContext bundles ctx, tx and q so their helpers
+      # take one argument instead of four, and it lives for exactly one test —
+      # the failure mode the rule guards against cannot happen. In production
+      # code it stays on.
+      - path: _test\.go
+        linters: [containedctx]
+
+formatters:
+  enable:
+    - gofmt
+    # Stricter than gofmt: also groups imports and removes empty lines that
+    # gofmt tolerates. `make fmt` applies it.
+    - gofumpt
+
+  settings:
+    gofumpt:
+      module-path: github.com/JoseDavidGarciaDowning/sla-desk
+
+  exclusions:
+    paths:
+      - internal/store/.*\.sql\.go$

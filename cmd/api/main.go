@@ -30,7 +30,6 @@ func main() {
 		slog.Error("server stopped with an error", "error", err)
 		os.Exit(1)
 	}
-
 }
 
 func run() error {
