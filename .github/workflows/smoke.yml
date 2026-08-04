@@ -1,0 +1,42 @@
+name: Smoke
+
+# Separate from CI because it tests something different. CI answers "is this
+# code correct"; this answers "is the deployed application still up". The second
+# question has an answer that changes without anybody pushing — a certificate
+# expires, a secret is rotated, a free tier is suspended — which is why it also
+# runs on a schedule.
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Daily. A certificate that fails to renew, or a database that stops
+    # answering, should be found by this rather than by a visitor.
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Production is up
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.1"
+          cache: true
+
+      # Every check is a read. Nothing signs in, writes a row, or needs a
+      # credential — which is what makes running this against production safe,
+      # and why there are no secrets in this workflow.
+      #
+      # -count=1 so a cached result can never stand in for an actual request.
+      - name: Check the deployed application
+        run: go test -tags=smoke ./smoke/... -count=1 -v
