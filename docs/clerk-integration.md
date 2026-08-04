@@ -58,7 +58,7 @@ different reasons, and confusing them is where the trouble starts.
 
 | | Decides | Enforced by |
 |---|---|---|
-| **CORS** | Which origin a *browser* may call this API from | `corsMiddleware`, `internal/api/cors.go` |
+| **CORS** | Which origin a *browser* may call this API from | `httpx.CORS`, `internal/platform/httpx/cors.go` |
 | **`azp`** | Which origin a *token* was minted for | `clerkhttp.AuthorizedPartyMatches`, via `auth.Config` |
 
 When the frontend asks Clerk for a session token, Clerk stamps the requesting origin into
@@ -250,9 +250,9 @@ Webhook fixtures are signed with Svix's own exported `Sign`, so the tests use th
 implementation that verifies them rather than a reimplementation that would agree with
 itself whatever it did.
 
-- `internal/auth/clerk_test.go` — the JWT path
-- `internal/api/webhooks_test.go` — the Svix path
-- `internal/api/router_test.go` — the assembled chain, end to end
+- `internal/modules/identity/transport/http/authentication_test.go` — the JWT path
+- `internal/modules/identity/transport/http/webhook_test.go` — the Svix path
+- `internal/app/router_test.go` — the assembled chain, end to end
 
 ---
 

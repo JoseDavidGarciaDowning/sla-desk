@@ -1,0 +1,43 @@
+# The SLA module's own sqlc setup. It owns sla_policies and nothing else.
+#
+# `schema` points at the shared goose migrations rather than at a schema.sql
+# copied in here. There is one database and one migration sequence — tickets
+# carries a foreign key into sla_policies, so the tables cannot be created
+# independently — and a second copy of the DDL is a copy that drifts. What is
+# per-module is the *queries*, which is where ownership actually lives.
+#
+# `omit_unused_structs` is what makes that ownership structural rather than a
+# convention: sqlc generates a model only for a table this module's queries
+# touch, so there is no User or Ticket struct here to reach for by accident.
+version: "2"
+
+sql:
+  - engine: "postgresql"
+    schema: "../../../../../db/migrations"
+    queries: "queries"
+    gen:
+      go:
+        package: "sladb"
+        out: "sladb"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        omit_unused_structs: true
+
+        overrides:
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+
+          # The module's own domain owns this vocabulary. The CHECK constraint
+          # enforces the value set in the database and domain.Priority enforces
+          # it in Go, so nothing has to translate between them.
+          - column: "sla_policies.priority"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
+              package: "domain"
+              type: "Priority"

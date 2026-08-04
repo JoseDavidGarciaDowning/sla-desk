@@ -1,0 +1,90 @@
+# The ticket module's own sqlc setup. It owns tickets and
+# ticket_status_history, and nothing else.
+#
+# See the SLA module's sqlc.yaml for why `schema` points at the shared goose
+# migrations rather than a local schema.sql. `omit_unused_structs` is what makes
+# the boundary structural: tickets carries foreign keys into users and
+# sla_policies, yet neither a User nor an SlaPolicy struct is generated here.
+# Reaching into another module's tables is not a rule someone has to remember —
+# there is no type to reach with.
+version: "2"
+
+sql:
+  - engine: "postgresql"
+    schema: "../../../../../db/migrations"
+    queries: "queries"
+    gen:
+      go:
+        package: "ticketdb"
+        out: "ticketdb"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        omit_unused_structs: true
+
+        overrides:
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+
+          # Consistent long form for both, or sqlc v1.31.1 emits the import
+          # twice and the generated file does not compile.
+          - db_type: "uuid"
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "UUID"
+
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "UUID"
+              pointer: true
+
+          # The module's own domain owns these vocabularies. The CHECK
+          # constraints enforce the value sets in the database and the domain
+          # types enforce them in Go, so nothing has to translate between them.
+          - column: "tickets.priority"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Priority"
+
+          - column: "tickets.status"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Status"
+
+          - column: "tickets.category"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Category"
+
+          # Nullable on the row that records creation, so a pointer: nil is
+          # "there was no previous status", which is different from any status.
+          - column: "ticket_status_history.from_status"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Status"
+              pointer: true
+
+          - column: "ticket_status_history.to_status"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Status"
+
+          - column: "ticket_status_history.actor_role"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "ActorRole"

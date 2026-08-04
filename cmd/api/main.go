@@ -14,9 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/app"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/config"
 )
 
 // startupPingTimeout bounds the one connectivity check made at boot.
@@ -60,23 +59,10 @@ func run() error {
 	}
 	cancelPing()
 
-	// Redis is intentionally not probed: nothing uses it until slice 5, and a
-	// health check that fails on an unused dependency would take the service
-	// down for no reason.
-	probes := map[string]api.Probe{
-		"database": pool.Ping,
-	}
-
-	// Queries reads; TicketRepo writes, because creating a ticket spans two
-	// statements that have to commit together.
-	queries := store.New(pool)
-
-	handler, err := api.NewRouter(cfg, api.Deps{
-		Probes:  probes,
-		Users:   queries,
-		Tickets: store.NewTicketRepo(pool),
-		Reader:  queries,
-	})
+	// Every module is built and connected in internal/app. This command knows
+	// how to read configuration, open a pool and run a server, and nothing
+	// about tickets, SLAs or Clerk.
+	handler, err := app.New(cfg, pool).Router()
 	if err != nil {
 		// Configuration the router cannot work with, most likely a malformed
 		// Clerk webhook secret. Failing here rather than serving an endpoint

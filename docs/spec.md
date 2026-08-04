@@ -157,7 +157,7 @@ Rules:
   attempted directly against the API.
 - Every accepted transition writes exactly one `ticket_status_history` row **in the same
   transaction** as the ticket update. No history row, no transition.
-- The transition function is pure and lives in `internal/ticket`. It takes
+- The transition function is pure and lives in the ticket module's domain. It takes
   `(current, target, actor role)` and returns the new state or an error. It touches no
   database.
 
@@ -172,7 +172,7 @@ The clock runs **only** in `open`. It is paused in `pending`, `resolved`, and `c
 **The budget is data, not code.** It comes from `sla_policies`, keyed by priority. No
 `switch` on priority anywhere in the codebase.
 
-**All deadline arithmetic lives in one module** (`internal/sla`). HTTP handlers, the
+**All deadline arithmetic lives in one module** (`internal/modules/sla`). HTTP handlers, the
 breach worker, and the frontend consume the resulting `due_at` and nothing else. None of
 them recompute anything.
 
@@ -248,7 +248,7 @@ A future policy must be able to choose between 24/7 and a defined business sched
 (weekdays, time window, timezone, holidays) **without changing any caller**. The seam:
 
 ```go
-// internal/sla — the only place deadline arithmetic exists.
+// internal/modules/sla/domain — the only place deadline arithmetic exists.
 type Schedule interface {
     // Elapsed returns budget-consuming time between two instants.
     Elapsed(from, to time.Time) time.Duration
@@ -459,19 +459,20 @@ Single Go module at the root (idiomatic Go), Next.js app in `web/`.
 .
 ├── cmd/
 │   ├── api/main.go            # HTTP API entrypoint
-│   └── worker/main.go         # SLA breach worker entrypoint
+│   ├── gencontract/main.go    # writes web/lib/contract.ts from the API's declarations
+│   └── worker/main.go         # SLA breach worker entrypoint            (slice 5)
 ├── internal/
-│   ├── ticket/                # DOMAIN: state machine. No DB, no HTTP.
-│   ├── sla/                   # DOMAIN: the only deadline arithmetic. No DB, no HTTP.
-│   ├── httperr/               # what a failure looks like on the wire. Imports nothing here
-│   ├── auth/                  # Clerk verification + RBAC middleware
-│   ├── store/                 # sqlc-generated code + hand-written repos
-│   ├── api/                   # chi handlers, DTOs, request validation
-│   ├── realtime/              # WebSocket hub, Redis fan-out  (slice 6)
-│   └── config/                # env loading, no globals
+│   ├── app/                   # COMPOSITION ROOT. The only package that may
+│   │                          # import two modules. Wiring + adapters, no rules
+│   ├── modules/
+│   │   ├── ticket/            # owns tickets, ticket_status_history
+│   │   ├── sla/               # owns sla_policies. The only deadline arithmetic
+│   │   └── identity/          # owns users. Clerk verification, provisioning
+│   ├── platform/              # cross-cutting infrastructure ONLY:
+│   │                          # config, httperr, httpx, health, pgtest
+│   └── architecture/          # the boundary rules, as a test
 ├── db/
-│   ├── migrations/            # goose .sql files
-│   └── queries/               # sqlc source .sql files
+│   └── migrations/            # goose .sql files — global: one database, one sequence
 ├── web/                       # Next.js App Router
 │   ├── app/(customer)/        # customer portal layout
 │   ├── app/(agent)/           # agent dashboard layout
@@ -484,20 +485,50 @@ Single Go module at the root (idiomatic Go), Next.js app in `web/`.
 ├── tasks/                     # plan.md, todo.md
 ├── compose.yaml
 ├── Makefile
-├── sqlc.yaml
 └── go.mod
 ```
 
-**The structural rule:** `internal/ticket` and `internal/sla` import nothing from
-`store`, `api`, or `database/sql`. They are pure domain and unit-testable with no
-Docker running. If a deadline calculation ever appears outside `internal/sla`, that is a
-review blocker.
+Every module has the same four layers, and its own sqlc config beside its own queries:
 
-**The mirror rule, for `internal/httperr`:** it imports nothing from this module. It is not
-a domain package — it is allowed `net/http`, which the domain is not — but it is a leaf, and
-it has to stay one. Every layer above it reports failures through it, and a single import
-would put it above whatever it imported, out of reach of the layer that needed it next. Both
-rules are enforced by the import-graph walker in `internal/ticket/architecture_test.go`.
+```
+internal/modules/<module>/
+├── domain/                    # entities, value objects, rules, errors. Imports nothing
+├── application/               # use cases, and the contracts this module needs outside
+├── infrastructure/
+│   └── postgres/
+│       ├── sqlc.yaml          # this module's tables and nobody else's
+│       ├── queries/*.sql
+│       └── <module>db/        # generated
+├── transport/http/            # handlers, DTOs, routes
+└── module.go                  # the front door
+```
+
+**The module rule:** a module never imports another module. What it needs, it declares as
+an interface in its own vocabulary, and `internal/app` supplies an implementation. The
+ticket module does not know the SLA module exists; it knows it has an `SLAPolicies`
+contract. See [ADR 0005](adr/0005-modular-monolith-boundaries.md).
+
+**The layer rule:** `transport → application → domain`, with infrastructure implementing
+the application's contracts. A domain package imports nothing — not even its own
+application layer — so it is unit-testable with no Docker running. If a deadline
+calculation ever appears outside the SLA module, that is a review blocker.
+
+**The shared-code rule:** `internal/platform` holds logging, configuration, HTTP mechanics
+and the database handle. It may not import a business module. A package that needs to know
+what a ticket is belongs in the ticket module, whatever else uses it.
+
+**The mirror rule, for `internal/platform/httperr` and `httpx`:** they import nothing from
+this module. They are not domain packages — they are allowed `net/http`, which the domain
+is not — but they are leaves, and have to stay ones. Every layer above reports failures
+through them, and a single import would put one above whatever it imported, out of reach of
+the layer that needed it next.
+
+**All of it is enforced, in two places.** `depguard` (`.golangci.yml`) catches a direct
+illegal import on every `make lint`. The import-graph walker in `internal/architecture`
+catches one reached through an intermediate package, which depguard cannot see, and
+survives `//nolint`. Both run in `make check` and as separate CI steps. Neither is
+convention.
+
 See [ADR 0004](adr/0004-one-way-to-report-an-http-failure.md).
 
 **Packages are named for what they provide, never for the fact that several callers use
@@ -512,7 +543,7 @@ reject anything, so it only grows and its name says nothing. If an extraction is
 ### Go
 
 ```go
-// internal/ticket/transition.go
+// internal/modules/ticket/domain/transition.go
 package ticket
 
 // Transition validates a status change. It is pure: no database, no clock,
@@ -561,7 +592,7 @@ Conventions:
 
 | Level | Tool | Scope | Requirement |
 |---|---|---|---|
-| Domain unit | `go test` | `internal/ticket`, `internal/sla` | **100% of transitions and clock branches.** No Docker needed |
+| Domain unit | `go test` | the ticket and SLA domains | **100% of transitions and clock branches.** No Docker needed |
 | Integration | `go test -tags=integration` | Handlers + real Postgres | Every endpoint: happy path, authz denial, invalid transition |
 | Consistency | `go test -tags=integration` | SLA reconstruction vs cache | See below — mandatory |
 | Frontend unit | Vitest + Testing Library | Components, hooks | Optimistic update + rollback paths |
@@ -581,7 +612,7 @@ Then it equals tickets.sla_consumed_minutes / sla_due_at exactly.
 Property-based over generated transition sequences, not a handful of examples. This test
 is what earns the right to keep a derived cache.
 
-**Coverage:** ≥90% on `internal/ticket` and `internal/sla`. No global target — a
+**Coverage:** ≥90% on the ticket and SLA domain packages. No global target — a
 coverage number over the whole repo measures nothing.
 
 ---
@@ -601,7 +632,7 @@ coverage number over the whole repo measures nothing.
 - Any database schema change after Slice 1 ships.
 - Adding a Go or npm dependency.
 - Changing the deploy target or CI configuration.
-- Any deadline arithmetic that would live outside `internal/sla`.
+- Any deadline arithmetic that would live outside the SLA module.
 - Reintroducing tenancy, or any change to the state machine.
 
 **Never:**
@@ -632,9 +663,9 @@ Slice 1 is done when all of the following hold:
 - [x] A request with no token, an expired token, or a forged token receives `401`.
       `TestEveryAuthenticationFailureAnswers401` covers five cases: no header, not a JWT,
       three undecodable segments, expired, and signed by an untrusted key.
-- [x] `internal/ticket` and `internal/sla` have zero imports from `store`, `api`, or
+- [x] The ticket and SLA domains have zero imports from infrastructure, transport or
       `database/sql` — enforced by a test that walks the import graph.
-      `internal/httperr` is held to the mirror rule and imports nothing from this module.
+      `internal/platform/httperr` and `httpx` are held to the mirror rule and import nothing from this module.
 - [x] `make check` passes clean, and CI runs it on every push and pull request.
 - [x] The application is deployed and reachable at a public URL: **https://sla-desk.josegd.me**.
       Verified by hand end to end — sign-up, ticket creation, the list, the detail timeline,
