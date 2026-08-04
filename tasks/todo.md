@@ -934,23 +934,66 @@ from `AND` to `OR`, and unmounting the route) and 7 on the frontend.
 
 ## Phase 4: Ship
 
-### T15: CI pipeline
+### T15: CI pipeline ✅
 
 **Description:** Quality gates on every push. What is not enforced by CI does not hold.
 
 **Acceptance criteria:**
-- [ ] GitHub Actions runs `golangci-lint`, `go test -race`, `pnpm lint`, `pnpm build`
-- [ ] Integration tests run against a Postgres service container with migrations applied
-- [ ] The pipeline fails the build on any failure — no `continue-on-error`
-- [ ] Playwright runs the one critical E2E path: sign up → create ticket → see it listed
+- [x] GitHub Actions runs `golangci-lint`, `go test -race`, `pnpm lint`, `pnpm test`, `pnpm build`
+- [x] Integration tests run against a Postgres service container with migrations applied
+- [x] The pipeline fails the build on any failure — no `continue-on-error`
+- [ ] ~~Playwright runs the one critical E2E path~~ → **moved to T17**, after the deploy
 
 **Verification:**
-- [ ] A pull request with a deliberately failing test is blocked by CI
-- [ ] A clean pull request goes green
-- [ ] CI runtime under 5 minutes
+- [x] A clean push goes green
+- [x] A deliberately failing test turns it red
+- [x] CI runtime under 5 minutes
+
+**The repository did not exist until this task.** `github.com/JoseDavidGarciaDowning/sla-desk`,
+public. Before the first push the history was audited, and it was not clean: a real Clerk
+webhook relay token (`c_LLtlrLOKRX`) sat in two documentation files across two commits.
+
+Low severity — the relay forwards to localhost and only while the CLI runs, and the handler
+rejects anything Svix has not signed — but a public push is permanent, and deleting the file
+afterwards does not remove it from history. With no remote yet, rewriting cost nothing, so
+`git filter-branch` replaced it with a placeholder across all 77 commits. The Svix signing
+fixture in `webhooks_test.go` was regenerated in the same pass: its comment claimed it was
+invented, and there was no way to verify that. If it had been the real endpoint secret,
+anyone could have signed webhooks the API would accept. Regenerating removes the question.
+
+`refs/original/*` and the stash were deleted and the reflog expired, then every blob in the
+repository was scanned for the old values. Zero.
+
+**golangci-lint is pinned in `go.mod`, not installed by an action.** Same reasoning as goose
+and sqlc: a linter installed separately in CI drifts from the one on a laptop, and the first
+anyone hears of it is a pull request that is red for nobody's mistake. The cost is real and
+worth stating — `go.sum` grew by 790 lines and `go.mod` by 199, all indirect.
+
+**Two of its three findings were rejected, which is the point of reading them:**
+
+| Finding | Outcome |
+|---|---|
+| `QF1008` — shorten `key.PublicKey.N` to `key.N` | **Rejected.** The explicit selector is what says only the public half of the key goes into the JWKS, which is the whole subject of that test |
+| `shadow` × 2 — `if err := f(); err != nil` | **The check was removed.** Both were the standard Go idiom, safe because the binding cannot escape the `if`. Enabling it was the mistake, not the code |
+| `gofumpt` in `cmd/api/main.go` | Fixed — it is formatting |
+
+`containedctx` is excluded in test files only. It exists because a Context on a long-lived
+object ties one request's deadline to something that outlives it; the integration tests'
+`testContext` lives for exactly one test, so the failure mode cannot occur. In production
+code it stays on.
+
+**Rehearsing the workflow found a bug in it.** The "Dependencies are tidy" step would have
+failed: `go mod tidy` still had pending changes from adding the tool. Running it — rather
+than reading it — is what caught that. The integration job was rehearsed the same way,
+against a fresh `postgres:16` container on a spare port.
+
+**No credentials are needed to build the frontend.** Measured, not assumed: `next build`
+with every Clerk and API variable empty compiles and prerenders, because the routes that
+need a session are dynamic and never prerendered. That is what keeps the web job free of
+secrets.
 
 **Dependencies:** T11, T14
-**Files:** `.github/workflows/ci.yml`, `web/e2e/create-ticket.spec.ts`
+**Files:** `.github/workflows/ci.yml`, `.golangci.yml`, `Makefile`, `go.mod`
 **Scope:** M
 
 ---
@@ -975,6 +1018,32 @@ from `AND` to `OR`, and unmounting the route) and 7 on the frontend.
 **Dependencies:** T15
 **Files:** `README.md`, `fly.toml`, deployment configuration
 **Scope:** M
+
+### T17: End-to-end test against the deployed application
+
+**Description:** One Playwright run of the whole path, against the real URL.
+
+**Acceptance criteria:**
+- [ ] `sign up → create ticket → see it listed` passes against the production URL
+- [ ] Clerk's bot protection handled with `@clerk/testing` and a `+clerk_test` address
+- [ ] Runs in CI on a schedule and before a release, with the Clerk keys as repository secrets
+- [ ] A failure names which step broke, not just "the test failed"
+
+**Why it is here and not in T15.** It needs real Clerk credentials as repository secrets, and
+until T16 there is no production instance to issue them from. It is also the one test worth
+running against what a user actually reaches rather than against a stack assembled in a
+runner — every other test in this project already mocks a boundary, and this is the one that
+should not.
+
+**The gap this leaves in the meantime, stated plainly:** T16 deploys with no automated proof
+that the whole flow works outside a development machine. What stands in for it is the
+integration suite — every endpoint against a real Postgres — plus manual verification.
+
+**Dependencies:** T16
+**Files:** `web/e2e/create-ticket.spec.ts`, `web/playwright.config.ts`, `.github/workflows/e2e.yml`
+**Scope:** M
+
+---
 
 > **Checkpoint E — Slice 1 complete. Do not start Slice 2 until every box above is checked.**
 

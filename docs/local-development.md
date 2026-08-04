@@ -82,14 +82,18 @@ make sqlc            # regenerate internal/store from db/queries
 make contract        # regenerate web/lib/contract.ts from the API's own bounds
 make api             # run the API
 
+make lint            # golangci-lint, twice: plain and with the integration tag
+make fmt             # gofumpt, through golangci-lint
 make check           # lint + tests. Must pass before every commit
 make test-go         # unit tests, no database
 make test-int        # integration tests — needs `make up` first
 make web-test        # Vitest — needs `make web-install` first
 ```
 
-`goose` and `sqlc` are pinned as tool dependencies in `go.mod` and run through `go tool`.
-A fresh clone needs nothing installed beyond Go.
+`goose`, `sqlc` and `golangci-lint` are pinned as tool dependencies in `go.mod` and run
+through `go tool`. A fresh clone needs nothing installed beyond Go, and CI lints with the
+same version you do — an installed-separately linter drifts, and the first anyone hears of
+it is a pull request that is red for nobody's mistake.
 
 ```bash
 cd web
@@ -121,6 +125,10 @@ npx clerk@latest webhooks listen \
   --forward-to http://localhost:8080/api/webhooks/clerk
 ```
 
+The token is printed by the CLI the first time it runs, and it is on the endpoint's page
+in the Clerk dashboard. It identifies **your** relay, so it is not committed — the value
+above is a placeholder.
+
 **Always pass `--token`.** Without it the relay URL can change across machines or a
 cleared config, and the dashboard endpoint — with its signing secret — is tied to that
 URL. When it changes, Clerk keeps delivering to a URL that forwards nowhere: no error,
@@ -141,9 +149,9 @@ signing up once there is a frontend.
 nothing. The target now fails loudly instead. If it ever stops doing that, a green
 integration run means nothing.
 
-**`go vet ./...` does not see build-tagged files.** `make lint` also runs
-`go vet -tags=integration ./...`, or the integration tests rot unnoticed until someone
-runs them.
+**A linter does not see build-tagged files.** `make lint` runs `golangci-lint` twice, the
+second time with `--build-tags=integration`, or the integration tests rot unnoticed until
+someone next runs them.
 
 **`$path` is a reserved array in zsh, tied to `PATH`.** A loop written as
 `for path in / /sign-in; do …` silently destroys `PATH` for the rest of the shell, and
