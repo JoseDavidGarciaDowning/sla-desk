@@ -1,4 +1,4 @@
-package ticket
+package domain
 
 // Category is what a ticket is about, as defined in docs/spec.md §4.7.
 //

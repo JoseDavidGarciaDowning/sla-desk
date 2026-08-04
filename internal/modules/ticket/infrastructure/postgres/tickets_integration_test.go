@@ -1,6 +1,6 @@
 //go:build integration
 
-package store_test
+package postgres_test
 
 import (
 	"context"
@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
 )
 
 // normalPolicyID is the seeded policy for priority 'normal'. Looked up rather
@@ -34,7 +34,7 @@ func normalPolicyID(t *testing.T, ctx testContext) int64 {
 type testContext struct {
 	ctx context.Context
 	tx  pgx.Tx
-	q   *store.Queries
+	q   *ticketdb.Queries
 }
 
 func setup(t *testing.T) testContext {
@@ -43,9 +43,9 @@ func setup(t *testing.T) testContext {
 	return testContext{ctx: c, tx: tx, q: q}
 }
 
-func newUser(t *testing.T, c testContext, clerkID string, role ticket.Role) pgtype.UUID {
+func newUser(t *testing.T, c testContext, clerkID string, role domain.Role) uuid.UUID {
 	t.Helper()
-	var id pgtype.UUID
+	var id uuid.UUID
 	err := c.tx.QueryRow(c.ctx,
 		`INSERT INTO users (clerk_user_id, email, role) VALUES ($1, $2, $3) RETURNING id`,
 		clerkID, clerkID+"@example.test", role,
@@ -56,17 +56,17 @@ func newUser(t *testing.T, c testContext, clerkID string, role ticket.Role) pgty
 	return id
 }
 
-func newTicket(t *testing.T, c testContext, requester pgtype.UUID, title string) store.Ticket {
+func newTicket(t *testing.T, c testContext, requester uuid.UUID, title string) ticketdb.Ticket {
 	t.Helper()
 	started := time.Now().UTC()
 	due := started.Add(24 * time.Hour)
 
-	tk, err := c.q.CreateTicket(c.ctx, store.CreateTicketParams{
+	tk, err := c.q.CreateTicket(c.ctx, ticketdb.CreateTicketParams{
 		RequesterID:       requester,
 		Title:             title,
 		Description:       "body",
-		Category:          ticket.CategoryTechnical,
-		Priority:          ticket.PriorityNormal,
+		Category:          domain.CategoryTechnical,
+		Priority:          domain.PriorityNormal,
 		SlaPolicyID:       normalPolicyID(t, c),
 		SlaClockStartedAt: &started,
 		SlaDueAt:          &due,
@@ -84,7 +84,7 @@ func newTicket(t *testing.T, c testContext, requester pgtype.UUID, title string)
 
 func TestOpenTicketWithoutARunningClockIsRejected(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_clock_a", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_clock_a", domain.RoleCustomer)
 
 	_, err := c.tx.Exec(c.ctx,
 		`INSERT INTO tickets (requester_id, title, description, category, priority, sla_policy_id, status)
@@ -98,7 +98,7 @@ func TestOpenTicketWithoutARunningClockIsRejected(t *testing.T) {
 
 func TestPausedTicketWithARunningClockIsRejected(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_clock_b", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_clock_b", domain.RoleCustomer)
 
 	_, err := c.tx.Exec(c.ctx,
 		`INSERT INTO tickets (requester_id, title, description, category, priority, sla_policy_id,
@@ -115,7 +115,7 @@ func TestPausedTicketWithARunningClockIsRejected(t *testing.T) {
 // would be a ticket that consumes budget but can never breach.
 func TestRunningClockWithoutADueDateIsRejected(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_clock_c", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_clock_c", domain.RoleCustomer)
 
 	_, err := c.tx.Exec(c.ctx,
 		`INSERT INTO tickets (requester_id, title, description, category, priority, sla_policy_id,
@@ -130,7 +130,7 @@ func TestRunningClockWithoutADueDateIsRejected(t *testing.T) {
 
 func TestPausingATicketClearsBothClockColumns(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_clock_d", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_clock_d", domain.RoleCustomer)
 	tk := newTicket(t, c, requester, "Will be paused")
 
 	if _, err := c.tx.Exec(c.ctx,
@@ -159,7 +159,7 @@ func TestPausingATicketClearsBothClockColumns(t *testing.T) {
 // budgets 72 hours. BIGINT is a requirement here, not a preference.
 func TestConsumedMicrosRoundTripsADurationExactly(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_micros", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_micros", domain.RoleCustomer)
 	tk := newTicket(t, c, requester, "Odd duration")
 
 	want := 41*time.Hour + 13*time.Minute + 22*time.Second + 123456*time.Microsecond
@@ -183,7 +183,7 @@ func TestConsumedMicrosRoundTripsADurationExactly(t *testing.T) {
 
 func TestNegativeConsumedTimeIsRejected(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_negative", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_negative", domain.RoleCustomer)
 	tk := newTicket(t, c, requester, "Negative")
 
 	_, err := c.tx.Exec(c.ctx, `UPDATE tickets SET sla_consumed_micros = -1 WHERE id = $1`, tk.ID)
@@ -197,7 +197,7 @@ func TestNegativeConsumedTimeIsRejected(t *testing.T) {
 
 func TestDatabaseRejectsAnUnknownCategory(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_cat", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_cat", domain.RoleCustomer)
 
 	_, err := c.tx.Exec(c.ctx,
 		`INSERT INTO tickets (requester_id, title, description, category, priority, sla_policy_id,
@@ -212,7 +212,7 @@ func TestDatabaseRejectsAnUnknownCategory(t *testing.T) {
 
 func TestDatabaseRejectsAnUnknownTicketStatus(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_status", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_status", domain.RoleCustomer)
 	tk := newTicket(t, c, requester, "Bad status")
 
 	// The clock columns are cleared in the same statement. Leaving them set
@@ -231,7 +231,7 @@ func TestDatabaseRejectsAnUnknownTicketStatus(t *testing.T) {
 
 func TestDatabaseRejectsAnEmptyTitle(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_title", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_title", domain.RoleCustomer)
 	tk := newTicket(t, c, requester, "Has a title")
 
 	_, err := c.tx.Exec(c.ctx, `UPDATE tickets SET title = '' WHERE id = $1`, tk.ID)
@@ -247,7 +247,7 @@ func TestDatabaseRejectsAnEmptyTitle(t *testing.T) {
 // ticket, and a cascade would do it from a distance.
 func TestDeletingAUserWithTicketsIsRejected(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_with_tickets", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_with_tickets", domain.RoleCustomer)
 	newTicket(t, c, requester, "Keeps the user alive")
 
 	_, err := c.tx.Exec(c.ctx, `DELETE FROM users WHERE id = $1`, requester)
@@ -259,7 +259,7 @@ func TestDeletingAUserWithTicketsIsRejected(t *testing.T) {
 
 func TestDeletingAPolicyInUseIsRejected(t *testing.T) {
 	c := setup(t)
-	requester := newUser(t, c, "user_policy_fk", ticket.RoleCustomer)
+	requester := newUser(t, c, "user_policy_fk", domain.RoleCustomer)
 	newTicket(t, c, requester, "Pins the policy")
 
 	_, err := c.tx.Exec(c.ctx, `DELETE FROM sla_policies WHERE id = $1`, normalPolicyID(t, c))
@@ -276,20 +276,20 @@ func TestDeletingAPolicyInUseIsRejected(t *testing.T) {
 // the handler is then trusted to reject.
 func TestGetTicketForRequesterHidesAnotherCustomersTicket(t *testing.T) {
 	c := setup(t)
-	alice := newUser(t, c, "user_alice", ticket.RoleCustomer)
-	bob := newUser(t, c, "user_bob", ticket.RoleCustomer)
+	alice := newUser(t, c, "user_alice", domain.RoleCustomer)
+	bob := newUser(t, c, "user_bob", domain.RoleCustomer)
 
 	tk := newTicket(t, c, alice, "Alice's private problem")
 
 	// Sanity: Alice can read her own ticket. Without this the test below would
 	// also pass if the query were simply broken.
-	if _, err := c.q.GetTicketForRequester(c.ctx, store.GetTicketForRequesterParams{
+	if _, err := c.q.GetTicketForRequester(c.ctx, ticketdb.GetTicketForRequesterParams{
 		ID: tk.ID, RequesterID: alice,
 	}); err != nil {
 		t.Fatalf("Alice cannot read her own ticket: %v", err)
 	}
 
-	_, err := c.q.GetTicketForRequester(c.ctx, store.GetTicketForRequesterParams{
+	_, err := c.q.GetTicketForRequester(c.ctx, ticketdb.GetTicketForRequesterParams{
 		ID: tk.ID, RequesterID: bob,
 	})
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -299,14 +299,14 @@ func TestGetTicketForRequesterHidesAnotherCustomersTicket(t *testing.T) {
 
 func TestListTicketsByRequesterExcludesOtherCustomers(t *testing.T) {
 	c := setup(t)
-	alice := newUser(t, c, "user_alice_list", ticket.RoleCustomer)
-	bob := newUser(t, c, "user_bob_list", ticket.RoleCustomer)
+	alice := newUser(t, c, "user_alice_list", domain.RoleCustomer)
+	bob := newUser(t, c, "user_bob_list", domain.RoleCustomer)
 
 	newTicket(t, c, alice, "Alice one")
 	newTicket(t, c, alice, "Alice two")
 	newTicket(t, c, bob, "Bob one")
 
-	got, err := c.q.ListTicketsByRequester(c.ctx, store.ListTicketsByRequesterParams{RequesterID: alice, PageSize: 50})
+	got, err := c.q.ListTicketsByRequester(c.ctx, ticketdb.ListTicketsByRequesterParams{RequesterID: alice, PageSize: 50})
 	if err != nil {
 		t.Fatalf("ListTicketsByRequester: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestListTicketsByRequesterExcludesOtherCustomers(t *testing.T) {
 
 func TestListTicketsByRequesterReturnsNewestFirst(t *testing.T) {
 	c := setup(t)
-	alice := newUser(t, c, "user_order", ticket.RoleCustomer)
+	alice := newUser(t, c, "user_order", domain.RoleCustomer)
 
 	first := newTicket(t, c, alice, "Older")
 	// created_at defaults to now(), which is the transaction timestamp and
@@ -334,7 +334,7 @@ func TestListTicketsByRequesterReturnsNewestFirst(t *testing.T) {
 	}
 	newTicket(t, c, alice, "Newer")
 
-	got, err := c.q.ListTicketsByRequester(c.ctx, store.ListTicketsByRequesterParams{RequesterID: alice, PageSize: 50})
+	got, err := c.q.ListTicketsByRequester(c.ctx, ticketdb.ListTicketsByRequesterParams{RequesterID: alice, PageSize: 50})
 	if err != nil {
 		t.Fatalf("ListTicketsByRequester: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestListTicketsByRequesterReturnsNewestFirst(t *testing.T) {
 	}
 }
 
-func titles(tickets []store.Ticket) []string {
+func titles(tickets []ticketdb.Ticket) []string {
 	out := make([]string, len(tickets))
 	for i, tk := range tickets {
 		out[i] = tk.Title
@@ -356,15 +356,15 @@ func titles(tickets []store.Ticket) []string {
 // The creation row is the only one with no previous status.
 func TestCreationHistoryRowHasNoFromStatus(t *testing.T) {
 	c := setup(t)
-	actor := newUser(t, c, "user_history_create", ticket.RoleCustomer)
+	actor := newUser(t, c, "user_history_create", domain.RoleCustomer)
 	tk := newTicket(t, c, actor, "Fresh")
 
-	row, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
+	row, err := c.q.InsertTicketStatusHistory(c.ctx, ticketdb.InsertTicketStatusHistoryParams{
 		TicketID:   tk.ID,
 		FromStatus: nil,
-		ToStatus:   ticket.StatusOpen,
+		ToStatus:   domain.StatusOpen,
 		ActorID:    actor,
-		ActorRole:  ticket.RoleCustomer,
+		ActorRole:  domain.RoleCustomer,
 		CreatedAt:  time.Now().UTC(),
 	})
 	if err != nil {
@@ -382,15 +382,15 @@ func TestCreationHistoryRowHasNoFromStatus(t *testing.T) {
 // would pad the history the SLA clock is rebuilt from.
 func TestSelfTransitionIsRejected(t *testing.T) {
 	c := setup(t)
-	actor := newUser(t, c, "user_self_transition", ticket.RoleCustomer)
+	actor := newUser(t, c, "user_self_transition", domain.RoleCustomer)
 	tk := newTicket(t, c, actor, "Self")
 
-	_, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
+	_, err := c.q.InsertTicketStatusHistory(c.ctx, ticketdb.InsertTicketStatusHistoryParams{
 		TicketID:   tk.ID,
-		FromStatus: ptr(ticket.StatusOpen),
-		ToStatus:   ticket.StatusOpen,
+		FromStatus: ptr(domain.StatusOpen),
+		ToStatus:   domain.StatusOpen,
 		ActorID:    actor,
-		ActorRole:  ticket.RoleCustomer,
+		ActorRole:  domain.RoleCustomer,
 		CreatedAt:  time.Now().UTC(),
 	})
 
@@ -416,22 +416,22 @@ func TestSelfTransitionIsRejected(t *testing.T) {
 // primary key of the ordering, which the next test does cover.
 func TestHistoryComesBackInTransitionOrder(t *testing.T) {
 	c := setup(t)
-	actor := newUser(t, c, "user_history_order", ticket.RoleAgent)
+	actor := newUser(t, c, "user_history_order", domain.RoleAgent)
 	tk := newTicket(t, c, actor, "Bounces")
 
 	sequence := []struct {
-		from *ticket.Status
-		to   ticket.Status
+		from *domain.Status
+		to   domain.Status
 	}{
-		{nil, ticket.StatusOpen},
-		{ptr(ticket.StatusOpen), ticket.StatusPending},
-		{ptr(ticket.StatusPending), ticket.StatusOpen},
-		{ptr(ticket.StatusOpen), ticket.StatusResolved},
+		{nil, domain.StatusOpen},
+		{ptr(domain.StatusOpen), domain.StatusPending},
+		{ptr(domain.StatusPending), domain.StatusOpen},
+		{ptr(domain.StatusOpen), domain.StatusResolved},
 	}
 	for _, s := range sequence {
-		if _, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
+		if _, err := c.q.InsertTicketStatusHistory(c.ctx, ticketdb.InsertTicketStatusHistoryParams{
 			TicketID: tk.ID, FromStatus: s.from, ToStatus: s.to,
-			ActorID: actor, ActorRole: ticket.RoleAgent, CreatedAt: time.Now().UTC(),
+			ActorID: actor, ActorRole: domain.RoleAgent, CreatedAt: time.Now().UTC(),
 		}); err != nil {
 			t.Fatalf("inserting %v -> %s: %v", s.from, s.to, err)
 		}
@@ -457,19 +457,19 @@ func TestHistoryComesBackInTransitionOrder(t *testing.T) {
 // created_at has to be what the query sorts on.
 func TestHistoryIsOrderedByEventTimeNotByID(t *testing.T) {
 	c := setup(t)
-	actor := newUser(t, c, "user_history_backdated", ticket.RoleAgent)
+	actor := newUser(t, c, "user_history_backdated", domain.RoleAgent)
 	tk := newTicket(t, c, actor, "Out of order")
 
-	first, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
-		TicketID: tk.ID, FromStatus: nil, ToStatus: ticket.StatusOpen,
-		ActorID: actor, ActorRole: ticket.RoleAgent, CreatedAt: time.Now().UTC(),
+	first, err := c.q.InsertTicketStatusHistory(c.ctx, ticketdb.InsertTicketStatusHistoryParams{
+		TicketID: tk.ID, FromStatus: nil, ToStatus: domain.StatusOpen,
+		ActorID: actor, ActorRole: domain.RoleAgent, CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatalf("first row: %v", err)
 	}
-	second, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
-		TicketID: tk.ID, FromStatus: ptr(ticket.StatusOpen), ToStatus: ticket.StatusPending,
-		ActorID: actor, ActorRole: ticket.RoleAgent, CreatedAt: time.Now().UTC(),
+	second, err := c.q.InsertTicketStatusHistory(c.ctx, ticketdb.InsertTicketStatusHistoryParams{
+		TicketID: tk.ID, FromStatus: ptr(domain.StatusOpen), ToStatus: domain.StatusPending,
+		ActorID: actor, ActorRole: domain.RoleAgent, CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatalf("second row: %v", err)
@@ -503,12 +503,12 @@ func TestHistoryIsOrderedByEventTimeNotByID(t *testing.T) {
 // later must not rewrite what the audit trail says they were when they acted.
 func TestActorRoleIsRecordedIndependentlyOfTheUsersCurrentRole(t *testing.T) {
 	c := setup(t)
-	actor := newUser(t, c, "user_promoted", ticket.RoleCustomer)
+	actor := newUser(t, c, "user_promoted", domain.RoleCustomer)
 	tk := newTicket(t, c, actor, "Acted on as a customer")
 
-	if _, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
-		TicketID: tk.ID, FromStatus: nil, ToStatus: ticket.StatusOpen,
-		ActorID: actor, ActorRole: ticket.RoleCustomer, CreatedAt: time.Now().UTC(),
+	if _, err := c.q.InsertTicketStatusHistory(c.ctx, ticketdb.InsertTicketStatusHistoryParams{
+		TicketID: tk.ID, FromStatus: nil, ToStatus: domain.StatusOpen,
+		ActorID: actor, ActorRole: domain.RoleCustomer, CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		t.Fatalf("inserting history: %v", err)
 	}
@@ -521,7 +521,7 @@ func TestActorRoleIsRecordedIndependentlyOfTheUsersCurrentRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTicketStatusHistory: %v", err)
 	}
-	if rows[0].ActorRole != ticket.RoleCustomer {
+	if rows[0].ActorRole != domain.RoleCustomer {
 		t.Errorf("actor_role = %q, want customer — the promotion rewrote history", rows[0].ActorRole)
 	}
 }
@@ -529,7 +529,7 @@ func TestActorRoleIsRecordedIndependentlyOfTheUsersCurrentRole(t *testing.T) {
 func TestHistoryForAnUnknownTicketIsEmpty(t *testing.T) {
 	c := setup(t)
 
-	var unknown pgtype.UUID
+	var unknown uuid.UUID
 	if err := c.tx.QueryRow(c.ctx, `SELECT gen_random_uuid()`).Scan(&unknown); err != nil {
 		t.Fatalf("generating an id: %v", err)
 	}
@@ -552,19 +552,19 @@ func TestHistoryForAnUnknownTicketIsEmpty(t *testing.T) {
 // Both clock columns are cleared along with the status, because the CHECK
 // constraints in migration 003 refuse a paused ticket that still has a running
 // clock. The test would fail on the constraint rather than on the filter.
-func newTicketWith(t *testing.T, c testContext, requester pgtype.UUID, title string,
-	priority ticket.Priority, status ticket.Status,
-) store.Ticket {
+func newTicketWith(t *testing.T, c testContext, requester uuid.UUID, title string,
+	priority domain.Priority, status domain.Status,
+) ticketdb.Ticket {
 	t.Helper()
 
 	started := time.Now().UTC()
 	due := started.Add(24 * time.Hour)
 
-	tk, err := c.q.CreateTicket(c.ctx, store.CreateTicketParams{
+	tk, err := c.q.CreateTicket(c.ctx, ticketdb.CreateTicketParams{
 		RequesterID:       requester,
 		Title:             title,
 		Description:       "body",
-		Category:          ticket.CategoryTechnical,
+		Category:          domain.CategoryTechnical,
 		Priority:          priority,
 		SlaPolicyID:       policyIDFor(t, c, priority),
 		SlaClockStartedAt: &started,
@@ -574,7 +574,7 @@ func newTicketWith(t *testing.T, c testContext, requester pgtype.UUID, title str
 		t.Fatalf("creating ticket %q: %v", title, err)
 	}
 
-	if status == ticket.StatusOpen {
+	if status == domain.StatusOpen {
 		return tk
 	}
 
@@ -590,7 +590,7 @@ func newTicketWith(t *testing.T, c testContext, requester pgtype.UUID, title str
 	return tk
 }
 
-func policyIDFor(t *testing.T, c testContext, priority ticket.Priority) int64 {
+func policyIDFor(t *testing.T, c testContext, priority domain.Priority) int64 {
 	t.Helper()
 	p, err := slapostgres.NewPolicyRepository(c.tx).ActiveByPriority(c.ctx, sladomain.Priority(priority))
 	if err != nil {
@@ -599,7 +599,7 @@ func policyIDFor(t *testing.T, c testContext, priority ticket.Priority) int64 {
 	return p.ID
 }
 
-func titlesOf(rows []store.Ticket) []string {
+func titlesOf(rows []ticketdb.Ticket) []string {
 	out := make([]string, len(rows))
 	for i, r := range rows {
 		out[i] = r.Title
@@ -612,12 +612,12 @@ func titlesOf(rows []store.Ticket) []string {
 // customer sees "3 open tickets" because the other seven were on page two.
 func TestListTicketsByRequesterFiltersByStatusAndPriority(t *testing.T) {
 	c := setup(t)
-	alice := newUser(t, c, "user_alice_filters", ticket.RoleCustomer)
+	alice := newUser(t, c, "user_alice_filters", domain.RoleCustomer)
 
-	newTicketWith(t, c, alice, "open normal", ticket.PriorityNormal, ticket.StatusOpen)
-	newTicketWith(t, c, alice, "open urgent", ticket.PriorityUrgent, ticket.StatusOpen)
-	newTicketWith(t, c, alice, "pending normal", ticket.PriorityNormal, ticket.StatusPending)
-	newTicketWith(t, c, alice, "pending urgent", ticket.PriorityUrgent, ticket.StatusPending)
+	newTicketWith(t, c, alice, "open normal", domain.PriorityNormal, domain.StatusOpen)
+	newTicketWith(t, c, alice, "open urgent", domain.PriorityUrgent, domain.StatusOpen)
+	newTicketWith(t, c, alice, "pending normal", domain.PriorityNormal, domain.StatusPending)
+	newTicketWith(t, c, alice, "pending urgent", domain.PriorityUrgent, domain.StatusPending)
 
 	for _, tc := range []struct {
 		name     string
@@ -631,23 +631,23 @@ func TestListTicketsByRequesterFiltersByStatusAndPriority(t *testing.T) {
 		},
 		{
 			name:   "status alone",
-			status: ptr(string(ticket.StatusOpen)),
+			status: ptr(string(domain.StatusOpen)),
 			want:   []string{"open normal", "open urgent"},
 		},
 		{
 			name:     "priority alone",
-			priority: ptr(string(ticket.PriorityUrgent)),
+			priority: ptr(string(domain.PriorityUrgent)),
 			want:     []string{"open urgent", "pending urgent"},
 		},
 		{
 			name:     "both, which intersect",
-			status:   ptr(string(ticket.StatusPending)),
-			priority: ptr(string(ticket.PriorityUrgent)),
+			status:   ptr(string(domain.StatusPending)),
+			priority: ptr(string(domain.PriorityUrgent)),
 			want:     []string{"pending urgent"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := c.q.ListTicketsByRequester(c.ctx, store.ListTicketsByRequesterParams{
+			got, err := c.q.ListTicketsByRequester(c.ctx, ticketdb.ListTicketsByRequesterParams{
 				RequesterID: alice,
 				Status:      tc.status,
 				Priority:    tc.priority,
@@ -680,13 +680,13 @@ func TestListTicketsByRequesterFiltersByStatusAndPriority(t *testing.T) {
 // happened to exercise and open for the one it did not.
 func TestFilteringNeverReachesAnotherCustomersTickets(t *testing.T) {
 	c := setup(t)
-	alice := newUser(t, c, "user_alice_scope", ticket.RoleCustomer)
-	bob := newUser(t, c, "user_bob_scope", ticket.RoleCustomer)
+	alice := newUser(t, c, "user_alice_scope", domain.RoleCustomer)
+	bob := newUser(t, c, "user_bob_scope", domain.RoleCustomer)
 
 	// Everything Bob has is what Alice's filters ask for. Everything Alice has
 	// is something else, so any row coming back is Bob's.
-	newTicketWith(t, c, bob, "bob's urgent open", ticket.PriorityUrgent, ticket.StatusOpen)
-	newTicketWith(t, c, alice, "alice's low pending", ticket.PriorityLow, ticket.StatusPending)
+	newTicketWith(t, c, bob, "bob's urgent open", domain.PriorityUrgent, domain.StatusOpen)
+	newTicketWith(t, c, alice, "alice's low pending", domain.PriorityLow, domain.StatusPending)
 
 	for _, tc := range []struct {
 		name     string
@@ -694,16 +694,16 @@ func TestFilteringNeverReachesAnotherCustomersTickets(t *testing.T) {
 		priority *string
 	}{
 		{name: "no filter"},
-		{name: "status only", status: ptr(string(ticket.StatusOpen))},
-		{name: "priority only", priority: ptr(string(ticket.PriorityUrgent))},
+		{name: "status only", status: ptr(string(domain.StatusOpen))},
+		{name: "priority only", priority: ptr(string(domain.PriorityUrgent))},
 		{
 			name:     "both",
-			status:   ptr(string(ticket.StatusOpen)),
-			priority: ptr(string(ticket.PriorityUrgent)),
+			status:   ptr(string(domain.StatusOpen)),
+			priority: ptr(string(domain.PriorityUrgent)),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := c.q.ListTicketsByRequester(c.ctx, store.ListTicketsByRequesterParams{
+			got, err := c.q.ListTicketsByRequester(c.ctx, ticketdb.ListTicketsByRequesterParams{
 				RequesterID: alice,
 				Status:      tc.status,
 				Priority:    tc.priority,
@@ -729,14 +729,14 @@ func TestFilteringNeverReachesAnotherCustomersTickets(t *testing.T) {
 // be enough to leak another customer's ticket (docs/spec.md §4.3).
 func TestHistoryForRequesterHidesAnotherCustomersTicket(t *testing.T) {
 	c := setup(t)
-	alice := newUser(t, c, "user_alice_history", ticket.RoleCustomer)
-	bob := newUser(t, c, "user_bob_history", ticket.RoleCustomer)
+	alice := newUser(t, c, "user_alice_history", domain.RoleCustomer)
+	bob := newUser(t, c, "user_bob_history", domain.RoleCustomer)
 
 	bobs := newTicket(t, c, bob, "bob's ticket")
-	writeHistory(t, c, bobs.ID, bob, nil, ticket.StatusOpen)
+	writeHistory(t, c, bobs.ID, bob, nil, domain.StatusOpen)
 
 	got, err := c.q.ListTicketStatusHistoryForRequester(c.ctx,
-		store.ListTicketStatusHistoryForRequesterParams{
+		ticketdb.ListTicketStatusHistoryForRequesterParams{
 			TicketID:    bobs.ID,
 			RequesterID: alice,
 		})
@@ -755,15 +755,15 @@ func TestHistoryForRequesterHidesAnotherCustomersTicket(t *testing.T) {
 // so an empty history means one of those two and never a real ticket.
 func TestHistoryForRequesterReturnsTheOwnersRowsInOrder(t *testing.T) {
 	c := setup(t)
-	alice := newUser(t, c, "user_alice_own_history", ticket.RoleCustomer)
+	alice := newUser(t, c, "user_alice_own_history", domain.RoleCustomer)
 
 	tk := newTicket(t, c, alice, "alice's ticket")
-	writeHistory(t, c, tk.ID, alice, nil, ticket.StatusOpen)
-	writeHistory(t, c, tk.ID, alice, ptr(ticket.StatusOpen), ticket.StatusPending)
-	writeHistory(t, c, tk.ID, alice, ptr(ticket.StatusPending), ticket.StatusResolved)
+	writeHistory(t, c, tk.ID, alice, nil, domain.StatusOpen)
+	writeHistory(t, c, tk.ID, alice, ptr(domain.StatusOpen), domain.StatusPending)
+	writeHistory(t, c, tk.ID, alice, ptr(domain.StatusPending), domain.StatusResolved)
 
 	got, err := c.q.ListTicketStatusHistoryForRequester(c.ctx,
-		store.ListTicketStatusHistoryForRequesterParams{
+		ticketdb.ListTicketStatusHistoryForRequesterParams{
 			TicketID:    tk.ID,
 			RequesterID: alice,
 		})
@@ -771,7 +771,7 @@ func TestHistoryForRequesterReturnsTheOwnersRowsInOrder(t *testing.T) {
 		t.Fatalf("ListTicketStatusHistoryForRequester: %v", err)
 	}
 
-	want := []ticket.Status{ticket.StatusOpen, ticket.StatusPending, ticket.StatusResolved}
+	want := []domain.Status{domain.StatusOpen, domain.StatusPending, domain.StatusResolved}
 	if len(got) != len(want) {
 		t.Fatalf("got %d rows, want %d", len(got), len(want))
 	}
@@ -788,17 +788,17 @@ func TestHistoryForRequesterReturnsTheOwnersRowsInOrder(t *testing.T) {
 // writeHistory inserts a history row directly. Direct rather than through
 // TicketRepo.Transition because what is under test is the read, and going
 // through the write path would drag the SLA reconstruction into it.
-func writeHistory(t *testing.T, c testContext, ticketID, actor pgtype.UUID,
-	from *ticket.Status, to ticket.Status,
+func writeHistory(t *testing.T, c testContext, ticketID, actor uuid.UUID,
+	from *domain.Status, to domain.Status,
 ) {
 	t.Helper()
 
-	_, err := c.q.InsertTicketStatusHistory(c.ctx, store.InsertTicketStatusHistoryParams{
+	_, err := c.q.InsertTicketStatusHistory(c.ctx, ticketdb.InsertTicketStatusHistoryParams{
 		TicketID:   ticketID,
 		FromStatus: from,
 		ToStatus:   to,
 		ActorID:    actor,
-		ActorRole:  ticket.RoleCustomer,
+		ActorRole:  domain.RoleCustomer,
 		CreatedAt:  time.Now().UTC(),
 	})
 	if err != nil {

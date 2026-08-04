@@ -7,8 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
 
 // generatedContractPath is where cmd/gencontract writes, relative to this
@@ -94,16 +95,16 @@ func TestContractVocabulariesAreAccepted(t *testing.T) {
 func TestContractOffersEveryDomainValue(t *testing.T) {
 	c := api.TicketContract()
 
-	for _, category := range []ticket.Category{
-		ticket.CategoryBilling, ticket.CategoryTechnical, ticket.CategoryAccount, ticket.CategoryOther,
+	for _, category := range []ticketdomain.Category{
+		ticketdomain.CategoryBilling, ticketdomain.CategoryTechnical, ticketdomain.CategoryAccount, ticketdomain.CategoryOther,
 	} {
 		if !containsValue(c.Categories, category) {
 			t.Errorf("category %q exists in the domain but is missing from the contract", category)
 		}
 	}
 
-	for _, priority := range []ticket.Priority{
-		ticket.PriorityUrgent, ticket.PriorityHigh, ticket.PriorityNormal, ticket.PriorityLow,
+	for _, priority := range []ticketdomain.Priority{
+		ticketdomain.PriorityUrgent, ticketdomain.PriorityHigh, ticketdomain.PriorityNormal, ticketdomain.PriorityLow,
 	} {
 		if !containsValue(c.Priorities, priority) {
 			t.Errorf("priority %q exists in the domain but is missing from the contract", priority)
@@ -113,8 +114,8 @@ func TestContractOffersEveryDomainValue(t *testing.T) {
 	// Statuses are not accepted in a create body — a client does not choose the
 	// state a ticket is in — but they are a list filter and a thing the UI
 	// labels, so they travel with the rest.
-	for _, status := range []ticket.Status{
-		ticket.StatusOpen, ticket.StatusPending, ticket.StatusResolved, ticket.StatusClosed,
+	for _, status := range []ticketdomain.Status{
+		ticketdomain.StatusOpen, ticketdomain.StatusPending, ticketdomain.StatusResolved, ticketdomain.StatusClosed,
 	} {
 		if !containsValue(c.Statuses, status) {
 			t.Errorf("status %q exists in the domain but is missing from the contract", status)

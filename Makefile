@@ -59,11 +59,11 @@ migrate-new: ## Create a migration: make migrate-new name=add_tickets
 	@test -n "$(name)" || { echo "usage: make migrate-new name=add_tickets"; exit 1; }
 	go tool goose -dir db/migrations create $(name) sql
 
-# One config per module that owns tables, plus the root one for what has not
-# moved yet. Discovered rather than listed: a module added with its own queries
+# One config per module that owns tables. There is no root config any more, and
+# an architecture test asserts that. Discovered rather than listed: a module added with its own queries
 # and left out of a hand-written list would silently never be regenerated, and
 # the drift only shows up as a compile error days later.
-SQLC_CONFIGS := sqlc.yaml $(shell find internal/modules -name sqlc.yaml 2>/dev/null | sort)
+SQLC_CONFIGS := $(shell find internal/modules -name sqlc.yaml 2>/dev/null | sort)
 
 sqlc: ## Regenerate the type-safe query code for every config
 	@for cfg in $(SQLC_CONFIGS); do \

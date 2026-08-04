@@ -3,14 +3,14 @@
 //   sqlc v1.31.1
 // source: tickets.sql
 
-package store
+package ticketdb
 
 import (
 	"context"
 	"time"
 
-	ticket "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
-	"github.com/jackc/pgx/v5/pgtype"
+	domain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	uuid "github.com/google/uuid"
 )
 
 const createTicket = `-- name: CreateTicket :one
@@ -30,11 +30,11 @@ RETURNING id, requester_id, assignee_id, title, description, category, priority,
 `
 
 type CreateTicketParams struct {
-	RequesterID       pgtype.UUID
+	RequesterID       uuid.UUID
 	Title             string
 	Description       string
-	Category          ticket.Category
-	Priority          ticket.Priority
+	Category          domain.Category
+	Priority          domain.Priority
 	SlaPolicyID       int64
 	SlaClockStartedAt *time.Time
 	SlaDueAt          *time.Time
@@ -86,8 +86,8 @@ WHERE id = $1
 `
 
 type GetTicketForRequesterParams struct {
-	ID          pgtype.UUID
-	RequesterID pgtype.UUID
+	ID          uuid.UUID
+	RequesterID uuid.UUID
 }
 
 // The requester predicate lives in the SQL, not in the handler. A forgotten
@@ -134,7 +134,7 @@ FOR UPDATE
 //
 // Not scoped by requester: an agent transitions tickets that are not theirs.
 // Authorisation for that lives in the RBAC matrix, not in this query.
-func (q *Queries) GetTicketForUpdate(ctx context.Context, id pgtype.UUID) (Ticket, error) {
+func (q *Queries) GetTicketForUpdate(ctx context.Context, id uuid.UUID) (Ticket, error) {
 	row := q.db.QueryRow(ctx, getTicketForUpdate, id)
 	var i Ticket
 	err := row.Scan(
@@ -157,6 +157,25 @@ func (q *Queries) GetTicketForUpdate(ctx context.Context, id pgtype.UUID) (Ticke
 	return i, err
 }
 
+const getTicketPolicyID = `-- name: GetTicketPolicyID :one
+SELECT sla_policy_id FROM tickets
+WHERE id = $1
+`
+
+// The policy a ticket was created under, read without locking anything.
+//
+// It exists so the SLA clock can be resolved before Transition opens its
+// transaction, which is what keeps another module's I/O out of ours. The read
+// is safe unlocked because sla_policy_id is written once by CreateTicket and no
+// query updates it — and Transition does not take that on trust: it compares
+// this against the locked row before writing.
+func (q *Queries) GetTicketPolicyID(ctx context.Context, id uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, getTicketPolicyID, id)
+	var sla_policy_id int64
+	err := row.Scan(&sla_policy_id)
+	return sla_policy_id, err
+}
+
 const listTicketsByRequester = `-- name: ListTicketsByRequester :many
 SELECT id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at FROM tickets
 WHERE requester_id = $1
@@ -171,11 +190,11 @@ LIMIT $6
 `
 
 type ListTicketsByRequesterParams struct {
-	RequesterID    pgtype.UUID
+	RequesterID    uuid.UUID
 	Status         *string
 	Priority       *string
 	AfterCreatedAt *time.Time
-	AfterID        pgtype.UUID
+	AfterID        *uuid.UUID
 	PageSize       int32
 }
 
@@ -272,12 +291,12 @@ RETURNING id, requester_id, assignee_id, title, description, category, priority,
 `
 
 type UpdateTicketClockParams struct {
-	Status            ticket.Status
+	Status            domain.Status
 	SlaConsumedMicros int64
 	SlaClockStartedAt *time.Time
 	SlaDueAt          *time.Time
 	UpdatedAt         time.Time
-	ID                pgtype.UUID
+	ID                uuid.UUID
 }
 
 // Writes the derived cache. Step 4 of the order fixed by docs/adr/0001, and it

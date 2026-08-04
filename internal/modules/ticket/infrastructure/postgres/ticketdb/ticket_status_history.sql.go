@@ -3,14 +3,14 @@
 //   sqlc v1.31.1
 // source: ticket_status_history.sql
 
-package store
+package ticketdb
 
 import (
 	"context"
 	"time"
 
-	ticket "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
-	"github.com/jackc/pgx/v5/pgtype"
+	domain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	uuid "github.com/google/uuid"
 )
 
 const insertTicketStatusHistory = `-- name: InsertTicketStatusHistory :one
@@ -28,11 +28,11 @@ RETURNING id, ticket_id, from_status, to_status, actor_id, actor_role, reason, c
 `
 
 type InsertTicketStatusHistoryParams struct {
-	TicketID   pgtype.UUID
-	FromStatus *ticket.Status
-	ToStatus   ticket.Status
-	ActorID    pgtype.UUID
-	ActorRole  ticket.Role
+	TicketID   uuid.UUID
+	FromStatus *domain.Status
+	ToStatus   domain.Status
+	ActorID    uuid.UUID
+	ActorRole  domain.Role
 	Reason     *string
 	CreatedAt  time.Time
 }
@@ -86,7 +86,7 @@ ORDER BY created_at, id
 // still come back in a fixed order. Reconstruction walks this sequence, so an
 // unstable order would make the clock depend on how Postgres felt about the
 // tie.
-func (q *Queries) ListTicketStatusHistory(ctx context.Context, ticketID pgtype.UUID) ([]TicketStatusHistory, error) {
+func (q *Queries) ListTicketStatusHistory(ctx context.Context, ticketID uuid.UUID) ([]TicketStatusHistory, error) {
 	rows, err := q.db.Query(ctx, listTicketStatusHistory, ticketID)
 	if err != nil {
 		return nil, err
@@ -124,8 +124,8 @@ ORDER BY h.created_at, h.id
 `
 
 type ListTicketStatusHistoryForRequesterParams struct {
-	TicketID    pgtype.UUID
-	RequesterID pgtype.UUID
+	TicketID    uuid.UUID
+	RequesterID uuid.UUID
 }
 
 // The timeline as a customer is allowed to see it.

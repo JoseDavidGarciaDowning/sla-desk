@@ -111,3 +111,14 @@ SET status               = @status,
     updated_at           = @updated_at
 WHERE id = @id
 RETURNING *;
+
+-- name: GetTicketPolicyID :one
+-- The policy a ticket was created under, read without locking anything.
+--
+-- It exists so the SLA clock can be resolved before Transition opens its
+-- transaction, which is what keeps another module's I/O out of ours. The read
+-- is safe unlocked because sla_policy_id is written once by CreateTicket and no
+-- query updates it — and Transition does not take that on trust: it compares
+-- this against the locked row before writing.
+SELECT sla_policy_id FROM tickets
+WHERE id = $1;

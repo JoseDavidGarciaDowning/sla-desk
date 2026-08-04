@@ -1,6 +1,6 @@
 //go:build integration
 
-package store_test
+package postgres_test
 
 import (
 	"math/rand/v2"
@@ -9,8 +9,9 @@ import (
 
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
 )
 
 // The obligation docs/spec.md §4.2 takes on by keeping a derived cache:
@@ -19,7 +20,7 @@ import (
 //	in ticket_status_history for that ticket.
 //
 // Reframed per docs/adr/0001, this is not a test of the arithmetic. The unit
-// tests at the the SLA module seams cover that, and asserting Reconstruct(history)
+// tests in the SLA module's domain cover that, and asserting Reconstruct(history)
 // == cache when the write path *produces* the cache by calling Reconstruct
 // would be circular.
 //
@@ -36,7 +37,7 @@ import (
 // them by hand is how the one that matters gets left out.
 func TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom(t *testing.T) {
 	f := newRepoFixture(t)
-	q := store.New(f.pool)
+	q := ticketdb.New(f.pool)
 
 	const sequences = 15
 
@@ -47,7 +48,7 @@ func TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom(t *testing.T) {
 	rng := rand.New(rand.NewPCG(seed, 0x5eed))
 
 	for run := range sequences {
-		tk, err := f.repo.Create(f.ctx, f.newTicket(randomPriority(rng)))
+		tk, err := f.svc.Create(f.ctx, f.newTicket(randomPriority(rng)))
 		if err != nil {
 			t.Fatalf("run %d: Create: %v", run, err)
 		}
@@ -65,11 +66,11 @@ func TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom(t *testing.T) {
 			// drop.
 			time.Sleep(time.Millisecond)
 
-			tk, err = f.repo.Transition(f.ctx, store.StatusChange{
+			tk, err = f.svc.Transition(f.ctx, application.StatusChange{
 				TicketID:  tk.ID,
 				Target:    target,
 				ActorID:   f.requester,
-				ActorRole: ticket.RoleAdmin,
+				ActorRole: domain.RoleAdmin,
 			})
 			if err != nil {
 				t.Fatalf("run %d step %d: Transition to %s: %v", run, step, target, err)
@@ -84,12 +85,10 @@ func TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom(t *testing.T) {
 // it against what is cached. It reads both back from the database rather than
 // using the value Create or Transition returned, so a cache that was never
 // written cannot pass by handing back the value it meant to write.
-func assertCacheMatchesHistory(t *testing.T, f repoFixture, q *store.Queries, tk store.Ticket, when string) {
+func assertCacheMatchesHistory(t *testing.T, f repoFixture, q *ticketdb.Queries, tk domain.Ticket, when string) {
 	t.Helper()
 
-	stored, err := q.GetTicketForRequester(f.ctx, store.GetTicketForRequesterParams{
-		ID: tk.ID, RequesterID: f.requester,
-	})
+	stored, err := f.repo.GetForRequester(f.ctx, tk.ID, f.requester)
 	if err != nil {
 		t.Fatalf("%s: reading the ticket back: %v", when, err)
 	}
@@ -102,7 +101,7 @@ func assertCacheMatchesHistory(t *testing.T, f repoFixture, q *store.Queries, tk
 		t.Fatalf("%s: the ticket has no history at all", when)
 	}
 
-	policy, err := slapostgres.NewPolicyRepository(f.pool).ByID(f.ctx, stored.SlaPolicyID)
+	policy, err := slapostgres.NewPolicyRepository(f.pool).ByID(f.ctx, stored.SLAPolicyID)
 	if err != nil {
 		t.Fatalf("%s: reading the policy: %v", when, err)
 	}
@@ -124,21 +123,23 @@ func assertCacheMatchesHistory(t *testing.T, f repoFixture, q *store.Queries, tk
 			when, last, stored.Status)
 	}
 
-	if got := state.BudgetUsed.Microseconds(); got != stored.SlaConsumedMicros {
-		t.Errorf("%s: reconstructed %d micros consumed, cached %d (difference %v)",
-			when, got, stored.SlaConsumedMicros,
-			time.Duration(got-stored.SlaConsumedMicros)*time.Microsecond)
+	// Compared as Durations, which is what both sides now are. The column is
+	// still microseconds — see docs/spec.md §4.2 for why minutes were not
+	// enough — and the repository is what turns it into one.
+	if state.BudgetUsed != stored.SLAConsumed {
+		t.Errorf("%s: reconstructed %s consumed, cached %s (difference %s)",
+			when, state.BudgetUsed, stored.SLAConsumed, state.BudgetUsed-stored.SLAConsumed)
 	}
-	if !sameInstant(state.RunningSince, stored.SlaClockStartedAt) {
-		t.Errorf("%s: reconstructed clock start %v, cached %v", when, state.RunningSince, stored.SlaClockStartedAt)
+	if !sameInstant(state.RunningSince, stored.SLAClockStartedAt) {
+		t.Errorf("%s: reconstructed clock start %v, cached %v", when, state.RunningSince, stored.SLAClockStartedAt)
 	}
-	if !sameInstant(state.DueAt, stored.SlaDueAt) {
-		t.Errorf("%s: reconstructed deadline %v, cached %v", when, state.DueAt, stored.SlaDueAt)
+	if !sameInstant(state.DueAt, stored.SLADueAt) {
+		t.Errorf("%s: reconstructed deadline %v, cached %v", when, state.DueAt, stored.SLADueAt)
 	}
 
 	// Falls out of the model rather than being a rule anyone enforces: a paused
 	// ticket has no deadline, so the breach worker's predicate cannot match it.
-	if !stored.Status.RunsClock() && stored.SlaDueAt != nil {
+	if !stored.Status.RunsClock() && stored.SLADueAt != nil {
 		t.Errorf("%s: a %s ticket carries a deadline and can therefore breach", when, stored.Status)
 	}
 }
@@ -154,24 +155,24 @@ func sameInstant(a, b *time.Time) bool {
 	}
 }
 
-func randomPriority(rng *rand.Rand) ticket.Priority {
-	all := []ticket.Priority{
-		ticket.PriorityUrgent, ticket.PriorityHigh, ticket.PriorityNormal, ticket.PriorityLow,
+func randomPriority(rng *rand.Rand) domain.Priority {
+	all := []domain.Priority{
+		domain.PriorityUrgent, domain.PriorityHigh, domain.PriorityNormal, domain.PriorityLow,
 	}
 	return all[rng.IntN(len(all))]
 }
 
 // randomLegalTarget picks a status the ticket can actually move to, using
-// ticket.Transition as the oracle for what is legal. Generating illegal moves
+// domain.Transition as the oracle for what is legal. Generating illegal moves
 // would only exercise the rejection path, which the unit tests already cover.
-func randomLegalTarget(rng *rand.Rand, from ticket.Status) (ticket.Status, bool) {
-	candidates := []ticket.Status{
-		ticket.StatusOpen, ticket.StatusPending, ticket.StatusResolved, ticket.StatusClosed,
+func randomLegalTarget(rng *rand.Rand, from domain.Status) (domain.Status, bool) {
+	candidates := []domain.Status{
+		domain.StatusOpen, domain.StatusPending, domain.StatusResolved, domain.StatusClosed,
 	}
 
-	var legal []ticket.Status
+	var legal []domain.Status
 	for _, target := range candidates {
-		if _, err := ticket.Transition(from, target, ticket.RoleAdmin); err == nil {
+		if _, err := domain.Transition(from, target, domain.RoleAdmin); err == nil {
 			legal = append(legal, target)
 		}
 	}

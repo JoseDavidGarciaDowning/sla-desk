@@ -13,35 +13,32 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 )
 
 type fakeCreator struct {
-	got store.NewTicket
-	out store.Ticket
+	got ticketapp.NewTicket
+	out ticketdomain.Ticket
 	err error
 
 	calls int
 }
 
-func (f *fakeCreator) Create(_ context.Context, in store.NewTicket) (store.Ticket, error) {
+func (f *fakeCreator) Create(_ context.Context, in ticketapp.NewTicket) (ticketdomain.Ticket, error) {
 	f.calls++
 	f.got = in
 	if f.err != nil {
-		return store.Ticket{}, f.err
+		return ticketdomain.Ticket{}, f.err
 	}
 	return f.out, nil
 }
 
-// uuidOf parses a domain identifier. pgUUID converts one into the driver's
-// shape, for the assertions that read what the store was handed.
+// uuidOf parses a domain identifier.
 func uuidOf(t *testing.T, s string) uuid.UUID {
 	t.Helper()
 	id, err := uuid.Parse(s)
@@ -49,11 +46,6 @@ func uuidOf(t *testing.T, s string) uuid.UUID {
 		t.Fatalf("parsing uuid: %v", err)
 	}
 	return id
-}
-
-func pgUUIDOf(t *testing.T, s string) pgtype.UUID {
-	t.Helper()
-	return pgtype.UUID{Bytes: uuidOf(t, s), Valid: true}
 }
 
 // authenticated returns a request carrying the caller the identity middleware
@@ -96,14 +88,14 @@ func customer(t *testing.T) identitydomain.User {
 func TestCreateTicketReturns201WithTheTicket(t *testing.T) {
 	caller := customer(t)
 	due := time.Now().Add(24 * time.Hour).UTC()
-	creator := &fakeCreator{out: store.Ticket{
-		ID:          pgUUIDOf(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+	creator := &fakeCreator{out: ticketdomain.Ticket{
+		ID:          uuidOf(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
 		Title:       "Cannot download my invoice",
 		Description: "The download button returns a 500.",
-		Category:    ticket.CategoryBilling,
-		Priority:    ticket.PriorityNormal,
-		Status:      ticket.StatusOpen,
-		SlaDueAt:    &due,
+		Category:    ticketdomain.CategoryBilling,
+		Priority:    ticketdomain.PriorityNormal,
+		Status:      ticketdomain.StatusOpen,
+		SLADueAt:    &due,
 		CreatedAt:   time.Now().UTC(),
 		UpdatedAt:   time.Now().UTC(),
 	}}
@@ -123,7 +115,7 @@ func TestCreateTicketReturns201WithTheTicket(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decoding: %v", err)
 	}
-	if body.Status != ticket.StatusOpen {
+	if body.Status != ticketdomain.StatusOpen {
 		t.Errorf("status = %q, want open", body.Status)
 	}
 	if body.SLADueAt == nil {
@@ -154,12 +146,12 @@ func TestRequesterComesFromTheSessionNotTheBody(t *testing.T) {
 	if creator.calls != 1 {
 		t.Fatalf("Create calls = %d, want 1", creator.calls)
 	}
-	if creator.got.RequesterID != pgUUIDOf(t, caller.ID.String()) {
+	if creator.got.RequesterID != uuidOf(t, caller.ID.String()) {
 		t.Errorf("requester = %v, want the authenticated caller %v", creator.got.RequesterID, caller.ID)
 	}
-	// ticket.RoleCustomer, not the identity role the caller carries: the
+	// ticketdomain.RoleCustomer, not the identity role the caller carries: the
 	// handler is expected to have translated one vocabulary into the other.
-	if creator.got.ActorRole != ticket.RoleCustomer {
+	if creator.got.ActorRole != ticketdomain.RoleCustomer {
 		t.Errorf("actor role = %q, want the caller's role from our table", creator.got.ActorRole)
 	}
 }
@@ -232,7 +224,7 @@ func TestCreateTicketRejectsAMalformedBody(t *testing.T) {
 // being wrong — validation has already established the priority is one of the
 // four. It must not be reported as a client error.
 func TestMissingPolicyIsReportedAsAServerFault(t *testing.T) {
-	creator := &fakeCreator{err: store.ErrNoPolicyForPriority}
+	creator := &fakeCreator{err: ticketapp.ErrNoSLAPolicy}
 
 	handler, r := authenticated(t, customer(t), api.CreateTicketHandler(creator), validTicketBody)
 	rec := httptest.NewRecorder()
@@ -280,50 +272,50 @@ func TestCreateTicketTrimsTheText(t *testing.T) {
 // ── Reading tickets ─────────────────────────────────────────────────────────
 
 type fakeReader struct {
-	history       []store.TicketStatusHistory
-	historyParams store.ListTicketStatusHistoryForRequesterParams
-	historyCalls  int
+	history          []ticketdomain.HistoryEntry
+	historyTicketID  uuid.UUID
+	historyRequester uuid.UUID
+	historyCalls     int
 
-	page []store.Ticket
-	one  store.Ticket
+	page []ticketdomain.Ticket
+	one  ticketdomain.Ticket
 	err  error
 
-	listParams store.ListTicketsByRequesterParams
-	getParams  store.GetTicketForRequesterParams
-	listCalls  int
-	getCalls   int
+	listParams   ticketapp.ListFilter
+	getID        uuid.UUID
+	getRequester uuid.UUID
+	listCalls    int
+	getCalls     int
 }
 
-func (f *fakeReader) ListTicketsByRequester(_ context.Context, arg store.ListTicketsByRequesterParams) ([]store.Ticket, error) {
+func (f *fakeReader) List(_ context.Context, arg ticketapp.ListFilter) ([]ticketdomain.Ticket, error) {
 	f.listCalls++
 	f.listParams = arg
 	return f.page, f.err
 }
 
-func (f *fakeReader) GetTicketForRequester(_ context.Context, arg store.GetTicketForRequesterParams) (store.Ticket, error) {
+func (f *fakeReader) Get(_ context.Context, id, requesterID uuid.UUID) (ticketdomain.Ticket, error) {
 	f.getCalls++
-	f.getParams = arg
+	f.getID, f.getRequester = id, requesterID
 	return f.one, f.err
 }
 
-func (f *fakeReader) ListTicketStatusHistoryForRequester(
-	_ context.Context, arg store.ListTicketStatusHistoryForRequesterParams,
-) ([]store.TicketStatusHistory, error) {
+func (f *fakeReader) History(_ context.Context, ticketID, requesterID uuid.UUID) ([]ticketdomain.HistoryEntry, error) {
 	f.historyCalls++
-	f.historyParams = arg
+	f.historyTicketID, f.historyRequester = ticketID, requesterID
 	return f.history, f.err
 }
 
-func sampleTicket(t *testing.T, id string, created time.Time) store.Ticket {
+func sampleTicket(t *testing.T, id string, created time.Time) ticketdomain.Ticket {
 	t.Helper()
 	due := created.Add(24 * time.Hour)
-	return store.Ticket{
-		ID:        pgUUIDOf(t, id),
+	return ticketdomain.Ticket{
+		ID:        uuidOf(t, id),
 		Title:     "Ticket " + id[:8],
-		Category:  ticket.CategoryOther,
-		Priority:  ticket.PriorityNormal,
-		Status:    ticket.StatusOpen,
-		SlaDueAt:  &due,
+		Category:  ticketdomain.CategoryOther,
+		Priority:  ticketdomain.PriorityNormal,
+		Status:    ticketdomain.StatusOpen,
+		SLADueAt:  &due,
 		CreatedAt: created,
 		UpdatedAt: created,
 	}
@@ -356,7 +348,7 @@ func TestListScopesToTheCallerInTheQuery(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if reader.listParams.RequesterID != pgUUIDOf(t, caller.ID.String()) {
+	if reader.listParams.RequesterID != uuidOf(t, caller.ID.String()) {
 		t.Errorf("requester = %v, want the authenticated caller", reader.listParams.RequesterID)
 	}
 }
@@ -380,7 +372,7 @@ func TestListEmitsACursorOnlyWhenThereIsAnotherPage(t *testing.T) {
 	t.Run("a full page plus one more row", func(t *testing.T) {
 		// The handler asks for one row beyond the page so it can tell whether
 		// another page exists without a second count query.
-		rows := make([]store.Ticket, 3)
+		rows := make([]ticketdomain.Ticket, 3)
 		for i := range rows {
 			rows[i] = sampleTicket(t, "1111111a-1111-1111-1111-11111111111"+string(rune('0'+i)),
 				now.Add(-time.Duration(i)*time.Minute))
@@ -408,7 +400,7 @@ func TestListEmitsACursorOnlyWhenThereIsAnotherPage(t *testing.T) {
 	})
 
 	t.Run("a short page", func(t *testing.T) {
-		reader := &fakeReader{page: []store.Ticket{
+		reader := &fakeReader{page: []ticketdomain.Ticket{
 			sampleTicket(t, "2222222a-2222-2222-2222-222222222222", now),
 		}}
 
@@ -433,7 +425,7 @@ func TestCursorResumesWhereThePageStopped(t *testing.T) {
 	caller := customer(t)
 	now := time.Now().UTC().Truncate(time.Microsecond)
 
-	first := &fakeReader{page: []store.Ticket{
+	first := &fakeReader{page: []ticketdomain.Ticket{
 		sampleTicket(t, "3333333a-3333-3333-3333-333333333331", now),
 		sampleTicket(t, "3333333a-3333-3333-3333-333333333332", now.Add(-time.Minute)),
 	}}
@@ -461,7 +453,7 @@ func TestCursorResumesWhereThePageStopped(t *testing.T) {
 	if !second.listParams.AfterCreatedAt.Equal(now) {
 		t.Errorf("after = %v, want the first page's last row %v", second.listParams.AfterCreatedAt, now)
 	}
-	if second.listParams.AfterID != pgUUIDOf(t, page.Tickets[0].ID) {
+	if second.listParams.AfterID == nil || *second.listParams.AfterID != uuidOf(t, page.Tickets[0].ID) {
 		t.Errorf("after id = %v", second.listParams.AfterID)
 	}
 }
@@ -506,7 +498,7 @@ func TestListClampsThePageSize(t *testing.T) {
 // docs/spec.md §11: another customer's ticket is 404, never 403. A 403 confirms
 // the ticket exists, which is exactly what the caller must not learn.
 func TestGetAnswers404ForATicketThatIsNotYours(t *testing.T) {
-	reader := &fakeReader{err: pgx.ErrNoRows}
+	reader := &fakeReader{err: ticketapp.ErrTicketNotFound}
 
 	handler, r := getRequest(t, customer(t), api.GetTicketHandler(reader),
 		"/api/tickets/{id}", "/api/tickets/44444444-4444-4444-4444-444444444444")
@@ -534,8 +526,8 @@ func TestGetScopesToTheCallerInTheQuery(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if reader.getParams.RequesterID != pgUUIDOf(t, caller.ID.String()) {
-		t.Errorf("requester = %v, want the authenticated caller", reader.getParams.RequesterID)
+	if reader.getRequester != uuidOf(t, caller.ID.String()) {
+		t.Errorf("requester = %v, want the authenticated caller", reader.getRequester)
 	}
 }
 
@@ -585,13 +577,13 @@ func TestListPassesTheFiltersToTheQuery(t *testing.T) {
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200\nbody: %s", rec.Code, rec.Body.String())
 			}
-			if !samePtr(reader.listParams.Status, tc.wantStatus) {
+			if !samePtr((*string)(reader.listParams.Status), tc.wantStatus) {
 				t.Errorf("status filter = %v, want %v",
-					deref(reader.listParams.Status), deref(tc.wantStatus))
+					deref((*string)(reader.listParams.Status)), deref(tc.wantStatus))
 			}
-			if !samePtr(reader.listParams.Priority, tc.wantPriority) {
+			if !samePtr((*string)(reader.listParams.Priority), tc.wantPriority) {
 				t.Errorf("priority filter = %v, want %v",
-					deref(reader.listParams.Priority), deref(tc.wantPriority))
+					deref((*string)(reader.listParams.Priority)), deref(tc.wantPriority))
 			}
 		})
 	}
@@ -657,15 +649,14 @@ func deref(p *string) string {
 
 // ── The status history (T14b) ────────────────────────────────────────────────
 
-func historyRow(from *ticket.Status, to ticket.Status, role ticket.Role, at time.Time) store.TicketStatusHistory {
-	var actor pgtype.UUID
-	_ = actor.Scan("11111111-1111-1111-1111-111111111111")
-
-	return store.TicketStatusHistory{
-		ID:         1,
+func historyRow(from *ticketdomain.Status, to ticketdomain.Status, role ticketdomain.Role, at time.Time) ticketdomain.HistoryEntry {
+	// The row's own id is gone from the domain entry: it is a storage detail,
+	// and nothing above the repository ever needed it. The ordering it used to
+	// tiebreak is settled by the query.
+	return ticketdomain.HistoryEntry{
 		FromStatus: from,
 		ToStatus:   to,
-		ActorID:    actor,
+		ActorID:    uuid.MustParse("11111111-1111-1111-1111-111111111111"),
 		ActorRole:  role,
 		CreatedAt:  at,
 	}
@@ -696,11 +687,11 @@ func TestHistoryAnswers404WhenThereIsNone(t *testing.T) {
 
 func TestHistoryReturnsTheEntriesInOrder(t *testing.T) {
 	base := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
-	open := ticket.StatusOpen
+	open := ticketdomain.StatusOpen
 
-	reader := &fakeReader{history: []store.TicketStatusHistory{
-		historyRow(nil, ticket.StatusOpen, ticket.RoleCustomer, base),
-		historyRow(&open, ticket.StatusPending, ticket.RoleAgent, base.Add(time.Hour)),
+	reader := &fakeReader{history: []ticketdomain.HistoryEntry{
+		historyRow(nil, ticketdomain.StatusOpen, ticketdomain.RoleCustomer, base),
+		historyRow(&open, ticketdomain.StatusPending, ticketdomain.RoleAgent, base.Add(time.Hour)),
 	}}
 
 	handler, r := getRequest(t, customer(t), api.GetTicketHistoryHandler(reader),
@@ -725,10 +716,10 @@ func TestHistoryReturnsTheEntriesInOrder(t *testing.T) {
 	if body.Entries[0].FromStatus != nil {
 		t.Errorf("the creation entry has from_status %v, want null", *body.Entries[0].FromStatus)
 	}
-	if body.Entries[1].ToStatus != ticket.StatusPending {
+	if body.Entries[1].ToStatus != ticketdomain.StatusPending {
 		t.Errorf("entry 1 to_status = %q", body.Entries[1].ToStatus)
 	}
-	if body.Entries[1].ActorRole != ticket.RoleAgent {
+	if body.Entries[1].ActorRole != ticketdomain.RoleAgent {
 		t.Errorf("entry 1 actor_role = %q — who moved it is the point of a timeline", body.Entries[1].ActorRole)
 	}
 }
@@ -738,8 +729,8 @@ func TestHistoryReturnsTheEntriesInOrder(t *testing.T) {
 // putting it on the wire hands out an identifier for enumeration and links a
 // customer's view to the agent roster.
 func TestHistoryNeverExposesTheActorsIdentity(t *testing.T) {
-	reader := &fakeReader{history: []store.TicketStatusHistory{
-		historyRow(nil, ticket.StatusOpen, ticket.RoleAgent, time.Now()),
+	reader := &fakeReader{history: []ticketdomain.HistoryEntry{
+		historyRow(nil, ticketdomain.StatusOpen, ticketdomain.RoleAgent, time.Now()),
 	}}
 
 	handler, r := getRequest(t, customer(t), api.GetTicketHistoryHandler(reader),
@@ -758,8 +749,8 @@ func TestHistoryNeverExposesTheActorsIdentity(t *testing.T) {
 
 func TestHistoryScopesToTheCallerInTheQuery(t *testing.T) {
 	caller := customer(t)
-	reader := &fakeReader{history: []store.TicketStatusHistory{
-		historyRow(nil, ticket.StatusOpen, ticket.RoleCustomer, time.Now()),
+	reader := &fakeReader{history: []ticketdomain.HistoryEntry{
+		historyRow(nil, ticketdomain.StatusOpen, ticketdomain.RoleCustomer, time.Now()),
 	}}
 
 	handler, r := getRequest(t, caller, api.GetTicketHistoryHandler(reader),
@@ -767,8 +758,8 @@ func TestHistoryScopesToTheCallerInTheQuery(t *testing.T) {
 		"/api/tickets/6f1b5f2a-0000-4000-8000-000000000001/history")
 	handler.ServeHTTP(httptest.NewRecorder(), r)
 
-	if reader.historyParams.RequesterID != pgUUIDOf(t, caller.ID.String()) {
-		t.Errorf("requester = %v, want the authenticated caller", reader.historyParams.RequesterID)
+	if reader.historyRequester != uuidOf(t, caller.ID.String()) {
+		t.Errorf("requester = %v, want the authenticated caller", reader.historyRequester)
 	}
 }
 

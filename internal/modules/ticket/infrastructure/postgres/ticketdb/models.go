@@ -2,24 +2,24 @@
 // versions:
 //   sqlc v1.31.1
 
-package store
+package ticketdb
 
 import (
 	"time"
 
-	ticket "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
-	"github.com/jackc/pgx/v5/pgtype"
+	domain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	uuid "github.com/google/uuid"
 )
 
 type Ticket struct {
-	ID                pgtype.UUID
-	RequesterID       pgtype.UUID
-	AssigneeID        pgtype.UUID
+	ID                uuid.UUID
+	RequesterID       uuid.UUID
+	AssigneeID        *uuid.UUID
 	Title             string
 	Description       string
-	Category          ticket.Category
-	Priority          ticket.Priority
-	Status            ticket.Status
+	Category          domain.Category
+	Priority          domain.Priority
+	Status            domain.Status
 	SlaPolicyID       int64
 	SlaConsumedMicros int64
 	SlaClockStartedAt *time.Time
@@ -31,11 +31,11 @@ type Ticket struct {
 
 type TicketStatusHistory struct {
 	ID         int64
-	TicketID   pgtype.UUID
-	FromStatus *ticket.Status
-	ToStatus   ticket.Status
-	ActorID    pgtype.UUID
-	ActorRole  ticket.Role
+	TicketID   uuid.UUID
+	FromStatus *domain.Status
+	ToStatus   domain.Status
+	ActorID    uuid.UUID
+	ActorRole  domain.Role
 	Reason     *string
 	CreatedAt  time.Time
 }

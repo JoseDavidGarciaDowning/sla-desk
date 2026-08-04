@@ -18,7 +18,8 @@ import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket"
 )
 
 // startupPingTimeout bounds the one connectivity check made at boot.
@@ -69,10 +70,6 @@ func run() error {
 		"database": pool.Ping,
 	}
 
-	// Queries reads; TicketRepo writes, because creating a ticket spans two
-	// statements that have to commit together.
-	queries := store.New(pool)
-
 	// The identity module builds its own repository and Clerk client from the
 	// handle and its own config. This is the only place that knows both exist.
 	identityModule := identity.New(pool, identity.Config{
@@ -84,11 +81,17 @@ func run() error {
 		WebhookSecret: cfg.ClerkWebhookSecret,
 	})
 
+	// The SLA module reads reference data on the pool. The ticket module gets
+	// it as the contract it declared, never as the module itself: it is handed
+	// something that can resolve a clock, and does not learn where from.
+	slaModule := sla.New(pool)
+	ticketModule := ticket.New(pool, api.SLAPolicies{Calculator: slaModule.Calculator})
+
 	handler, err := api.NewRouter(cfg, api.Deps{
 		Probes:   probes,
 		Identity: identityModule,
-		Tickets:  store.NewTicketRepo(pool),
-		Reader:   queries,
+		Tickets:  ticketModule.Service,
+		Reader:   ticketModule.Service,
 	})
 	if err != nil {
 		// Configuration the router cannot work with, most likely a malformed

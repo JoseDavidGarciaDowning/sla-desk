@@ -3,7 +3,7 @@
 // These tests need a migrated Postgres. Run them with `make test-int`, which
 // applies the migrations first. They are behind a build tag so `make check`
 // stays runnable without Docker.
-package store_test
+package postgres_test
 
 import (
 	"context"
@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
 )
 
 // begin opens a transaction that is always rolled back. Every test therefore
@@ -25,7 +25,7 @@ import (
 // It hands back the raw transaction as well as the generated queries. The
 // constraint tests need to attempt writes that no generated query would ever
 // produce — that is the point of them.
-func begin(t *testing.T) (context.Context, pgx.Tx, *store.Queries) {
+func begin(t *testing.T) (context.Context, pgx.Tx, *ticketdb.Queries) {
 	t.Helper()
 
 	url := os.Getenv("DATABASE_URL")
@@ -48,7 +48,7 @@ func begin(t *testing.T) (context.Context, pgx.Tx, *store.Queries) {
 	}
 	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
 
-	return ctx, tx, store.New(tx)
+	return ctx, tx, ticketdb.New(tx)
 }
 
 // rejectedBy returns the name of the constraint that refused the write.
@@ -66,9 +66,5 @@ func rejectedBy(t *testing.T, err error) string {
 	}
 	return pgErr.ConstraintName
 }
-
-// The four budgets in docs/spec.md §4.2, written out as literals on purpose.
-// Deriving them from the migration would make this test agree with itself no
-// matter what the migration said.
 
 func ptr[T any](v T) *T { return &v }

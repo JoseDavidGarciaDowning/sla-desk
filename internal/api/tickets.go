@@ -15,11 +15,12 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
+	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 )
 
 // TicketsPath is the collection endpoint.
@@ -30,9 +31,9 @@ const TicketsPath = "/api/tickets"
 const maxTicketBody = 64 << 10 // 64 KiB
 
 // TicketCreator is the slice of the store this handler needs. Declared by the
-// consumer, per docs/spec.md §8; *store.TicketRepo satisfies it.
+// consumer, per docs/spec.md §8; the ticket module's Service satisfies it.
 type TicketCreator interface {
-	Create(ctx context.Context, in store.NewTicket) (store.Ticket, error)
+	Create(ctx context.Context, in ticketapp.NewTicket) (ticketdomain.Ticket, error)
 }
 
 // CreateTicketHandler serves POST /api/tickets.
@@ -64,7 +65,7 @@ func CreateTicketHandler(tickets TicketCreator) http.Handler {
 		}
 		req = req.Normalised()
 
-		created, err := tickets.Create(r.Context(), store.NewTicket{
+		created, err := tickets.Create(r.Context(), ticketapp.NewTicket{
 			RequesterID: caller.ID,
 			ActorRole:   caller.Role,
 			Title:       req.Title,
@@ -76,7 +77,7 @@ func CreateTicketHandler(tickets TicketCreator) http.Handler {
 			// A priority with no policy is our seed being wrong, not the
 			// caller's request: validation has already established that the
 			// priority is one of the four the system supports.
-			if errors.Is(err, store.ErrNoPolicyForPriority) {
+			if errors.Is(err, ticketapp.ErrNoSLAPolicy) {
 				slog.ErrorContext(r.Context(), "no active SLA policy serves a supported priority",
 					"priority", req.Priority, "error", err)
 			} else {
@@ -86,7 +87,7 @@ func CreateTicketHandler(tickets TicketCreator) http.Handler {
 			return
 		}
 
-		w.Header().Set("Location", TicketsPath+"/"+uuidString(created.ID))
+		w.Header().Set("Location", TicketsPath+"/"+created.ID.String())
 		writeJSON(w, r, http.StatusCreated, NewTicketResponse(created))
 	})
 }
@@ -110,37 +111,40 @@ type TicketListResponse struct {
 
 // TicketReader is the slice of the store the read endpoints need.
 type TicketReader interface {
-	ListTicketsByRequester(ctx context.Context, arg store.ListTicketsByRequesterParams) ([]store.Ticket, error)
-	GetTicketForRequester(ctx context.Context, arg store.GetTicketForRequesterParams) (store.Ticket, error)
-	ListTicketStatusHistoryForRequester(ctx context.Context, arg store.ListTicketStatusHistoryForRequesterParams) ([]store.TicketStatusHistory, error)
+	List(ctx context.Context, f ticketapp.ListFilter) ([]ticketdomain.Ticket, error)
+	Get(ctx context.Context, id, requesterID uuid.UUID) (ticketdomain.Ticket, error)
+	History(ctx context.Context, ticketID, requesterID uuid.UUID) ([]ticketdomain.HistoryEntry, error)
 }
 
 // encodeCursor packs the sort key of the last row on a page.
-func encodeCursor(createdAt time.Time, id pgtype.UUID) string {
-	raw := createdAt.UTC().Format(time.RFC3339Nano) + "|" + uuidString(id)
+func encodeCursor(createdAt time.Time, id uuid.UUID) string {
+	raw := createdAt.UTC().Format(time.RFC3339Nano) + "|" + id.String()
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
 var errBadCursor = errors.New("api: cursor is not readable")
 
-func decodeCursor(s string) (time.Time, pgtype.UUID, error) {
+func decodeCursor(s string) (time.Time, uuid.UUID, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(s)
 	if err != nil {
-		return time.Time{}, pgtype.UUID{}, errBadCursor
+		return time.Time{}, uuid.UUID{}, errBadCursor
 	}
-	at, rest, found := strings.Cut(string(raw), "|")
-	if !found {
-		return time.Time{}, pgtype.UUID{}, errBadCursor
+
+	createdAt, id, ok := strings.Cut(string(raw), "|")
+	if !ok {
+		return time.Time{}, uuid.UUID{}, errBadCursor
 	}
-	createdAt, err := time.Parse(time.RFC3339Nano, at)
+
+	at, err := time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
-		return time.Time{}, pgtype.UUID{}, errBadCursor
+		return time.Time{}, uuid.UUID{}, errBadCursor
 	}
-	var id pgtype.UUID
-	if err := id.Scan(rest); err != nil {
-		return time.Time{}, pgtype.UUID{}, errBadCursor
+
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return time.Time{}, uuid.UUID{}, errBadCursor
 	}
-	return createdAt, id, nil
+	return at, parsed, nil
 }
 
 // pageSize reads ?limit=, clamping anything absent, unreadable or out of range
@@ -194,17 +198,22 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 		}
 
 		query := r.URL.Query()
-		params := store.ListTicketsByRequesterParams{RequesterID: caller.ID}
+		params := ticketapp.ListFilter{RequesterID: caller.ID}
 
 		// Both filters are read before either is rejected, so a request with
 		// two bad ones is told about two rather than about the first.
 		filterErrs := make(map[string]string)
 		var problem string
-		if params.Status, problem = filterParam(query, "status", validStatuses); problem != "" {
+		var raw *string
+		if raw, problem = filterParam(query, "status", validStatuses); problem != "" {
 			filterErrs["status"] = problem
+		} else {
+			params.Status = (*ticketdomain.Status)(raw)
 		}
-		if params.Priority, problem = filterParam(query, "priority", validPriorities); problem != "" {
+		if raw, problem = filterParam(query, "priority", validPriorities); problem != "" {
 			filterErrs["priority"] = problem
+		} else {
+			params.Priority = (*ticketdomain.Priority)(raw)
 		}
 		if len(filterErrs) > 0 {
 			httperr.WriteValidation(w, filterErrs)
@@ -218,7 +227,7 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 				return
 			}
 			params.AfterCreatedAt = &createdAt
-			params.AfterID = id
+			params.AfterID = &id
 		}
 
 		// One more row than asked for. If it comes back, there is another page,
@@ -226,7 +235,7 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 		limit := pageSize(query.Get("limit"))
 		params.PageSize = limit + 1
 
-		rows, err := tickets.ListTicketsByRequester(r.Context(), params)
+		rows, err := tickets.List(r.Context(), params)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "listing tickets failed", "error", err)
 			httperr.WriteInternal(w)
@@ -266,18 +275,18 @@ func GetTicketHandler(tickets TicketReader) http.Handler {
 			return
 		}
 
-		var id pgtype.UUID
-		if err := id.Scan(chi.URLParam(r, "id")); err != nil {
+		id, err := uuid.Parse(chi.URLParam(r, "id"))
+		if err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the ticket id is not a UUID")
 			return
 		}
 
-		row, err := tickets.GetTicketForRequester(r.Context(), store.GetTicketForRequesterParams{
-			ID:          id,
-			RequesterID: caller.ID,
-		})
+		row, err := tickets.Get(r.Context(), id, caller.ID)
 		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
+			// The module reports "not yours" and "does not exist" as the same
+			// error, on purpose: a 403 would confirm that an id names a real
+			// ticket (docs/spec.md §11).
+			if errors.Is(err, ticketapp.ErrTicketNotFound) {
 				httperr.Write(w, http.StatusNotFound, "no such ticket")
 				return
 			}
@@ -311,18 +320,18 @@ func GetTicketHistoryHandler(tickets TicketReader) http.Handler {
 			return
 		}
 
-		var id pgtype.UUID
-		if err := id.Scan(chi.URLParam(r, "id")); err != nil {
+		id, err := uuid.Parse(chi.URLParam(r, "id"))
+		if err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the ticket id is not a UUID")
 			return
 		}
 
-		rows, err := tickets.ListTicketStatusHistoryForRequester(r.Context(),
-			store.ListTicketStatusHistoryForRequesterParams{
-				TicketID:    id,
-				RequesterID: caller.ID,
-			})
+		rows, err := tickets.History(r.Context(), id, caller.ID)
 		if err != nil {
+			if errors.Is(err, ticketapp.ErrTicketNotFound) {
+				httperr.Write(w, http.StatusNotFound, "no such ticket")
+				return
+			}
 			slog.ErrorContext(r.Context(), "reading a ticket history failed", "error", err)
 			httperr.WriteInternal(w)
 			return

@@ -3,7 +3,7 @@
 //   sqlc v1.31.1
 // source: clock.sql
 
-package store
+package ticketdb
 
 import (
 	"context"

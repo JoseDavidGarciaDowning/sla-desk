@@ -7,10 +7,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jackc/pgx/v5/pgtype"
-
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 )
 
 // Bounds mirror the CHECK constraints in migration 003. Validating here as well
@@ -29,26 +26,26 @@ const (
 // put one cannot be talked into it — the value is dropped when the body is
 // decoded, before any code has a chance to read it.
 type CreateTicketRequest struct {
-	Title       string          `json:"title"`
-	Description string          `json:"description"`
-	Category    ticket.Category `json:"category"`
-	Priority    ticket.Priority `json:"priority"`
+	Title       string                `json:"title"`
+	Description string                `json:"description"`
+	Category    ticketdomain.Category `json:"category"`
+	Priority    ticketdomain.Priority `json:"priority"`
 }
 
 var (
-	validCategories = []ticket.Category{
-		ticket.CategoryBilling, ticket.CategoryTechnical, ticket.CategoryAccount, ticket.CategoryOther,
+	validCategories = []ticketdomain.Category{
+		ticketdomain.CategoryBilling, ticketdomain.CategoryTechnical, ticketdomain.CategoryAccount, ticketdomain.CategoryOther,
 	}
-	validPriorities = []ticket.Priority{
-		ticket.PriorityUrgent, ticket.PriorityHigh, ticket.PriorityNormal, ticket.PriorityLow,
+	validPriorities = []ticketdomain.Priority{
+		ticketdomain.PriorityUrgent, ticketdomain.PriorityHigh, ticketdomain.PriorityNormal, ticketdomain.PriorityLow,
 	}
 
 	// Statuses are never accepted in a request body — a client does not choose
 	// what state a ticket is in — but they are accepted as a list filter, and
 	// the frontend needs them to render both the filter control and a status
 	// label. In the contract for that reason, and validated for the same one.
-	validStatuses = []ticket.Status{
-		ticket.StatusOpen, ticket.StatusPending, ticket.StatusResolved, ticket.StatusClosed,
+	validStatuses = []ticketdomain.Status{
+		ticketdomain.StatusOpen, ticketdomain.StatusPending, ticketdomain.StatusResolved, ticketdomain.StatusClosed,
 	}
 )
 
@@ -109,15 +106,15 @@ func join[T ~string](values []T) string {
 
 // TicketResponse is a ticket as the API returns it.
 //
-// Not store.Ticket: that would put pgtype values and every future column on the
+// Not ticketdomain.Ticket: that would put pgtype values and every future column on the
 // wire, and make a schema change a breaking API change.
 type TicketResponse struct {
-	ID          string          `json:"id"`
-	Title       string          `json:"title"`
-	Description string          `json:"description"`
-	Category    ticket.Category `json:"category"`
-	Priority    ticket.Priority `json:"priority"`
-	Status      ticket.Status   `json:"status"`
+	ID          string                `json:"id"`
+	Title       string                `json:"title"`
+	Description string                `json:"description"`
+	Category    ticketdomain.Category `json:"category"`
+	Priority    ticketdomain.Priority `json:"priority"`
+	Status      ticketdomain.Status   `json:"status"`
 
 	// SLADueAt is null while the clock is paused, which is what makes a paused
 	// ticket unable to breach. The frontend renders the absence, not a zero.
@@ -128,37 +125,24 @@ type TicketResponse struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func NewTicketResponse(row store.Ticket) TicketResponse {
+func NewTicketResponse(row ticketdomain.Ticket) TicketResponse {
 	return TicketResponse{
-		ID:          uuidString(row.ID),
+		ID:          row.ID.String(),
 		Title:       row.Title,
 		Description: row.Description,
 		Category:    row.Category,
 		Priority:    row.Priority,
 		Status:      row.Status,
-		SLADueAt:    row.SlaDueAt,
-		SLABreached: row.SlaBreachedAt != nil,
+		SLADueAt:    row.SLADueAt,
+		SLABreached: row.Breached(),
 		CreatedAt:   row.CreatedAt,
 		UpdatedAt:   row.UpdatedAt,
 	}
 }
 
-// uuidString renders a pgtype.UUID in the canonical 8-4-4-4-12 form.
-//
-// pgtype.UUID is what the generated queries hand back, and it is a [16]byte
-// plus a Valid flag. Putting that on the wire directly would serialise as an
-// array of numbers.
-func uuidString(id pgtype.UUID) string {
-	if !id.Valid {
-		return ""
-	}
-	b := id.Bytes
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
-
 // TicketHistoryEntry is one status change, as a requester is allowed to see it.
 //
-// Not store.TicketStatusHistory. That row carries ActorID — another user's
+// Not ticketdomain.TicketStatusHistory. That row carries ActorID — another user's
 // primary key — and a customer has no use for it: it hands out an identifier to
 // enumerate and links their view of a ticket to the agent roster. The role is
 // what a timeline is actually for. "An agent resolved this" is the information;
@@ -169,11 +153,11 @@ func uuidString(id pgtype.UUID) string {
 type TicketHistoryEntry struct {
 	// FromStatus is null on the entry that records the ticket's creation, which
 	// is the only entry that moved from nowhere.
-	FromStatus *ticket.Status `json:"from_status"`
-	ToStatus   ticket.Status  `json:"to_status"`
-	ActorRole  ticket.Role    `json:"actor_role"`
-	Reason     *string        `json:"reason"`
-	CreatedAt  time.Time      `json:"created_at"`
+	FromStatus *ticketdomain.Status `json:"from_status"`
+	ToStatus   ticketdomain.Status  `json:"to_status"`
+	ActorRole  ticketdomain.Role    `json:"actor_role"`
+	Reason     *string              `json:"reason"`
+	CreatedAt  time.Time            `json:"created_at"`
 }
 
 // TicketHistoryResponse is a ticket's timeline, oldest first.
@@ -185,7 +169,7 @@ type TicketHistoryResponse struct {
 	Entries []TicketHistoryEntry `json:"entries"`
 }
 
-func NewTicketHistoryResponse(rows []store.TicketStatusHistory) TicketHistoryResponse {
+func NewTicketHistoryResponse(rows []ticketdomain.HistoryEntry) TicketHistoryResponse {
 	// make, so an empty timeline encodes as [] rather than null — though the
 	// handler answers 404 before it can be empty.
 	entries := make([]TicketHistoryEntry, 0, len(rows))

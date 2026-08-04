@@ -15,13 +15,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
 	identityapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
+	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 )
 
 func testRouter(t *testing.T) http.Handler {
@@ -265,17 +268,15 @@ func (s routerStubUsers) Upsert(context.Context, string, identitydomain.Identity
 
 type routerFakeReader struct{}
 
-func (routerFakeReader) ListTicketsByRequester(context.Context, store.ListTicketsByRequesterParams) ([]store.Ticket, error) {
+func (routerFakeReader) List(context.Context, ticketapp.ListFilter) ([]ticketdomain.Ticket, error) {
 	return nil, nil
 }
 
-func (routerFakeReader) GetTicketForRequester(context.Context, store.GetTicketForRequesterParams) (store.Ticket, error) {
-	return store.Ticket{}, nil
+func (routerFakeReader) Get(context.Context, uuid.UUID, uuid.UUID) (ticketdomain.Ticket, error) {
+	return ticketdomain.Ticket{}, nil
 }
 
-func (routerFakeReader) ListTicketStatusHistoryForRequester(
-	context.Context, store.ListTicketStatusHistoryForRequesterParams,
-) ([]store.TicketStatusHistory, error) {
+func (routerFakeReader) History(context.Context, uuid.UUID, uuid.UUID) ([]ticketdomain.HistoryEntry, error) {
 	return nil, nil
 }
 

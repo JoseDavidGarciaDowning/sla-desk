@@ -5,16 +5,17 @@ import (
 	"strings"
 	"testing"
 
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
 
 func validCreateTicket() api.CreateTicketRequest {
 	return api.CreateTicketRequest{
 		Title:       "Cannot download my invoice",
 		Description: "The download button returns a 500.",
-		Category:    ticket.CategoryBilling,
-		Priority:    ticket.PriorityNormal,
+		Category:    ticketdomain.CategoryBilling,
+		Priority:    ticketdomain.PriorityNormal,
 	}
 }
 

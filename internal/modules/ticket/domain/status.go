@@ -4,7 +4,7 @@
 // It has no database, HTTP or SLA dependencies. In particular it must never
 // import internal/sla — the dependency runs one way only, and an architecture
 // test enforces it. See docs/adr/0002.
-package ticket
+package domain
 
 // Status is a ticket's position in the workflow described in docs/spec.md §4.1.
 //

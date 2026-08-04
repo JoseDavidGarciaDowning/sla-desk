@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 )
 
 // Contract is the part of POST /api/tickets a client has to know before it can
@@ -20,13 +20,13 @@ import (
 type Contract struct {
 	MaxTitleLength       int
 	MaxDescriptionLength int
-	Categories           []ticket.Category
-	Priorities           []ticket.Priority
+	Categories           []ticketdomain.Category
+	Priorities           []ticketdomain.Priority
 
 	// Statuses are never accepted in a create body — the client does not choose
 	// what state a ticket is in. They travel anyway because the list endpoint
 	// takes one as a filter, and because the UI has to label them.
-	Statuses []ticket.Status
+	Statuses []ticketdomain.Status
 }
 
 // TicketContract describes what POST /api/tickets accepts.

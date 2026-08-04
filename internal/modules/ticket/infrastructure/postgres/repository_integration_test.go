@@ -1,6 +1,6 @@
 //go:build integration
 
-package store_test
+package postgres_test
 
 import (
 	"context"
@@ -9,22 +9,80 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/google/uuid"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	slaapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
 )
 
 // The repo owns its own transaction, so these tests cannot use the rolled-back
 // one the rest of the file shares. They clean up after themselves instead.
 type repoFixture struct {
-	ctx       context.Context
-	pool      *pgxpool.Pool
-	repo      *store.TicketRepo
-	requester pgtype.UUID
+	ctx  context.Context
+	pool *pgxpool.Pool
+	repo *postgres.Repository
+
+	// svc is the repository behind the use cases that resolve an SLA clock for
+	// it. The write paths are exercised through this rather than through repo,
+	// because resolving-then-writing is the sequence production runs and the
+	// repository alone cannot produce a clock.
+	svc *application.Service
+
+	requester uuid.UUID
+}
+
+// slaPolicies is the adapter the composition root supplies in production,
+// rebuilt here so these tests run the real translation rather than a stub.
+//
+// It is a copy today. In the next step internal/app owns the only one, and this
+// becomes an import — which is the point at which the duplication stops being
+// acceptable and starts being a smell.
+type slaPolicies struct{ calc *slaapp.Calculator }
+
+func (s slaPolicies) ForPriority(ctx context.Context, p domain.Priority) (application.SLAClock, error) {
+	policy, err := s.calc.ForPriority(ctx, sladomain.Priority(p))
+	if err != nil {
+		if errors.Is(err, slaapp.ErrNoPolicyForPriority) {
+			return nil, errors.Join(application.ErrNoSLAPolicy, err)
+		}
+		return nil, err
+	}
+	return slaClock{policy}, nil
+}
+
+func (s slaPolicies) ForPolicy(ctx context.Context, id int64) (application.SLAClock, error) {
+	policy, err := s.calc.ForPolicy(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return slaClock{policy}, nil
+}
+
+type slaClock struct{ policy sladomain.Policy }
+
+func (c slaClock) PolicyID() int64 { return c.policy.ID }
+
+func (c slaClock) Compute(timeline []domain.Phase) (application.ClockState, error) {
+	phases := make([]sladomain.Phase, len(timeline))
+	for i, p := range timeline {
+		phases[i] = sladomain.Phase{At: p.At, Running: p.Running}
+	}
+	state, err := sladomain.Reconstruct(c.policy, phases)
+	if err != nil {
+		return application.ClockState{}, err
+	}
+	return application.ClockState{
+		BudgetUsed:   state.BudgetUsed,
+		RunningSince: state.RunningSince,
+		DueAt:        state.DueAt,
+	}, nil
 }
 
 func newRepoFixture(t *testing.T) repoFixture {
@@ -45,7 +103,7 @@ func newRepoFixture(t *testing.T) repoFixture {
 	t.Cleanup(pool.Close)
 
 	clerkID := "user_repo_" + t.Name()
-	var requester pgtype.UUID
+	var requester uuid.UUID
 	if err := pool.QueryRow(ctx,
 		`INSERT INTO users (clerk_user_id, email) VALUES ($1, $2) RETURNING id`,
 		clerkID, clerkID+"@example.test",
@@ -69,16 +127,25 @@ func newRepoFixture(t *testing.T) repoFixture {
 		}
 	})
 
-	return repoFixture{ctx: ctx, pool: pool, repo: store.NewTicketRepo(pool), requester: requester}
+	repo := postgres.NewRepository(pool)
+	sla := slaPolicies{calc: slaapp.NewCalculator(slapostgres.NewPolicyRepository(pool))}
+
+	return repoFixture{
+		ctx:       ctx,
+		pool:      pool,
+		repo:      repo,
+		svc:       application.NewService(repo, sla),
+		requester: requester,
+	}
 }
 
-func (f repoFixture) newTicket(priority ticket.Priority) store.NewTicket {
-	return store.NewTicket{
+func (f repoFixture) newTicket(priority domain.Priority) application.NewTicket {
+	return application.NewTicket{
 		RequesterID: f.requester,
-		ActorRole:   ticket.RoleCustomer,
+		ActorRole:   domain.RoleCustomer,
 		Title:       "Cannot download my invoice",
 		Description: "The download button returns a 500.",
-		Category:    ticket.CategoryBilling,
+		Category:    domain.CategoryBilling,
 		Priority:    priority,
 	}
 }
@@ -86,27 +153,27 @@ func (f repoFixture) newTicket(priority ticket.Priority) store.NewTicket {
 func TestCreateStartsTheClockRunning(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityNormal))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if tk.Status != ticket.StatusOpen {
+	if tk.Status != domain.StatusOpen {
 		t.Errorf("status = %q, want open", tk.Status)
 	}
-	if tk.SlaClockStartedAt == nil {
+	if tk.SLAClockStartedAt == nil {
 		t.Fatal("sla_clock_started_at is nil — a new ticket is open, so the clock runs")
 	}
-	if tk.SlaDueAt == nil {
+	if tk.SLADueAt == nil {
 		t.Fatal("sla_due_at is nil — a ticket that cannot breach is not on any clock")
 	}
-	if tk.SlaConsumedMicros != 0 {
-		t.Errorf("consumed = %d, want 0 on a ticket that has never paused", tk.SlaConsumedMicros)
+	if tk.SLAConsumed != 0 {
+		t.Errorf("consumed = %d, want 0 on a ticket that has never paused", tk.SLAConsumed)
 	}
-	if tk.SlaBreachedAt != nil {
+	if tk.SLABreachedAt != nil {
 		t.Error("sla_breached_at is set on a brand new ticket")
 	}
-	if tk.SlaPolicyID == 0 {
+	if tk.SLAPolicyID == 0 {
 		t.Error("sla_policy_id was not snapshotted")
 	}
 }
@@ -118,16 +185,16 @@ func TestCreateStartsTheClockRunning(t *testing.T) {
 func TestDeadlineIsTheSeededBudgetForEveryPriority(t *testing.T) {
 	f := newRepoFixture(t)
 
-	budgets := map[ticket.Priority]time.Duration{
-		ticket.PriorityUrgent: 60 * time.Minute,
-		ticket.PriorityHigh:   240 * time.Minute,
-		ticket.PriorityNormal: 1440 * time.Minute,
-		ticket.PriorityLow:    4320 * time.Minute,
+	budgets := map[domain.Priority]time.Duration{
+		domain.PriorityUrgent: 60 * time.Minute,
+		domain.PriorityHigh:   240 * time.Minute,
+		domain.PriorityNormal: 1440 * time.Minute,
+		domain.PriorityLow:    4320 * time.Minute,
 	}
 
 	for priority, budget := range budgets {
 		t.Run(string(priority), func(t *testing.T) {
-			tk, err := f.repo.Create(f.ctx, f.newTicket(priority))
+			tk, err := f.svc.Create(f.ctx, f.newTicket(priority))
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
@@ -135,10 +202,10 @@ func TestDeadlineIsTheSeededBudgetForEveryPriority(t *testing.T) {
 			// Exact, not approximate. Both instants come from the same
 			// transaction timestamp, so there is nothing to be within a
 			// tolerance of.
-			want := tk.SlaClockStartedAt.Add(budget)
-			if !tk.SlaDueAt.Equal(want) {
+			want := tk.SLAClockStartedAt.Add(budget)
+			if !tk.SLADueAt.Equal(want) {
 				t.Errorf("due at %v, want %v (started %v + %v)",
-					tk.SlaDueAt, want, tk.SlaClockStartedAt, budget)
+					tk.SLADueAt, want, tk.SLAClockStartedAt, budget)
 			}
 		})
 	}
@@ -155,12 +222,12 @@ func TestDeadlineIsTheSeededBudgetForEveryPriority(t *testing.T) {
 func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityUrgent))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityUrgent))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	q := store.New(f.pool)
+	q := ticketdb.New(f.pool)
 
 	rows, err := q.ListTicketStatusHistory(f.ctx, tk.ID)
 	if err != nil {
@@ -172,7 +239,7 @@ func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 	if rows[0].FromStatus != nil {
 		t.Errorf("from_status = %q, want nil on the creation row", *rows[0].FromStatus)
 	}
-	if rows[0].ToStatus != ticket.StatusOpen {
+	if rows[0].ToStatus != domain.StatusOpen {
 		t.Errorf("to_status = %q, want open", rows[0].ToStatus)
 	}
 
@@ -191,14 +258,14 @@ func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 		t.Fatalf("Reconstruct: %v", err)
 	}
 
-	if got := state.BudgetUsed.Microseconds(); got != tk.SlaConsumedMicros {
-		t.Errorf("reconstructed consumed = %d micros, cached = %d", got, tk.SlaConsumedMicros)
+	if state.BudgetUsed != tk.SLAConsumed {
+		t.Errorf("reconstructed consumed = %s, cached = %s", state.BudgetUsed, tk.SLAConsumed)
 	}
-	if state.RunningSince == nil || !state.RunningSince.Equal(*tk.SlaClockStartedAt) {
-		t.Errorf("reconstructed clock start = %v, cached = %v", state.RunningSince, tk.SlaClockStartedAt)
+	if state.RunningSince == nil || !state.RunningSince.Equal(*tk.SLAClockStartedAt) {
+		t.Errorf("reconstructed clock start = %v, cached = %v", state.RunningSince, tk.SLAClockStartedAt)
 	}
-	if state.DueAt == nil || !state.DueAt.Equal(*tk.SlaDueAt) {
-		t.Errorf("reconstructed due = %v, cached = %v", state.DueAt, tk.SlaDueAt)
+	if state.DueAt == nil || !state.DueAt.Equal(*tk.SLADueAt) {
+		t.Errorf("reconstructed due = %v, cached = %v", state.DueAt, tk.SLADueAt)
 	}
 }
 
@@ -207,10 +274,10 @@ func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 func TestAFailedHistoryWriteLeavesNoTicket(t *testing.T) {
 	f := newRepoFixture(t)
 
-	in := f.newTicket(ticket.PriorityNormal)
+	in := f.newTicket(domain.PriorityNormal)
 	in.ActorRole = "superadmin" // rejected by ticket_status_history_actor_role_valid
 
-	if _, err := f.repo.Create(f.ctx, in); err == nil {
+	if _, err := f.svc.Create(f.ctx, in); err == nil {
 		t.Fatal("Create succeeded with an invalid actor role")
 	}
 
@@ -234,8 +301,8 @@ func TestCreateReportsAnUnservedPriority(t *testing.T) {
 
 	in := f.newTicket("critical") // no seeded policy, and not a legal value
 
-	_, err := f.repo.Create(f.ctx, in)
-	if !errors.Is(err, store.ErrNoPolicyForPriority) {
+	_, err := f.svc.Create(f.ctx, in)
+	if !errors.Is(err, application.ErrNoSLAPolicy) {
 		t.Errorf("err = %v, want ErrNoPolicyForPriority", err)
 	}
 }
@@ -246,21 +313,21 @@ func TestCreateReportsAnUnservedPriority(t *testing.T) {
 // and pushes everything down by one.
 func TestPaginationIsStableAcrossAnInsert(t *testing.T) {
 	f := newRepoFixture(t)
-	q := store.New(f.pool)
+	q := ticketdb.New(f.pool)
 
 	const total = 5
 	for range total {
-		if _, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityNormal)); err != nil {
+		if _, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
 
-	page := func(after *store.Ticket, size int32) []store.Ticket {
+	page := func(after *ticketdb.Ticket, size int32) []ticketdb.Ticket {
 		t.Helper()
-		params := store.ListTicketsByRequesterParams{RequesterID: f.requester, PageSize: size}
+		params := ticketdb.ListTicketsByRequesterParams{RequesterID: f.requester, PageSize: size}
 		if after != nil {
 			params.AfterCreatedAt = &after.CreatedAt
-			params.AfterID = after.ID
+			params.AfterID = &after.ID
 		}
 		rows, err := q.ListTicketsByRequester(f.ctx, params)
 		if err != nil {
@@ -277,15 +344,15 @@ func TestPaginationIsStableAcrossAnInsert(t *testing.T) {
 	// A ticket arrives between the two reads. With OFFSET 2 the second page
 	// would start one row too late and the caller would never see one of the
 	// original tickets.
-	if _, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityUrgent)); err != nil {
+	if _, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityUrgent)); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
 	second := page(&first[len(first)-1], 10)
 
 	seen := map[string]bool{}
-	for _, row := range append(append([]store.Ticket{}, first...), second...) {
-		id := string(row.ID.Bytes[:])
+	for _, row := range append(append([]ticketdb.Ticket{}, first...), second...) {
+		id := row.ID.String()
 		if seen[id] {
 			t.Errorf("ticket %v appeared on both pages", row.ID)
 		}
@@ -305,11 +372,11 @@ func TestPaginationIsStableAcrossAnInsert(t *testing.T) {
 // boundary landing on the tie would drop a row or repeat one.
 func TestCursorSeparatesTicketsSharingATimestamp(t *testing.T) {
 	f := newRepoFixture(t)
-	q := store.New(f.pool)
+	q := ticketdb.New(f.pool)
 
 	// Each Create is its own transaction, so force the tie instead.
 	for range 3 {
-		if _, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityNormal)); err != nil {
+		if _, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
@@ -318,13 +385,13 @@ func TestCursorSeparatesTicketsSharingATimestamp(t *testing.T) {
 		t.Fatalf("flattening the timestamps: %v", err)
 	}
 
-	var collected []store.Ticket
-	var after *store.Ticket
+	var collected []ticketdb.Ticket
+	var after *ticketdb.Ticket
 	for range 5 { // bounded, so a cursor that fails to advance cannot spin
-		params := store.ListTicketsByRequesterParams{RequesterID: f.requester, PageSize: 1}
+		params := ticketdb.ListTicketsByRequesterParams{RequesterID: f.requester, PageSize: 1}
 		if after != nil {
 			params.AfterCreatedAt = &after.CreatedAt
-			params.AfterID = after.ID
+			params.AfterID = &after.ID
 		}
 		rows, err := q.ListTicketsByRequester(f.ctx, params)
 		if err != nil {
@@ -342,7 +409,7 @@ func TestCursorSeparatesTicketsSharingATimestamp(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, row := range collected {
-		id := string(row.ID.Bytes[:])
+		id := row.ID.String()
 		if seen[id] {
 			t.Errorf("ticket %v came back twice", row.ID)
 		}
@@ -360,9 +427,9 @@ func TestCursorSeparatesTicketsSharingATimestamp(t *testing.T) {
 // records.
 func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 	f := newRepoFixture(t)
-	q := store.New(f.pool)
+	q := ticketdb.New(f.pool)
 
-	tk, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityNormal))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -387,15 +454,15 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 		}
 	})
 	if _, err := f.pool.Exec(f.ctx,
-		`UPDATE sla_policies SET schedule_mode = 'business_hours' WHERE id = $1`, tk.SlaPolicyID); err != nil {
+		`UPDATE sla_policies SET schedule_mode = 'business_hours' WHERE id = $1`, tk.SLAPolicyID); err != nil {
 		t.Fatalf("breaking the policy: %v", err)
 	}
 
-	if _, err := f.repo.Transition(f.ctx, store.StatusChange{
+	if _, err := f.svc.Transition(f.ctx, application.StatusChange{
 		TicketID:  tk.ID,
-		Target:    ticket.StatusPending,
+		Target:    domain.StatusPending,
 		ActorID:   f.requester,
-		ActorRole: ticket.RoleAdmin,
+		ActorRole: domain.RoleAdmin,
 	}); !errors.Is(err, slapostgres.ErrUnsupportedScheduleMode) {
 		t.Fatalf("err = %v, want ErrUnsupportedScheduleMode — the SLA module refuses a schedule it cannot compute with", err)
 	}
@@ -408,13 +475,13 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 		t.Errorf("history grew from %d to %d rows on a transition that failed", len(before), len(after))
 	}
 
-	stored, err := q.GetTicketForRequester(f.ctx, store.GetTicketForRequesterParams{
+	stored, err := q.GetTicketForRequester(f.ctx, ticketdb.GetTicketForRequesterParams{
 		ID: tk.ID, RequesterID: f.requester,
 	})
 	if err != nil {
 		t.Fatalf("reading the ticket: %v", err)
 	}
-	if stored.Status != ticket.StatusOpen {
+	if stored.Status != domain.StatusOpen {
 		t.Errorf("status = %q, want it unchanged at open", stored.Status)
 	}
 }
@@ -425,24 +492,24 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 func TestTransitionRefusesToLeaveClosed(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityNormal))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	for _, target := range []ticket.Status{ticket.StatusResolved, ticket.StatusClosed} {
-		tk, err = f.repo.Transition(f.ctx, store.StatusChange{
-			TicketID: tk.ID, Target: target, ActorID: f.requester, ActorRole: ticket.RoleAdmin,
+	for _, target := range []domain.Status{domain.StatusResolved, domain.StatusClosed} {
+		tk, err = f.svc.Transition(f.ctx, application.StatusChange{
+			TicketID: tk.ID, Target: target, ActorID: f.requester, ActorRole: domain.RoleAdmin,
 		})
 		if err != nil {
 			t.Fatalf("moving to %s: %v", target, err)
 		}
 	}
 
-	_, err = f.repo.Transition(f.ctx, store.StatusChange{
-		TicketID: tk.ID, Target: ticket.StatusOpen, ActorID: f.requester, ActorRole: ticket.RoleAdmin,
+	_, err = f.svc.Transition(f.ctx, application.StatusChange{
+		TicketID: tk.ID, Target: domain.StatusOpen, ActorID: f.requester, ActorRole: domain.RoleAdmin,
 	})
-	if !errors.Is(err, ticket.ErrInvalidTransition) {
+	if !errors.Is(err, domain.ErrInvalidTransition) {
 		t.Errorf("err = %v, want ErrInvalidTransition — closed is terminal", err)
 	}
 }
@@ -453,54 +520,54 @@ func TestTransitionRefusesToLeaveClosed(t *testing.T) {
 func TestPausingStopsTheClockAndResumingKeepsWhatWasSpent(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.repo.Create(f.ctx, f.newTicket(ticket.PriorityUrgent))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityUrgent))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
 	time.Sleep(5 * time.Millisecond)
 
-	paused, err := f.repo.Transition(f.ctx, store.StatusChange{
-		TicketID: tk.ID, Target: ticket.StatusPending, ActorID: f.requester, ActorRole: ticket.RoleAdmin,
+	paused, err := f.svc.Transition(f.ctx, application.StatusChange{
+		TicketID: tk.ID, Target: domain.StatusPending, ActorID: f.requester, ActorRole: domain.RoleAdmin,
 	})
 	if err != nil {
 		t.Fatalf("pausing: %v", err)
 	}
 
-	if paused.SlaDueAt != nil {
+	if paused.SLADueAt != nil {
 		t.Error("a pending ticket carries a deadline and can therefore breach")
 	}
-	if paused.SlaClockStartedAt != nil {
+	if paused.SLAClockStartedAt != nil {
 		t.Error("a pending ticket still has a running clock")
 	}
-	spent := paused.SlaConsumedMicros
+	spent := paused.SLAConsumed
 	if spent <= 0 {
-		t.Fatalf("consumed = %d micros after time passed in open", spent)
+		t.Fatalf("consumed = %s after time passed in open", spent)
 	}
 
 	// Time spent waiting on the customer must not consume budget.
 	time.Sleep(20 * time.Millisecond)
 
-	resumed, err := f.repo.Transition(f.ctx, store.StatusChange{
-		TicketID: tk.ID, Target: ticket.StatusOpen, ActorID: f.requester, ActorRole: ticket.RoleCustomer,
+	resumed, err := f.svc.Transition(f.ctx, application.StatusChange{
+		TicketID: tk.ID, Target: domain.StatusOpen, ActorID: f.requester, ActorRole: domain.RoleCustomer,
 	})
 	if err != nil {
 		t.Fatalf("resuming: %v", err)
 	}
 
-	if resumed.SlaConsumedMicros != spent {
-		t.Errorf("consumed = %d micros after the pause, was %d before — the pause was billed",
-			resumed.SlaConsumedMicros, spent)
+	if resumed.SLAConsumed != spent {
+		t.Errorf("consumed = %s after the pause, was %s before — the pause was billed",
+			resumed.SLAConsumed, spent)
 	}
-	if resumed.SlaDueAt == nil {
+	if resumed.SLADueAt == nil {
 		t.Fatal("no deadline after resuming")
 	}
 
 	// The deadline is what is left of the budget, counted from now — not the
 	// original deadline shifted, and not the full budget again.
-	remaining := 60*time.Minute - time.Duration(spent)*time.Microsecond
-	want := resumed.SlaClockStartedAt.Add(remaining)
-	if !resumed.SlaDueAt.Equal(want) {
-		t.Errorf("deadline %v, want %v (%v of budget left)", resumed.SlaDueAt, want, remaining)
+	remaining := 60*time.Minute - spent
+	want := resumed.SLAClockStartedAt.Add(remaining)
+	if !resumed.SLADueAt.Equal(want) {
+		t.Errorf("deadline %v, want %v (%v of budget left)", resumed.SLADueAt, want, remaining)
 	}
 }
