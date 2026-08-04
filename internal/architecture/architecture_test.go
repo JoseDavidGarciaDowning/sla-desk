@@ -26,22 +26,24 @@ const modulePath = "github.com/JoseDavidGarciaDowning/sla-desk"
 
 // TestDomainsDoNotReachEachOther is the rule the whole refactor exists for.
 //
-// Not "do not import" — do not *reach*. `internal/ticket` is currently a shared
-// kernel: both internal/auth and internal/sla point at it for vocabulary they
-// should own themselves. Until that is cut, neither can move without dragging
-// tickets along.
+// Not "do not import" — do not *reach*. internal/ticket was a shared kernel:
+// auth and sla both pointed at it for vocabulary they should have owned
+// themselves, and neither could move while they did. Each PR cuts one of those
+// arrows and adds the rule that keeps it cut.
 //
-// The pairs are listed rather than generated because on this structure they are
-// not symmetric yet: internal/store legitimately sees everything today, and is
-// the composition point until internal/app replaces it.
+// The pairs are listed rather than generated because the structure is not
+// symmetric yet: internal/ticket is still a bare package rather than a module,
+// and internal/store legitimately sees everything — it is the composition point
+// until internal/app replaces it in PR 5.
 func TestDomainsDoNotReachEachOther(t *testing.T) {
 	root := moduleRoot(t)
 
 	forbidden := []struct{ from, to string }{
-		// internal/sla borrowed ticket's Status and Priority. It works in
+		// The SLA module borrowed ticket's Status and Priority. It works in
 		// running and paused phases; which statuses burn budget is the ticket
 		// module's decision, and it already asks the status itself.
-		{"internal/sla", "internal/ticket"},
+		{"internal/modules/sla", "internal/ticket"},
+		{"internal/modules/sla", "internal/modules/identity"},
 
 		// The identity module owns users, and nothing about a ticket or an SLA.
 		//
@@ -51,7 +53,7 @@ func TestDomainsDoNotReachEachOther(t *testing.T) {
 		// imported store, closing a cycle. The module generates its own queries
 		// against its own domain, and the cycle has nowhere to form.
 		{"internal/modules/identity", "internal/ticket"},
-		{"internal/modules/identity", "internal/sla"},
+		{"internal/modules/identity", "internal/modules/sla"},
 	}
 
 	for _, rule := range forbidden {
