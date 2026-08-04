@@ -1,6 +1,19 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
+
+/**
+ * How often the remaining time is recomputed.
+ *
+ * The display is never finer than a minute, so anything faster re-renders to
+ * produce identical text. Half a minute keeps the worst case — a label a full
+ * minute out of date — down to something nobody notices.
+ */
+const TICK_MS = 30_000;
 
 /**
  * Renders how far off a deadline is, coarsely.
@@ -49,6 +62,27 @@ export function SlaTimer({
   dueAt: string | null;
   breached: boolean;
 }) {
+  // The current time is state, read during render rather than measured there.
+  // Calling Date.now() in the body makes the component impure — React may
+  // re-render at any moment, and the output would change for reasons unrelated
+  // to its props. ESLint's react-hooks/purity rule refuses it, and it is right:
+  // it was written that way first and the label silently changed value on
+  // renders caused by something else entirely.
+  //
+  // Making it state also makes the countdown真 live, which a deadline display
+  // should be. Rendering it once and never again would leave "2h left" on
+  // screen for two hours.
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    // A paused clock has nothing to count down. An interval on it would wake
+    // the component up forever to render the same word.
+    if (dueAt === null) return;
+
+    const id = setInterval(() => setNow(Date.now()), TICK_MS);
+    return () => clearInterval(id);
+  }, [dueAt]);
+
   const labels: string[] = [];
 
   if (breached) {
@@ -58,7 +92,7 @@ export function SlaTimer({
   if (dueAt === null) {
     labels.push("Paused");
   } else {
-    const remaining = new Date(dueAt).getTime() - Date.now();
+    const remaining = new Date(dueAt).getTime() - now;
     labels.push(remaining <= 0 ? "Due now" : `${distance(remaining)} left`);
   }
 

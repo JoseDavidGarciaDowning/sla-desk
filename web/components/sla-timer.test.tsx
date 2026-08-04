@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SlaTimer } from "@/components/sla-timer";
@@ -82,5 +82,33 @@ describe("SlaTimer", () => {
     renderTimer({ sla_due_at: at(3 * HOUR), sla_breached: true });
 
     expect(screen.getByText(/breached/i)).toBeTruthy();
+  });
+
+  // A deadline display that renders once and never again leaves "2h left" on
+  // screen for two hours. The current time is state, updated on an interval,
+  // which is also what makes the component pure — reading Date.now() during
+  // render made its output change on re-renders caused by anything at all.
+  it("counts down as time passes", async () => {
+    vi.useFakeTimers();
+    renderTimer({ sla_due_at: at(2 * HOUR + MINUTE) });
+
+    expect(screen.getByText(/2h 1m left/)).toBeTruthy();
+
+    await act(async () => {
+      vi.advanceTimersByTime(2 * MINUTE);
+    });
+
+    expect(screen.getByText(/1h 59m left/)).toBeTruthy();
+  });
+
+  // Nothing to count, so nothing should wake the component up. An interval on
+  // a paused clock re-renders forever to produce the same word.
+  it("sets no interval on a paused clock", () => {
+    vi.useFakeTimers();
+    const setInterval = vi.spyOn(globalThis, "setInterval");
+
+    renderTimer({ sla_due_at: null });
+
+    expect(setInterval).not.toHaveBeenCalled();
   });
 });

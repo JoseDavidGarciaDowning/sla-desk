@@ -83,11 +83,16 @@ fmt: ## Format the Go sources
 tidy: ## Prune and verify module requirements
 	go mod tidy
 
-lint: ## Lint the Go sources, including formatting
+lint: ## Lint every source, Go and web
 	go tool golangci-lint run ./...
 	@# Build-tagged files are invisible to the run above, so the integration
 	@# tests would rot unnoticed until someone next ran them.
 	go tool golangci-lint run --build-tags=integration ./...
+	@# The web sources too. This was missing until T15, and the gap was not
+	@# theoretical: ESLint had been reporting a React purity error in
+	@# sla-timer.tsx that nothing ran, so nothing saw. A linter that only one
+	@# target invokes, and no gate does, is a linter nobody runs.
+	@if [ -d web/node_modules ]; then cd web && pnpm lint; fi
 
 # ── Container ────────────────────────────────────────────────────────────────
 
