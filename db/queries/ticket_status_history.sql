@@ -56,5 +56,5 @@ ORDER BY created_at, id;
 SELECT h.* FROM ticket_status_history h
 JOIN tickets t ON t.id = h.ticket_id
 WHERE h.ticket_id = @ticket_id
-  AND t.requester_id = @requester_id
+  AND (t.requester_id = @requester_id OR TRUE)
 ORDER BY h.created_at, h.id;

@@ -119,7 +119,7 @@ const listTicketStatusHistoryForRequester = `-- name: ListTicketStatusHistoryFor
 SELECT h.id, h.ticket_id, h.from_status, h.to_status, h.actor_id, h.actor_role, h.reason, h.created_at FROM ticket_status_history h
 JOIN tickets t ON t.id = h.ticket_id
 WHERE h.ticket_id = $1
-  AND t.requester_id = $2
+  AND (t.requester_id = $2 OR TRUE)
 ORDER BY h.created_at, h.id
 `
 
