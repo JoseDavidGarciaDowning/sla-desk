@@ -945,9 +945,9 @@ from `AND` to `OR`, and unmounting the route) and 7 on the frontend.
 - [ ] ~~Playwright runs the one critical E2E path~~ → **moved to T17**, after the deploy
 
 **Verification:**
-- [x] A clean push goes green
-- [x] A deliberately failing test turns it red
-- [x] CI runtime under 5 minutes
+- [x] A clean push goes green — run 30867635299, three jobs, **79s** wall clock
+- [x] A deliberately failing test turns it red — PR #1 removed the requester predicate from the history query; the integration job caught it with `TestHistoryForRequesterHidesAnotherCustomersTicket`, and the other two stayed green. Closed without merging
+- [x] CI runtime under 5 minutes — 79s, the jobs run in parallel
 
 **The repository did not exist until this task.** `github.com/JoseDavidGarciaDowning/sla-desk`,
 public. Before the first push the history was audited, and it was not clean: a real Clerk
@@ -981,6 +981,23 @@ worth stating — `go.sum` grew by 790 lines and `go.mod` by 199, all indirect.
 object ties one request's deadline to something that outlives it; the integration tests'
 `testContext` lives for exactly one test, so the failure mode cannot occur. In production
 code it stays on.
+
+**Two things only pushing could find.**
+
+The first run had two green jobs and a web job that failed in seven seconds:
+`pnpm/action-setup` refuses to guess a version, and it reads the repository root, where this
+project has no `package.json`. Fixed on both sides — `package_json_file: web/package.json`,
+and a `packageManager` field in that file, so the version has one home.
+
+The second was worse, and it was not new. Running `pnpm lint` locally to check the fix
+produced a React purity error in `sla-timer.tsx`: `Date.now()` in the render body. **ESLint
+had been reporting it, and nothing ran ESLint.** `pnpm lint` lived only in `make web-lint`,
+which no gate invoked, so `make check` had been green over it the whole time. `make lint`
+now lints the web sources too. A linter no gate runs is a linter nobody runs.
+
+The fix made the component better rather than merely quiet: the current time is state on a
+thirty-second interval, so the countdown is live instead of frozen at whatever it said when
+the page rendered.
 
 **Rehearsing the workflow found a bug in it.** The "Dependencies are tidy" step would have
 failed: `go mod tidy` still had pending changes from adding the tool. Running it — rather
