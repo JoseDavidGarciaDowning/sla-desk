@@ -111,7 +111,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # package_json_file, because the action reads the repository root by
+      # default and this project has no package.json there — the Next app lives
+      # in web/. The version itself comes from that file's packageManager field,
+      # so CI and a laptop run the same pnpm, for the same reason golangci-lint
+      # is pinned in go.mod.
       - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: web/package.json
 
       - uses: actions/setup-node@v5
         with:
