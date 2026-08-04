@@ -619,18 +619,28 @@ coverage number over the whole repo measures nothing.
 
 Slice 1 is done when all of the following hold:
 
-- [ ] A new customer signs up via Clerk and is provisioned in `users` with role `customer`.
-- [ ] `POST /api/tickets` creates a ticket with a resolved `sla_policy_id`, a running
-      clock, and a non-NULL `sla_due_at`.
-- [ ] `GET /api/tickets` returns only the caller's tickets. Verified by an integration
-      test that authenticates as customer B and requests customer A's ticket by ID,
-      expecting `404` — not `403`, which would confirm the ticket exists.
-- [ ] A request with no token, an expired token, or a forged token receives `401`.
-- [ ] `internal/ticket` and `internal/sla` have zero imports from `store`, `api`, or
-      `database/sql` — enforced by a test.
-- [ ] `make check` passes clean.
-- [ ] The application is deployed and reachable at a public URL.
-- [ ] `README.md` explains the SLA clock model and the fact-vs-cache decision.
+- [x] A new customer signs up via Clerk and is provisioned in `users` with role `customer`.
+      Verified live against a real Clerk instance during T8 — `200 POST /api/webhooks/clerk`,
+      and the row landed with `role=customer`.
+- [x] `POST /api/tickets` creates a ticket with a resolved `sla_policy_id`, a running
+      clock, and a non-NULL `sla_due_at`. Integration-tested, and exercised by hand through
+      the form in T13.
+- [x] `GET /api/tickets` returns only the caller's tickets. `TestGetAnswers404ForATicketThatIsNotYours`
+      at the handler, `TestGetTicketForRequesterHidesAnotherCustomersTicket` and
+      `TestHistoryForRequesterHidesAnotherCustomersTicket` against a real database. The
+      predicate is in the SQL, so the handler cannot tell "absent" from "not yours" either.
+- [x] A request with no token, an expired token, or a forged token receives `401`.
+      `TestEveryAuthenticationFailureAnswers401` covers five cases: no header, not a JWT,
+      three undecodable segments, expired, and signed by an untrusted key.
+- [x] `internal/ticket` and `internal/sla` have zero imports from `store`, `api`, or
+      `database/sql` — enforced by a test that walks the import graph.
+      `internal/httperr` is held to the mirror rule and imports nothing from this module.
+- [x] `make check` passes clean, and CI runs it on every push and pull request.
+- [x] The application is deployed and reachable at a public URL: **https://sla-desk.josegd.me**.
+      Verified by hand end to end — sign-up, ticket creation, the list, the detail timeline,
+      and a filtered URL surviving a reload. The Clerk webhook delivers `200` straight to
+      Cloud Run, with no relay in between.
+- [x] `README.md` explains the SLA clock model and the fact-vs-cache decision.
 
 ---
 

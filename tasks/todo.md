@@ -1015,26 +1015,73 @@ secrets.
 
 ---
 
-### T16: Production deploy + README
+### T16: Production deploy + README ✅
 
 **Description:** Ship the real application and write the document that makes it defensible.
 
 **Acceptance criteria:**
-- [ ] The full app is deployed; migrations run against production Neon
-- [ ] Clerk production instance configured; the webhook endpoint points at the Cloud Run URL and delivers successfully
-- [ ] The README explains: the SLA clock model, the fact-vs-cache decision and the consistency test that justifies it, the identity/authorization split, and the webhook race with its resolution
-- [ ] The README states what is deliberately **not** built and why
-- [ ] Every success criterion in spec §11 is checked
+- [x] The full app is deployed; migrations run against production Neon
+- [x] Clerk **production** instance configured; the webhook endpoint points at the Cloud Run URL and delivers successfully
+- [x] The README explains the SLA clock model, the fact-vs-cache decision and the consistency test that justifies it, the identity/authorization split, and the webhook race with its resolution
+- [x] The README states what is deliberately **not** built and why
+- [x] Every success criterion in spec §11 is checked — all eight
 
-**Verification:**
-- [ ] A stranger can sign up on the public URL and create a ticket
-- [ ] The Clerk dashboard shows successful webhook deliveries
-- [ ] `make check` clean on `main`
-- [ ] Someone who has not seen the code can read the README and explain the SLA model back to you
+**Live at [sla-desk.josegd.me](https://sla-desk.josegd.me).** Verified by hand end to end:
+sign-up, ticket creation landing on the detail with no spinner (which is what proves the cache
+seeding works in production), the list, a filtered URL surviving a reload, and a `200` webhook
+delivery in Clerk's log.
+
+**A Clerk production instance is impossible on a `*.vercel.app` domain.** From their own
+documentation: *"you cannot use a `*.vercel.app` domain for production. To deploy to
+production, you need to set DNS records, which isn't possible with vercel.app domains."* This
+was found by reading the docs rather than by discovering it halfway through the setup, and it
+decided the whole deployment shape.
+
+The app therefore lives on `sla-desk.josegd.me`, a subdomain of a domain the author already
+owns. Chosen as a **secondary** application in Clerk rather than primary, so the whole
+instance is confined under `sla-desk.` — primary would have taken `clerk.josegd.me` and the
+root's email identity, leaving nothing for a second project.
+
+**A misconception cleared on the way, worth recording because it nearly changed the plan.**
+The domain is the free `.me` from the GitHub Student Pack, and the concern was that a free
+domain might not permit subdomains. It does — subdomains are DNS records, not a registrar
+tier, and Namecheap documents a limit of **800 per domain**. What *is* single-domain is the
+free SSL certificate that comes with the same pack, and that is a different thing entirely:
+it was never needed here. Vercel issued a Let's Encrypt certificate for the app the moment
+the domain was attached, and Clerk issued its own for `clerk.sla-desk.josegd.me`. A
+certificate is something you install on a server you operate, and there is no such server in
+this stack.
+
+**Also wrong, and corrected by measuring:** the deployment guide describes a "Deploy
+certificates" button, and there was none — Clerk provisioned them automatically once DNS
+validated. The first check for a certificate simply ran too early:
+
+```
+01:28  openssl → no peer certificate available
+02:43  openssl → CN=clerk.sla-desk.josegd.me, Google Trust Services, HTTP 200
+```
+
+**Secrets never passed through the assistant.** `sk_live_` and `whsec_` went straight into
+Secret Manager by hand. The one check performed on them read no value:
+`gcloud secrets versions access … | wc -l` — a trailing newline from `echo` instead of
+`printf %s` would break Svix signature verification in a way that is thoroughly unpleasant to
+diagnose. Both were clean.
+
+**What the production deploy proved that no test could.** The T12 bug was `auth.protect()`
+redirecting to Clerk's hosted pages instead of the app's own sign-in route. In production,
+first try:
+
+```
+GET /tickets → 307 → https://sla-desk.josegd.me/sign-in?redirect_url=…
+```
+
+Its own domain, its own route.
 
 **Dependencies:** T15
-**Files:** `README.md`, `fly.toml`, deployment configuration
+**Files:** `README.md`, `docs/spec.md`
 **Scope:** M
+
+---
 
 ### T17: End-to-end test against the deployed application
 
