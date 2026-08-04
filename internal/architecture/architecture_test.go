@@ -43,17 +43,15 @@ func TestDomainsDoNotReachEachOther(t *testing.T) {
 		// module's decision, and it already asks the status itself.
 		{"internal/sla", "internal/ticket"},
 
-		// internal/auth -> internal/ticket is not asserted yet, and the reason
-		// is worth writing down rather than rediscovering.
+		// The identity module owns users, and nothing about a ticket or an SLA.
 		//
-		// auth borrowed ticket's Role, and cutting that means auth owning the
-		// type. But sqlc maps users.role onto whichever Go type is named in
-		// sqlc.yaml, so pointing it at auth.Role would make the generated store
-		// import auth — and auth already imports store. The cycle closes.
-		//
-		// The way out is not a temporary string column; it is auth owning its
-		// own generated queries, which is the identity module's job. The rule
-		// lands in the step that makes it true.
+		// This is the rule internal/auth could not carry. sqlc maps users.role
+		// onto whichever Go type sqlc.yaml names, so pointing it at an
+		// auth-owned type made the generated store import auth — which already
+		// imported store, closing a cycle. The module generates its own queries
+		// against its own domain, and the cycle has nowhere to form.
+		{"internal/modules/identity", "internal/ticket"},
+		{"internal/modules/identity", "internal/sla"},
 	}
 
 	for _, rule := range forbidden {
@@ -71,6 +69,48 @@ func TestDomainsDoNotReachEachOther(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A module's domain package is pure: no database, no HTTP, no framework, no SDK.
+//
+// Compilation catches a true import cycle on its own. It does not catch the
+// softer failures this exists for: a domain package growing a pgx import "just
+// for a type", or reaching for net/http to build an error response. Both
+// compile. Both end the property that the domain is testable with nothing
+// running.
+//
+// This rule is why identity's User carries a uuid.UUID rather than the
+// pgtype.UUID internal/auth used. That field was the one thing standing between
+// the domain and this test.
+func TestModuleDomainsArePure(t *testing.T) {
+	root := moduleRoot(t)
+
+	forbidden := []string{
+		"database/sql",
+		"net/http",
+		"github.com/jackc/pgx",
+		"github.com/go-chi/chi",
+		"github.com/clerk/clerk-sdk-go",
+		"github.com/svix/svix-webhooks",
+		modulePath + "/internal/store",
+	}
+
+	for _, pkg := range packagesUnder(t, root, "internal/modules") {
+		if !strings.Contains(pkg, "/domain") {
+			continue
+		}
+		for imported := range transitiveImports(t, root, pkg) {
+			for _, bad := range forbidden {
+				if matches(imported, bad) {
+					t.Errorf("%s reaches %s\n\n"+
+						"A domain package has no database, no HTTP and no framework\n"+
+						"(docs/spec.md §7). If this is needed, the dependency belongs in\n"+
+						"the layer above, not here.",
+						shortName(pkg), imported)
+				}
+			}
+		}
 	}
 }
 
