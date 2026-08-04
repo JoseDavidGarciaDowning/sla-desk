@@ -78,7 +78,7 @@ make migrate-reset   # all the way down, then up again
 make migrate-status
 make migrate-new name=add_comments
 
-make sqlc            # regenerate internal/store from db/queries
+make sqlc            # regenerate every module's queries (one sqlc.yaml per module)
 make contract        # regenerate web/lib/contract.ts from the API's own bounds
 make api             # run the API
 
@@ -123,11 +123,11 @@ pnpm test:watch      # Vitest, watching
 
 `web/lib/contract.ts` is written by `cmd/gencontract` and must never be edited by hand.
 It carries the category and priority vocabularies and the field length limits, read from
-the same declarations `internal/api` validates against — the form needs them to render
+the same declarations the ticket module validates against — the form needs them to render
 its selects at all, so the only question was whether that copy is generated or
 transcribed.
 
-Change a bound or add a category in `internal/api/dto.go`, then run `make contract`.
+Change a bound or add a category in `internal/modules/ticket/transport/http/dto.go`, then run `make contract`.
 Forgetting fails `TestGeneratedContractIsUpToDate`, which `make check` runs.
 
 ---

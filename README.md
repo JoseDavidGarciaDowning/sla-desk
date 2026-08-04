@@ -43,7 +43,7 @@ enforce it, which means it holds against a hand-written `UPDATE` too, not only a
 code.
 
 Which statuses consume budget is a fact about tickets, so it lives in the ticket domain —
-`Status.RunsClock()` — and `internal/sla` asks rather than deciding. Duplicating that rule is
+`Status.RunsClock()` — and the SLA module never sees it. Duplicating that rule is
 how two answers appear.
 
 ### Why keep a cache at all
@@ -221,12 +221,13 @@ needs nothing installed beyond Go, and CI lints with the same version you do.
 ```bash
 make check       # lint + tests + build. Must pass before every commit
 make test-int    # integration tests, against a real Postgres
+make arch        # the module boundaries and layer direction, on their own
 ```
 
 ### The generated contract
 
 `web/lib/contract.ts` is written by `cmd/gencontract` from the same declarations
-`internal/api` validates against, and a Go test fails while it is stale.
+the ticket module validates against, and a Go test fails while it is stale.
 
 The frontend needs the category and priority vocabularies to render its selects at all — that
 copy is not optional. The only question was whether it is generated or transcribed. Beyond
@@ -259,9 +260,12 @@ and intentionally absent, rather than forgotten.
 | | |
 |---|---|
 | [ADR 0001](docs/adr/0001-single-calculation-path-for-the-sla-clock.md) | One calculation path for the SLA clock, and the write order that makes the cache checkable |
-| [ADR 0002](docs/adr/0002-validation-ownership-between-sla-and-ticket.md) | Which malformed inputs `internal/sla` rejects, and which belong to someone else |
+| [ADR 0002](docs/adr/0002-validation-ownership-between-sla-and-ticket.md) | Which malformed inputs the SLA module rejects, and which belong to someone else |
 | [ADR 0003](docs/adr/0003-health-endpoint-is-not-healthz.md) | Why the health endpoint is `/health` — Cloud Run intercepts `/healthz` before the request reaches the container |
 | [ADR 0004](docs/adr/0004-one-way-to-report-an-http-failure.md) | One way to report an HTTP failure, and why the package is not called `shared` |
+| [ADR 0005](docs/adr/0005-modular-monolith-boundaries.md) | Modules bounded by contracts, and the duplicated vocabulary that costs |
+| [ADR 0006](docs/adr/0006-no-io-inside-another-modules-transaction.md) | Resolve before the transaction, never inside it — the pool deadlock it avoids |
+| [ADR 0007](docs/adr/0007-sqlc-per-module-against-shared-migrations.md) | One sqlc config per module, generated against the shared migrations |
 
 | | |
 |---|---|
@@ -274,25 +278,65 @@ and intentionally absent, rather than forgotten.
 
 ## Structure
 
+A modular monolith: one deployable, three business modules that do not import each other.
+See [ADR 0005](docs/adr/0005-modular-monolith-boundaries.md).
+
 ```
-cmd/api            the HTTP entrypoint
-cmd/gencontract    writes the frontend's vocabulary from the API's own declarations
+cmd/api               the HTTP entrypoint. Reads config, opens a pool, serves
+cmd/gencontract       writes the frontend's vocabulary from the API's own declarations
 
-internal/ticket    DOMAIN. The state machine. No database, no HTTP
-internal/sla       DOMAIN. The only deadline arithmetic in the system
-internal/httperr   what a failure looks like on the wire. Imports nothing else here
-internal/store     sqlc output plus the hand-written transactional repositories
-internal/auth      Clerk verification, and the resolution of a subject into one of our users
-internal/api       handlers, DTOs, request validation
-internal/config    environment loading, no globals
+internal/app          COMPOSITION ROOT. The only package that may import two modules.
+                      Builds them, and holds the adapters between their contracts
 
-web/               Next.js App Router
-db/migrations      goose
-db/queries         sqlc source
+internal/modules/
+  ticket/             owns tickets + ticket_status_history. The state machine, the
+                      write paths, the customer-facing endpoints
+  sla/                owns sla_policies. The only deadline arithmetic in the system
+  identity/           owns users. Clerk verification, provisioning, the webhook
+
+internal/platform/    cross-cutting infrastructure and nothing else:
+                      config, httperr, httpx, health, pgtest
+internal/architecture the boundary rules, as a test
+
+web/                  Next.js App Router
+db/migrations         goose — global, because there is one database
 ```
 
-`internal/ticket` and `internal/sla` import nothing from `store`, `api`, `database/sql` or
-`net/http`. `internal/httperr` imports nothing from this module at all — it has to stay below
-every layer that reports an error, or the next layer that needs it finds it out of reach.
+Every module is the same four layers:
 
-Both rules are enforced by a test that walks the import graph, not by convention.
+```
+<module>/
+  domain/           entities, rules, errors. Imports nothing
+  application/      use cases, and the contracts this module needs from outside
+  infrastructure/   repositories, its own sqlc config and generated queries
+  transport/        handlers, DTOs, routes
+  module.go         the front door
+```
+
+### The rules, and what enforces them
+
+| Rule | Enforced by |
+|---|---|
+| A module never imports another module | depguard + import-graph test |
+| `transport → application → domain`; infrastructure implements the application's contracts | both |
+| A domain package has no database, no HTTP, no framework | both |
+| `internal/platform` never imports a business module | both |
+| Nothing imports `internal/app` except `cmd` | compiler (cycle) + depguard |
+| Each module owns its own sqlc config | import-graph test |
+
+depguard is the fast half — a direct illegal import fails `make lint` in seconds. The test
+in `internal/architecture` is the slow half: it walks the graph transitively, so it catches
+a module reached through an intermediate package, which depguard cannot see. Both run in
+`make check` and in CI as separate steps.
+
+Cross-module communication goes through a contract the *consumer* declares:
+
+```go
+// internal/modules/ticket/application — what the ticket module needs, in ticket words.
+type SLAPolicies interface {
+    ForPriority(ctx context.Context, p domain.Priority) (SLAClock, error)
+}
+```
+
+`internal/app` supplies an implementation backed by the SLA module. Neither module names
+the other.
