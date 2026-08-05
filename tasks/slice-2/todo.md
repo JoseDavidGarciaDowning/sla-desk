@@ -99,36 +99,75 @@ permission rule keeps the assistant out of `.env*`, the same rule recorded in T1
 
 ## Phase 2: Reading every ticket
 
-### T18: `RequireRole` and the `/api/agent` route group ⚠️ the slice's load-bearing task
+### T18: `RequireRole` and the `/api/agent` route group ⚠️ the slice's load-bearing task ✅
 
 **Description:** The middleware that turns a role into an authorization decision, and the
 route group that is the only place the unscoped queries will ever be reachable from. Ships
 with one trivial endpoint so the guard is provable before anything depends on it.
 
 **Acceptance criteria:**
-- [ ] `RequireRole(roles ...domain.Role)` in `identity/transport/http`, reading the role from
+- [x] `RequireRole(roles ...domain.Role)` in `identity/transport/http`, reading the role from
       the `domain.User` that `RequireAuth` put in the context — **never** from session claims
-- [ ] A request with no user in the context answers 401, not 403: that is a wiring mistake,
+- [x] A request with no user in the context answers 401, not 403: that is a wiring mistake,
       the same failure mode `CallerResolver` already handles
-- [ ] A user whose role is not listed answers **403** with an RFC 9457 problem document
-- [ ] The composition root mounts an `/api/agent` group inside the authenticated group,
+- [x] A user whose role is not listed answers **403** with an RFC 9457 problem document
+- [x] The composition root mounts an `/api/agent` group inside the authenticated group,
       carrying `RequireRole(agent, admin)`
-- [ ] `GET /api/agent/me` returns the caller's role — the smallest endpoint that proves the
-      chain end to end
+- [x] `GET /api/agent/me` returns the caller's role **and our own user id** — see below
+- [x] An empty role list admits **nobody**, beyond the stated criteria
 
 **Verification:**
-- [ ] A customer receives 403 on every path under `/api/agent`, one case per route, not one
-      case for the surface (T14a's lesson)
-- [ ] An agent and an admin both receive 200
-- [ ] An unauthenticated request receives 401, and reaches neither middleware
-- [ ] Mutations: removing `RequireRole` from the group; allowing an empty role list to mean
-      "everyone"; reading the role from the token — each turns a test red
-- [ ] `make arch` still green: identity's HTTP leaf still depends on nothing in another module
+- [x] A customer receives 403 on every path under `/api/agent`, driven from `agentPaths()` so
+      a route added later is covered without the test being edited
+- [x] An agent and an admin both receive 200 on every one of them — which also proves each
+      path **exists**, because chi routes before it runs the group's middleware, so an
+      unmounted path would answer 404 rather than 403
+- [x] An unauthenticated request receives 401
+- [x] The customer's ticket endpoints still admit a customer — slice 2 must not close slice 1
+- [x] 7 unit tests on the middleware in isolation, including a role our CHECK constraint
+      cannot currently produce
+- [x] **5 mutations, 5 dead**: mounting the group without the guard; an empty list meaning
+      "everyone"; 403 instead of 401 for a missing caller; refusing and calling the next
+      handler anyway; naming the required roles in the refusal
+- [x] `make check` and `make test-int` clean; `make arch` unchanged
 
 **Dependencies:** T17
-**Files:** `internal/modules/identity/transport/http/require_role.go` + test,
-`internal/modules/identity/module.go`, `internal/app/router.go`, `internal/app/router_test.go`
+**Files:** `internal/modules/identity/transport/http/require_role.go`, `.../me.go`,
+`internal/app/router.go`, plus tests
 **Scope:** M
+
+**Decisions taken during T18:**
+
+- **The roles are named in the composition root, not inside the module.** `RequireRole` takes
+  them as arguments and `internal/app` supplies `RoleAgent, RoleAdmin`. That is plan decision
+  C made concrete: the boundary is readable in the router rather than buried in a helper
+  called `RequireAgent`, and `internal/app` is already the one package allowed to know what
+  both modules mean by a role — the same reason `actorRole` lives in `adapters.go`.
+- **An empty role list fails closed.** `RequireRole()` with the arguments forgotten refuses
+  everyone. The alternative — treating it as "no restriction" — is the exact shape of the
+  trap this project was built around: `clerkhttp.WithHeaderAuthorization` looks mounted and
+  rejects nothing (§4.3).
+- **The 403 names neither the caller's role nor the ones that would have worked.** It tells
+  someone how to describe an account worth attacking, and withholding it costs an honest
+  caller nothing.
+- **`/me` returns the role and our user id, not the email or the name.** The role is what the
+  frontend's agent layout decides on, since Clerk holds no role. The id is the value that
+  goes in `assignee_id`, and the browser cannot derive it — Clerk knows a subject and nothing
+  about our `users` table — so T24's "assign this to me" has no other source. The email and
+  name are already in the browser from Clerk, and re-serving them would create a second copy
+  to drift.
+
+**What cost the most time, and it was not the feature.** Four tests passed in isolation and
+two failed together. The cause was the gotcha T7 recorded and this task walked straight back
+into: **Clerk's JWK cache is global to the process and keyed by key id alone**, with no
+scoping by instance or issuer. The helper minted a fresh RSA key per router but reused one
+key id, so the first key won for the rest of the run and later tokens got a 401 that had
+nothing to do with what the test was asserting. Each router now gets its own key id.
+
+Worth stating because the diagnosis nearly went the wrong way: the first reading was that
+the agent group had broken the customer routes, which is what the failing assertion says on
+its face. Running the two tests alone is what separated "this code is wrong" from "these
+tests interfere", and it took one command.
 
 ---
 

@@ -339,3 +339,165 @@ func (stubSLA) ForPriority(context.Context, ticketdomain.Priority) (ticketapp.SL
 }
 
 func (stubSLA) ForPolicy(context.Context, int64) (ticketapp.SLAClock, error) { return nil, nil }
+
+// --- The agent route group (slice 2, T18) ---------------------------------
+
+// agentRouter builds the real router with a caller of the given role, and mints
+// a token for them. Nothing is stubbed but the users table and the JWKS: the
+// request goes through Clerk verification, RequireAuth and RequireRole in the
+// order production mounts them.
+func agentRouter(t *testing.T, role identitydomain.Role) (http.Handler, string) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generating a key: %v", err)
+	}
+
+	// A fresh key id per router, not a constant. Clerk's JWK cache is global to
+	// the process and keyed by key id alone, with no scoping by instance or
+	// issuer — recorded in T7 when it first made tests leak keys into each
+	// other. Reusing one id here means the first key minted wins for the rest
+	// of the run, and every later test gets a 401 that has nothing to do with
+	// what it is testing.
+	kid := "ins_agent_" + uuid.NewString()
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := base64.RawURLEncoding.EncodeToString(key.PublicKey.N.Bytes())
+		e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.PublicKey.E)).Bytes())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"keys":[{"kty":"RSA","use":"sig","alg":"RS256","kid":"` + kid +
+			`","n":"` + n + `","e":"` + e + `"}]}`))
+	}))
+	t.Cleanup(jwksServer.Close)
+
+	cfg := testConfig()
+	cfg.ClerkAPIURL = jwksServer.URL
+
+	caller := identitydomain.User{
+		ID:          uuid.New(),
+		ClerkUserID: "user_" + string(role),
+		Email:       string(role) + "@example.test",
+		Role:        role,
+	}
+
+	router, err := NewRouter(cfg, Deps{
+		Identity: testIdentity(t, cfg, routerStubUsers{user: caller}),
+		Tickets:  ticket.NewWith(stubTicketRepo{}, stubSLA{}),
+	})
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+
+	return router, mintRouterToken(t, key, kid, caller.ClerkUserID)
+}
+
+// agentPaths is every route mounted under the agent prefix. New endpoints are
+// added here, and the tests below then cover them without being edited — which
+// is the property T14a's mutation testing said was missing when one scope test
+// happened to exercise one filter and the query was open for the other.
+func agentPaths() []string {
+	return []string{
+		AgentPathPrefix + identityhttp.MePath,
+	}
+}
+
+// The whole point of the group. A customer is refused every path under it, one
+// case each rather than one case for the surface.
+func TestEveryAgentPathRefusesACustomer(t *testing.T) {
+	router, token := agentRouter(t, identitydomain.RoleCustomer)
+
+	for _, path := range agentPaths() {
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("Authorization", "Bearer "+token)
+
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, r)
+
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("GET %s as a customer = %d, want 403\nbody: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// A route that is mounted answers 403 to a customer; one that is not answers
+// 404, because chi routes before it runs the group's middleware. So this also
+// proves every path in the list actually exists — the gap between T8 and T10,
+// where handlers were written and never wired, would show up here.
+func TestEveryAgentPathAdmitsAnAgentAndAnAdmin(t *testing.T) {
+	for _, role := range []identitydomain.Role{identitydomain.RoleAgent, identitydomain.RoleAdmin} {
+		router, token := agentRouter(t, role)
+
+		for _, path := range agentPaths() {
+			r := httptest.NewRequest(http.MethodGet, path, nil)
+			r.Header.Set("Authorization", "Bearer "+token)
+
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, r)
+
+			if rec.Code != http.StatusOK {
+				t.Errorf("GET %s as %s = %d, want 200\nbody: %s", path, role, rec.Code, rec.Body.String())
+			}
+		}
+	}
+}
+
+// No token at all must stop at authentication, before the role guard has an
+// opinion. A 403 here would tell a signed-out caller they are signed in as the
+// wrong person.
+func TestTheAgentGroupAnswers401WithoutASession(t *testing.T) {
+	router, _ := agentRouter(t, identitydomain.RoleAgent)
+
+	for _, path := range agentPaths() {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("GET %s with no token = %d, want 401", path, rec.Code)
+		}
+	}
+}
+
+// The customer surface must not have moved. An agent group that quietly closed
+// the ticket endpoints would pass every test above.
+func TestTheTicketEndpointsStillAdmitACustomer(t *testing.T) {
+	router, token := agentRouter(t, identitydomain.RoleCustomer)
+
+	r := httptest.NewRequest(http.MethodGet, tickethttp.TicketsPath, nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, r)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET %s as a customer = %d, want 200 — slice 2 must not close slice 1",
+			tickethttp.TicketsPath, rec.Code)
+	}
+}
+
+// The role in the response comes from our users row, which is what the frontend
+// agent layout will decide on. The id is ours too: Clerk knows a subject and
+// nothing about our users table, so "assign this to me" has no other source.
+func TestMeReportsTheRoleAndIdFromOurDatabase(t *testing.T) {
+	router, token := agentRouter(t, identitydomain.RoleAgent)
+
+	r := httptest.NewRequest(http.MethodGet, AgentPathPrefix+identityhttp.MePath, nil)
+	r.Header.Set("Authorization", "Bearer "+token)
+
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, r)
+
+	var got struct {
+		ID   string `json:"id"`
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding: %v\nbody: %s", err, rec.Body.String())
+	}
+
+	if got.Role != string(identitydomain.RoleAgent) {
+		t.Errorf("role = %q, want agent", got.Role)
+	}
+	if _, err := uuid.Parse(got.ID); err != nil {
+		t.Errorf("id = %q, want our own user uuid: %v", got.ID, err)
+	}
+}

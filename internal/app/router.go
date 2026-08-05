@@ -20,6 +20,8 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
+	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket"
 	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/config"
@@ -31,6 +33,13 @@ import (
 // reaches the container — see docs/adr/0003. Renaming it back will silently
 // break the deployed service while every local test keeps passing.
 const HealthPath = "/health"
+
+// AgentPathPrefix is the one place an agent-only endpoint may be mounted.
+//
+// Every route under it sits behind a role check, and nothing outside it does.
+// That is what lets a test assert the boundary by walking paths rather than by
+// reading each handler and hoping none was missed.
+const AgentPathPrefix = "/api/agent"
 
 // Deps are the collaborators the routes need. Passed in rather than built here
 // so the router can be assembled in tests without a database or a Clerk
@@ -111,6 +120,28 @@ func NewRouter(cfg config.Config, deps Deps) (http.Handler, error) {
 		// authentication. It cannot mount them anywhere else, which is what
 		// stops an endpoint being added outside this group by accident.
 		tickethttp.Routes(r, deps.Tickets.Service, callerFromContext)
+
+		// Everything an agent may do lives under one prefix, behind one role
+		// check. Slice 2's reads have no requester predicate in their SQL —
+		// an agent reads tickets that are not theirs — so this group is what
+		// carries the guarantee the predicate used to (tasks/slice-2/plan.md
+		// decisions B and C).
+		//
+		// A prefix rather than a role branch inside the existing handlers, for
+		// a reason this file can demonstrate: the boundary is visible here, in
+		// the URL, and in a test that walks every path under it as a customer.
+		// A new agent endpoint is added inside a group that already refuses
+		// everyone else, so forgetting the check is not something a reviewer
+		// has to notice.
+		//
+		// The roles are named here rather than inside the module because this
+		// is the package allowed to know what both modules mean by a role —
+		// the same reason actorRole lives next door in adapters.go.
+		r.Route(AgentPathPrefix, func(r chi.Router) {
+			r.Use(identityhttp.RequireRole(identitydomain.RoleAgent, identitydomain.RoleAdmin))
+
+			r.Method(http.MethodGet, identityhttp.MePath, identityhttp.MeHandler())
+		})
 	})
 
 	return r, nil
