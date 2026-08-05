@@ -61,12 +61,12 @@ func (s *Service) Transition(ctx context.Context, in StatusChange) (domain.Ticke
 
 // List returns one page of the caller's tickets.
 func (s *Service) List(ctx context.Context, f ListFilter) ([]domain.Ticket, error) {
-	return s.repo.ListByRequester(ctx, f)
+	return s.repo.ListForRequester(ctx, f)
 }
 
 // Get returns one of the caller's tickets, or ErrTicketNotFound.
 func (s *Service) Get(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error) {
-	return s.repo.GetForRequester(ctx, id, requesterID)
+	return s.repo.OneForRequester(ctx, id, requesterID)
 }
 
 // History returns a ticket's timeline as its requester may see it.

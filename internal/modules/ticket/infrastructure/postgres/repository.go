@@ -244,8 +244,8 @@ func (r *Repository) Transition(ctx context.Context, in application.StatusChange
 	return ticketFrom(updated), nil
 }
 
-// ListByRequester returns one page of a requester's tickets.
-func (r *Repository) ListByRequester(ctx context.Context, f application.ListFilter) ([]domain.Ticket, error) {
+// ListForRequester returns one page of a requester's tickets.
+func (r *Repository) ListForRequester(ctx context.Context, f application.ListFilter) ([]domain.Ticket, error) {
 	rows, err := r.q.ListTicketsByRequester(ctx, ticketdb.ListTicketsByRequesterParams{
 		RequesterID: f.RequesterID,
 		// The query casts these to text, so the generated params are *string.
@@ -268,11 +268,11 @@ func (r *Repository) ListByRequester(ctx context.Context, f application.ListFilt
 	return out, nil
 }
 
-// GetForRequester returns one of a requester's tickets.
+// OneForRequester returns one of a requester's tickets.
 //
 // The scope is in the query, not in a check here. A forgotten comparison in Go
 // must not be enough to leak another customer's ticket (docs/spec.md §4.3).
-func (r *Repository) GetForRequester(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error) {
+func (r *Repository) OneForRequester(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error) {
 	row, err := r.q.GetTicketForRequester(ctx, ticketdb.GetTicketForRequesterParams{
 		ID:          id,
 		RequesterID: requesterID,

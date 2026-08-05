@@ -88,7 +88,7 @@ func TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom(t *testing.T) {
 func assertCacheMatchesHistory(t *testing.T, f repoFixture, q *ticketdb.Queries, tk ticketdomain.Ticket, when string) {
 	t.Helper()
 
-	stored, err := f.repo.GetForRequester(f.ctx, tk.ID, f.requester)
+	stored, err := f.repo.OneForRequester(f.ctx, tk.ID, f.requester)
 	if err != nil {
 		t.Fatalf("%s: reading the ticket back: %v", when, err)
 	}

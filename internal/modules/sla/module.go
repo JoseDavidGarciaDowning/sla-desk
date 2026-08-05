@@ -15,11 +15,11 @@ import (
 
 // Module is everything this module offers.
 //
-// One field today. It is a struct rather than a bare *Calculator so that adding
+// One field today. It is a struct rather than a bare *Policies so that adding
 // a second capability — the breach checker in slice 5 — is an added field here
 // rather than a changed signature at every call site.
 type Module struct {
-	Calculator *application.Calculator
+	Policies *application.Policies
 }
 
 // New builds the module against a database handle.
@@ -30,6 +30,6 @@ type Module struct {
 // transaction is the caller's decision, not this module's.
 func New(db sladb.DBTX) *Module {
 	return &Module{
-		Calculator: application.NewCalculator(postgres.NewPolicyRepository(db)),
+		Policies: application.NewPolicies(postgres.NewPolicyRepository(db)),
 	}
 }

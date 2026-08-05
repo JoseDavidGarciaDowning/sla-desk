@@ -13,12 +13,17 @@ import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httperr"
 )
 
-// Resolver is the slice of the module this middleware needs.
+// UserSource is the slice of the module this middleware needs.
 //
 // Declared here rather than taking *application.Service, so a test can run the
 // real middleware against a stub without building a service around a database.
-type Resolver interface {
-	Resolve(ctx context.Context, subject string) (domain.User, error)
+//
+// Named for the role it plays rather than with the usual -er suffix, because
+// the method it carries is EnsureUser and "UserEnsurer" reads worse than the
+// thing it names. The standard library does the same where the verb is awkward:
+// see math/rand.Source.
+type UserSource interface {
+	EnsureUser(ctx context.Context, subject string) (domain.User, error)
 }
 
 // RequireAuth rejects any request that did not arrive with a verified Clerk
@@ -27,7 +32,7 @@ type Resolver interface {
 // It exists because clerkhttp.WithHeaderAuthorization does not reject anything.
 // It attaches claims when a token verifies and otherwise passes the request
 // through untouched, so mounting it alone leaves an endpoint open.
-func RequireAuth(r Resolver) func(http.Handler) http.Handler {
+func RequireAuth(users UserSource) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			claims, ok := clerksdk.SessionClaimsFromContext(req.Context())
@@ -36,9 +41,9 @@ func RequireAuth(r Resolver) func(http.Handler) http.Handler {
 				return
 			}
 
-			user, err := r.Resolve(req.Context(), claims.Subject)
+			user, err := users.EnsureUser(req.Context(), claims.Subject)
 			if err != nil {
-				// WriteInternal, not Write with the cause. Resolve wraps
+				// WriteInternal, not Write with the cause. EnsureUser wraps
 				// whatever the driver or Clerk's SDK returned, and those carry
 				// host names, ports and table names.
 				httperr.WriteInternal(w)

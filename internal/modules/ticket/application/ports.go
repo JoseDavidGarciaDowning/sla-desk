@@ -136,7 +136,13 @@ type Repository interface {
 	// The read methods scope by requester in the query rather than filtering
 	// afterwards. A forgotten check in Go must not be enough to leak another
 	// customer's ticket (docs/spec.md §4.3).
-	ListByRequester(ctx context.Context, f ListFilter) ([]domain.Ticket, error)
-	GetForRequester(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error)
+	//
+	// All three share the ForRequester suffix and differ only in what they
+	// return. They used to read ListByRequester, GetForRequester and
+	// HistoryForRequester: two prepositions for one relationship, and a Get
+	// prefix on the only one that had it. Which was which had to be remembered
+	// rather than worked out.
+	ListForRequester(ctx context.Context, f ListFilter) ([]domain.Ticket, error)
+	OneForRequester(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error)
 	HistoryForRequester(ctx context.Context, ticketID, requesterID uuid.UUID) ([]domain.HistoryEntry, error)
 }

@@ -28,7 +28,7 @@ const WebhookPath = "/api/webhooks/clerk"
 const maxWebhookBody = 1 << 20 // 1 MiB
 
 // Provisioner is the slice of the module this handler needs. Declared here for
-// the same reason Resolver is: a webhook test should exercise signature
+// the same reason UserSource is: a webhook test should exercise signature
 // verification and payload handling without a database behind it.
 type Provisioner interface {
 	Provision(ctx context.Context, clerkUserID string, id domain.Identity) (domain.User, error)
