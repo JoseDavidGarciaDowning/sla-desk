@@ -1,11 +1,16 @@
 # ADR 0007: Resolving a policy is I/O; computing with one is not
 
-- **Status:** Accepted
+- **Status:** Accepted, amended in part by [ADR 0010](./0010-a-name-that-lies-is-a-bug.md)
 - **Date:** 2026-08-04
 - **Context:** Refactor to a modular monolith, PR 4 of 6
 - **Related:** [ADR 0001](./0001-single-calculation-path-for-the-sla-clock.md),
   [ADR 0005](./0005-modules-do-not-share-a-vocabulary.md),
   [ADR 0006](./0006-a-module-owns-its-generated-queries.md)
+
+> **Amended in part.** The type called `Calculator` below is now `application.Policies`, in
+> `policies.go`, and its `ForPolicy` method is now `ByID`. The decision this ADR records is
+> unchanged and is in fact the reason for the rename: a type that deliberately does not
+> wrap the arithmetic should not be named after a calculation. See ADR 0010.
 
 ## Context
 
