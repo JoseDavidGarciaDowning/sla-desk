@@ -29,6 +29,8 @@ type fakeStore struct {
 	upserts        int
 	upsertClerkID  string
 	upsertIdentity domain.Identity
+	upsertRole     domain.Role
+	grants         int
 }
 
 var _ application.UserRepository = (*fakeStore)(nil)
@@ -40,14 +42,22 @@ func (f *fakeStore) ByClerkID(_ context.Context, _ string) (domain.User, error) 
 	return f.user, nil
 }
 
-func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Identity) (domain.User, error) {
+func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Identity, role domain.Role) (domain.User, error) {
 	f.upserts++
 	f.upsertClerkID = clerkUserID
 	f.upsertIdentity = id
+	f.upsertRole = role
 	if f.upsertErr != nil {
 		return domain.User{}, f.upsertErr
 	}
 	return f.user, nil
+}
+
+func (f *fakeStore) GrantRole(_ context.Context, _ string, role domain.Role) (domain.User, error) {
+	f.grants++
+	granted := f.user
+	granted.Role = role
+	return granted, nil
 }
 
 func uuidOf(t *testing.T, s string) uuid.UUID {
@@ -66,7 +76,9 @@ func requireAuth(users application.UserRepository, ids application.IdentityProvi
 	if users == nil && ids == nil {
 		return identityhttp.RequireAuth(nil)
 	}
-	return identityhttp.RequireAuth(application.NewService(users, ids))
+	// The zero RoleGrants grants nobody, which is what these tests want: they
+	// are about rejecting a request, not about who is privileged.
+	return identityhttp.RequireAuth(application.NewService(users, ids, domain.RoleGrants{}))
 }
 
 // withClaims builds the request clerkhttp.WithHeaderAuthorization would have

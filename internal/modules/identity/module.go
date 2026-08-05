@@ -10,6 +10,7 @@ import (
 	nethttp "net/http"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres/identitydb"
@@ -24,17 +25,28 @@ import (
 type Config struct {
 	Clerk         clerk.Config
 	WebhookSecret string
+
+	// AgentClerkUserIDs and AdminClerkUserIDs are the Clerk subjects the
+	// operator grants a privileged role to. Empty means nobody, which is how
+	// slice 1 ran.
+	//
+	// They arrive as raw lists rather than as a built domain.RoleGrants so that
+	// the composition root does not have to know this module's domain types,
+	// and so a contradictory pair fails inside the module that owns the rule.
+	AgentClerkUserIDs []string
+	AdminClerkUserIDs []string
 }
 
 // Module is everything this module offers.
 type Module struct {
 	Service *application.Service
 
-	cfg Config
+	grants domain.RoleGrants
+	cfg    Config
 }
 
 // New builds the module against a database handle. This is the production path.
-func New(db identitydb.DBTX, cfg Config) *Module {
+func New(db identitydb.DBTX, cfg Config) (*Module, error) {
 	return NewWith(postgres.NewUserRepository(db), clerk.NewIdentityProvider(cfg.Clerk), cfg)
 }
 
@@ -43,11 +55,32 @@ func New(db identitydb.DBTX, cfg Config) *Module {
 // It exists so a router can be assembled in a test without a database or a live
 // Clerk instance, while still running the real middleware and the real service.
 // A test that swapped those out would stop proving that a route is protected.
-func NewWith(users application.UserRepository, ids application.IdentityProvider, cfg Config) *Module {
-	return &Module{
-		Service: application.NewService(users, ids),
-		cfg:     cfg,
+//
+// It returns an error because a subject listed as both an agent and an admin
+// has no defensible answer, and resolving it by map iteration order would make
+// a deployed role depend on nothing anyone can read. Same rule as an unusable
+// webhook secret: a configuration that cannot be obeyed stops the process here,
+// not later and not per request.
+func NewWith(users application.UserRepository, ids application.IdentityProvider, cfg Config) (*Module, error) {
+	grants, err := domain.NewRoleGrants(cfg.AgentClerkUserIDs, cfg.AdminClerkUserIDs)
+	if err != nil {
+		return nil, err
 	}
+
+	return &Module{
+		Service: application.NewService(users, ids, grants),
+		grants:  grants,
+		cfg:     cfg,
+	}, nil
+}
+
+// GrantedCounts is how many subjects hold each privileged role, for a startup
+// log line.
+//
+// Counts and not identifiers: a log naming who the agents are is an inventory
+// of privileged accounts, and logs travel further than the database does.
+func (m *Module) GrantedCounts() (agents, admins int) {
+	return m.grants.CountOf(domain.RoleAgent), m.grants.CountOf(domain.RoleAdmin)
 }
 
 // Authenticate is the middleware chain every protected route must sit behind.

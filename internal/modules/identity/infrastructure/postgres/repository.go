@@ -46,10 +46,12 @@ func (r *UserRepository) ByClerkID(ctx context.Context, clerkUserID string) (dom
 
 // Upsert is the idempotent provisioning write from docs/spec.md §4.5.
 //
-// The role is not a parameter, and that is the point: the query writes it as a
-// literal on insert and omits it from the conflict clause, so neither a webhook
-// payload nor a first request can create an agent or demote one.
-func (r *UserRepository) Upsert(ctx context.Context, clerkUserID string, id domain.Identity) (domain.User, error) {
+// The role applies to the insert only — the query omits it from the conflict
+// clause — so refreshing an existing user's name can change neither what they
+// are nor what they may do. What fills the parameter is our own configuration
+// and nothing else: a webhook payload has no role field to be read from, and a
+// token claim never reaches this package.
+func (r *UserRepository) Upsert(ctx context.Context, clerkUserID string, id domain.Identity, role domain.Role) (domain.User, error) {
 	// An empty name becomes NULL rather than a blank string. Clerk often holds
 	// no name at all — a user who signed up with an email and a password has
 	// given us nothing else.
@@ -62,9 +64,31 @@ func (r *UserRepository) Upsert(ctx context.Context, clerkUserID string, id doma
 		ClerkUserID: clerkUserID,
 		Email:       id.Email,
 		Name:        name,
+		Role:        role,
 	})
 	if err != nil {
 		return domain.User{}, fmt.Errorf("provisioning the user: %w", err)
+	}
+	return userFrom(row), nil
+}
+
+// GrantRole raises an existing user to a granted role.
+//
+// The query refuses to write 'customer', so this method structurally cannot
+// demote anyone — see the SQL for why that guarantee is there rather than in
+// the caller. A refused write returns no rows, which reads exactly like a
+// missing user, and both surface as ErrNoSuchUser: in either case nothing was
+// written, and handing back a row would say otherwise.
+func (r *UserRepository) GrantRole(ctx context.Context, clerkUserID string, role domain.Role) (domain.User, error) {
+	row, err := r.q.GrantUserRole(ctx, identitydb.GrantUserRoleParams{
+		ClerkUserID: clerkUserID,
+		Role:        role,
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return domain.User{}, application.ErrNoSuchUser
+	case err != nil:
+		return domain.User{}, fmt.Errorf("granting the role: %w", err)
 	}
 	return userFrom(row), nil
 }

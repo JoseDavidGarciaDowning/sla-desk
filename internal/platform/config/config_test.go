@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -71,7 +72,7 @@ func TestLoad_RefusesToStartWithoutADatabaseURL(t *testing.T) {
 	if !errors.Is(err, ErrMissingRequired) {
 		t.Fatalf("error = %v, want one wrapping %v", err, ErrMissingRequired)
 	}
-	if got != (Config{}) {
+	if !reflect.DeepEqual(got, Config{}) {
 		t.Errorf("config = %+v, want the zero value — a rejected config must yield nothing usable", got)
 	}
 }
@@ -111,7 +112,7 @@ func TestLoad_RefusesToStartWithoutTheClerkSecrets(t *testing.T) {
 			if !errors.Is(err, ErrMissingRequired) {
 				t.Fatalf("error = %v, want one wrapping %v", err, ErrMissingRequired)
 			}
-			if got != (Config{}) {
+			if !reflect.DeepEqual(got, Config{}) {
 				t.Errorf("config = %+v, want the zero value", got)
 			}
 		})
@@ -135,4 +136,82 @@ func TestLoad_AuthorizedPartyFallsBackToTheCORSOrigin(t *testing.T) {
 	if want := "https://sla-desk.vercel.app"; got.ClerkAuthorizedParty != want {
 		t.Errorf("ClerkAuthorizedParty = %q, want it to fall back to %q", got.ClerkAuthorizedParty, want)
 	}
+}
+
+// The two grant lists are how someone becomes an agent (docs/spec.md §12.4).
+// They are read from the environment rather than seeded by a migration, because
+// the subject differs between Clerk's development and production instances and
+// the users row does not exist until that person signs up.
+func TestLoad_ReadsTheRoleGrantLists(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/sladesk")
+	t.Setenv("CLERK_SECRET_KEY", "sk_test_key")
+	t.Setenv("CLERK_WEBHOOK_SECRET", "whsec_test")
+	t.Setenv("AGENT_CLERK_USER_IDS", "user_2agent,user_3agent")
+	t.Setenv("ADMIN_CLERK_USER_IDS", "user_2admin")
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned an unexpected error: %v", err)
+	}
+
+	if want := []string{"user_2agent", "user_3agent"}; !equalStrings(got.AgentClerkUserIDs, want) {
+		t.Errorf("AgentClerkUserIDs = %q, want %q", got.AgentClerkUserIDs, want)
+	}
+	if want := []string{"user_2admin"}; !equalStrings(got.AdminClerkUserIDs, want) {
+		t.Errorf("AdminClerkUserIDs = %q, want %q", got.AdminClerkUserIDs, want)
+	}
+}
+
+// An unconfigured deploy must have no agents. Empty is the safe answer, not an
+// error, because the API is fully functional without a single agent — slice 1
+// shipped that way.
+func TestLoad_RoleGrantListsAreEmptyByDefault(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/sladesk")
+	t.Setenv("CLERK_SECRET_KEY", "sk_test_key")
+	t.Setenv("CLERK_WEBHOOK_SECRET", "whsec_test")
+	t.Setenv("AGENT_CLERK_USER_IDS", "")
+	t.Setenv("ADMIN_CLERK_USER_IDS", "")
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned an unexpected error: %v", err)
+	}
+
+	if len(got.AgentClerkUserIDs) != 0 {
+		t.Errorf("AgentClerkUserIDs = %q, want empty", got.AgentClerkUserIDs)
+	}
+	if len(got.AdminClerkUserIDs) != 0 {
+		t.Errorf("AdminClerkUserIDs = %q, want empty", got.AdminClerkUserIDs)
+	}
+}
+
+// Whitespace around a comma is what a human types, and a trailing comma is what
+// is left behind after deleting the last entry. Neither may become a subject
+// that matches nobody — or worse, an empty string that matches a row.
+func TestLoad_RoleGrantListsTolerateHumanFormatting(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://localhost/sladesk")
+	t.Setenv("CLERK_SECRET_KEY", "sk_test_key")
+	t.Setenv("CLERK_WEBHOOK_SECRET", "whsec_test")
+	t.Setenv("AGENT_CLERK_USER_IDS", "  user_2agent ,, user_3agent  ,  ")
+
+	got, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned an unexpected error: %v", err)
+	}
+
+	if want := []string{"user_2agent", "user_3agent"}; !equalStrings(got.AgentClerkUserIDs, want) {
+		t.Errorf("AgentClerkUserIDs = %q, want %q", got.AgentClerkUserIDs, want)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }

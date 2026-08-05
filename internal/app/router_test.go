@@ -32,7 +32,7 @@ import (
 
 func testRouter(t *testing.T) http.Handler {
 	t.Helper()
-	h, err := NewRouter(testConfig(), Deps{Identity: testIdentity(testConfig(), routerStubUsers{}), Tickets: testTickets()})
+	h, err := NewRouter(testConfig(), Deps{Identity: testIdentity(t, testConfig(), routerStubUsers{}), Tickets: testTickets()})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestRouterRefusesAnUnusableWebhookSecret(t *testing.T) {
 	// The identity module is supplied, and built from the same bad config, so
 	// this fails for the reason under test. Passing Deps{} would now fail on
 	// the missing module instead and the test would pass having proved nothing.
-	_, err := NewRouter(cfg, Deps{Identity: testIdentity(cfg, routerStubUsers{}), Tickets: testTickets()})
+	_, err := NewRouter(cfg, Deps{Identity: testIdentity(t, cfg, routerStubUsers{}), Tickets: testTickets()})
 	if err == nil {
 		t.Fatal("expected an error — a bad secret must stop the process at startup")
 	}
@@ -208,7 +208,7 @@ func TestASignedRequestReachesTheHandlerThroughTheRouter(t *testing.T) {
 	caller := identitydomain.User{ClerkUserID: "user_router", Email: "router@example.test", Role: identitydomain.RoleCustomer}
 
 	router, err := NewRouter(cfg, Deps{
-		Identity: testIdentity(cfg, routerStubUsers{user: caller}),
+		Identity: testIdentity(t, cfg, routerStubUsers{user: caller}),
 		Tickets:  ticket.NewWith(stubTicketRepo{}, stubSLA{}),
 	})
 	if err != nil {
@@ -269,23 +269,32 @@ func (s routerStubUsers) ByClerkID(context.Context, string) (identitydomain.User
 	return s.user, nil
 }
 
-func (s routerStubUsers) Upsert(context.Context, string, identitydomain.Identity) (identitydomain.User, error) {
+func (s routerStubUsers) Upsert(context.Context, string, identitydomain.Identity, identitydomain.Role) (identitydomain.User, error) {
+	return s.user, nil
+}
+
+func (s routerStubUsers) GrantRole(context.Context, string, identitydomain.Role) (identitydomain.User, error) {
 	return s.user, nil
 }
 
 // testIdentity builds the identity module the way NewRouter's caller does, so a
 // router test exercises the real middleware chain rather than a stand-in for
 // it. Only the users table and the JWKS endpoint are replaced.
-func testIdentity(cfg config.Config, users identityapp.UserRepository) *identity.Module {
+func testIdentity(tb testing.TB, cfg config.Config, users identityapp.UserRepository) *identity.Module {
+	tb.Helper()
 	clerkCfg := clerk.Config{
 		SecretKey:       cfg.ClerkSecretKey,
 		AuthorizedParty: cfg.ClerkAuthorizedParty,
 		APIURL:          cfg.ClerkAPIURL,
 	}
-	return identity.NewWith(users, clerk.NewIdentityProvider(clerkCfg), identity.Config{
+	m, err := identity.NewWith(users, clerk.NewIdentityProvider(clerkCfg), identity.Config{
 		Clerk:         clerkCfg,
 		WebhookSecret: cfg.ClerkWebhookSecret,
 	})
+	if err != nil {
+		tb.Fatalf("identity.NewWith: %v", err)
+	}
+	return m
 }
 
 // stubTicketRepo and stubSLA let the router be built with the real ticket

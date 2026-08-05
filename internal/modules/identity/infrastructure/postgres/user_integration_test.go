@@ -116,7 +116,7 @@ func TestDuplicateEmailIsAllowed(t *testing.T) {
 	ctx, _, repo := begin(t)
 
 	for _, id := range []string{"user_dup_a", "user_dup_b"} {
-		if _, err := repo.Upsert(ctx, id, domain.Identity{Email: "shared@example.test"}); err != nil {
+		if _, err := repo.Upsert(ctx, id, domain.Identity{Email: "shared@example.test"}, domain.RoleCustomer); err != nil {
 			t.Fatalf("upsert %s: %v", id, err)
 		}
 	}
@@ -131,7 +131,7 @@ func TestUpsertIsIdempotent(t *testing.T) {
 	first, err := repo.Upsert(ctx, "user_race_test", domain.Identity{
 		Email: "before@example.test",
 		Name:  "Before",
-	})
+	}, domain.RoleCustomer)
 	if err != nil {
 		t.Fatalf("first upsert: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestUpsertIsIdempotent(t *testing.T) {
 	second, err := repo.Upsert(ctx, "user_race_test", domain.Identity{
 		Email: "after@example.test",
 		Name:  "After",
-	})
+	}, domain.RoleCustomer)
 	if err != nil {
 		t.Fatalf("second upsert: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestUpsertIsIdempotent(t *testing.T) {
 func TestUpsertStoresAMissingNameAsNull(t *testing.T) {
 	ctx, tx, repo := begin(t)
 
-	user, err := repo.Upsert(ctx, "user_no_name", domain.Identity{Email: "noname@example.test"})
+	user, err := repo.Upsert(ctx, "user_no_name", domain.Identity{Email: "noname@example.test"}, domain.RoleCustomer)
 	if err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
@@ -203,12 +203,21 @@ func TestUpsertDoesNotDemoteAnExistingAgent(t *testing.T) {
 		t.Fatalf("seeding an agent: %v", err)
 	}
 
-	got, err := repo.Upsert(ctx, "user_agent", domain.Identity{Email: "agent@example.test", Name: "Agent"})
+	// The role argument says 'customer', which is the demotion under test:
+	// since slice 2 it is a parameter rather than a literal, so the guarantee
+	// now has to survive a caller passing the wrong thing.
+	got, err := repo.Upsert(ctx, "user_agent",
+		domain.Identity{Email: "refreshed@example.test", Name: "Agent"}, domain.RoleCustomer)
 	if err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 	if got.Role != domain.RoleAgent {
 		t.Errorf("role = %q, want agent — the upsert demoted an existing agent", got.Role)
+	}
+	// The rest of the update must still apply. A conflict clause that protected
+	// the role by doing nothing at all would pass the assertion above.
+	if got.Email != "refreshed@example.test" {
+		t.Errorf("email = %q, want the update to still have applied", got.Email)
 	}
 }
 
@@ -279,7 +288,7 @@ func TestConcurrentUpsertsCreateExactlyOneUser(t *testing.T) {
 			user, err := repo.Upsert(ctx, clerkID, domain.Identity{
 				Email: "race@example.test",
 				Name:  "Racer",
-			})
+			}, domain.RoleCustomer)
 			ids[i], errs[i] = user.ID, err
 		}()
 	}
@@ -308,5 +317,109 @@ func TestConcurrentUpsertsCreateExactlyOneUser(t *testing.T) {
 		if id != ids[0] {
 			t.Errorf("racer %d got id %v, racer 0 got %v", i, id, ids[0])
 		}
+	}
+}
+
+// --- Role grants (slice 2, T17) ------------------------------------------
+//
+// These prove the guarantees live in the SQL rather than in the caller. Every
+// one of them writes through the repository the application layer actually
+// holds, so a rule that only exists in an if statement upstream would not be
+// enough to make them pass.
+
+// The grant has to land on the very first write. Provisioning a listed agent as
+// a customer and promoting them later would leave a window in which they sign
+// in and are refused the routes they were granted.
+func TestUpsertWritesTheGrantedRoleOnInsert(t *testing.T) {
+	ctx, _, repo := begin(t)
+
+	user, err := repo.Upsert(ctx, "user_granted_agent",
+		domain.Identity{Email: "agent@example.test", Name: "An Agent"}, domain.RoleAgent)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	if user.Role != domain.RoleAgent {
+		t.Errorf("Role = %q, want %q", user.Role, domain.RoleAgent)
+	}
+}
+
+// The ordinary case: you cannot know a Clerk subject until that person has
+// signed up, so a grant almost always arrives after the row exists.
+func TestGrantRolePromotesAnExistingCustomer(t *testing.T) {
+	ctx, _, repo := begin(t)
+
+	before, err := repo.Upsert(ctx, "user_to_promote",
+		domain.Identity{Email: "promote@example.test"}, domain.RoleCustomer)
+	if err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	after, err := repo.GrantRole(ctx, "user_to_promote", domain.RoleAgent)
+	if err != nil {
+		t.Fatalf("GrantRole: %v", err)
+	}
+
+	if after.Role != domain.RoleAgent {
+		t.Errorf("Role = %q, want %q", after.Role, domain.RoleAgent)
+	}
+	if after.ID != before.ID {
+		t.Errorf("ID changed from %s to %s — the row was replaced, not promoted", before.ID, after.ID)
+	}
+}
+
+// The load-bearing test of T17. The predicate in GrantUserRole is what makes a
+// demotion unrepresentable: there is no argument to this method that takes a
+// role away, so an id removed from the grant list — or mistyped in it — cannot
+// strip an agent mid-shift. If the predicate is ever deleted, this fails.
+func TestGrantRoleStructurallyCannotDemote(t *testing.T) {
+	ctx, _, repo := begin(t)
+
+	if _, err := repo.Upsert(ctx, "user_agent_kept",
+		domain.Identity{Email: "kept@example.test"}, domain.RoleAgent); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	_, err := repo.GrantRole(ctx, "user_agent_kept", domain.RoleCustomer)
+	if !errors.Is(err, application.ErrNoSuchUser) {
+		t.Fatalf("GrantRole error = %v, want ErrNoSuchUser — nothing may be written", err)
+	}
+
+	still, err := repo.ByClerkID(ctx, "user_agent_kept")
+	if err != nil {
+		t.Fatalf("ByClerkID: %v", err)
+	}
+	if still.Role != domain.RoleAgent {
+		t.Errorf("Role = %q, want the agent role to have survived the attempt", still.Role)
+	}
+}
+
+// An admin moved into the agent list is a real reconfiguration, not a
+// demotion, and the predicate must not block it — it only refuses 'customer'.
+func TestGrantRoleMovesAUserBetweenPrivilegedRoles(t *testing.T) {
+	ctx, _, repo := begin(t)
+
+	if _, err := repo.Upsert(ctx, "user_moving",
+		domain.Identity{Email: "moving@example.test"}, domain.RoleAgent); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	after, err := repo.GrantRole(ctx, "user_moving", domain.RoleAdmin)
+	if err != nil {
+		t.Fatalf("GrantRole: %v", err)
+	}
+	if after.Role != domain.RoleAdmin {
+		t.Errorf("Role = %q, want %q", after.Role, domain.RoleAdmin)
+	}
+}
+
+// A grant for someone who never signed up writes nothing and says so. The
+// caller must not receive a row implying a user exists.
+func TestGrantRoleReportsAnUnknownSubject(t *testing.T) {
+	ctx, _, repo := begin(t)
+
+	_, err := repo.GrantRole(ctx, "user_never_seen", domain.RoleAgent)
+	if !errors.Is(err, application.ErrNoSuchUser) {
+		t.Errorf("GrantRole error = %v, want ErrNoSuchUser", err)
 	}
 }

@@ -9,7 +9,7 @@ make it pass. Numbering continues from slice 1, which ended at T16.
 
 ## Phase 1: Becoming an agent
 
-### T17: Role bootstrap from server config
+### T17: Role bootstrap from server config ✅
 
 **Description:** Give the system a way for a `users` row to hold `agent` or `admin`. The
 list of Clerk subjects that get promoted comes from the process environment and is applied
@@ -17,37 +17,79 @@ by the identity module when it writes the row — never from a token, never from
 payload. Resolves spec §12.4.
 
 **Acceptance criteria:**
-- [ ] `AGENT_CLERK_USER_IDS` and `ADMIN_CLERK_USER_IDS` read by `internal/platform/config`,
+- [x] `AGENT_CLERK_USER_IDS` and `ADMIN_CLERK_USER_IDS` read by `internal/platform/config`,
       comma-separated, **empty by default** — an unconfigured deploy has no agents
-- [ ] A subject in a list lands as that role whether the row is written by the Clerk webhook
+- [x] A subject in a list lands as that role whether the row is written by the Clerk webhook
       or by the lazy upsert in `RequireAuth` — both go through `EnsureUser`, so there is one
       place to change and no way for the two paths to disagree
-- [ ] An existing `customer` row whose subject is listed is promoted on the next
+- [x] An existing `customer` row whose subject is listed is promoted on the next
       `EnsureUser`, not only at creation
-- [ ] A subject in **both** lists fails the boot with a named error, rather than resolving by
-      map iteration order
-- [ ] Removing a subject from the list does **not** demote — asserted, because it is a
-      decision (plan §A) and not an oversight
-- [ ] Startup logs the **count** in each list, never the ids
+- [x] A subject in **both** lists fails the boot with a named error, rather than resolving by
+      map iteration order — the error names the subject, so an operator knows which entry to remove
+- [x] Removing a subject from the list does **not** demote — **enforced by the SQL**, see below
+- [x] Startup logs the **count** in each list, never the ids
 
 **Verification:**
-- [ ] Integration: webhook delivery for a listed subject writes `role = 'agent'`; for an
-      unlisted one writes `customer`
-- [ ] Integration: a `customer` row already present, then listed, is `agent` after one
-      `EnsureUser` — and its `created_at` is unchanged, proving it was updated not recreated
-- [ ] A `user.updated` payload carrying `"role": "admin"` still produces `agent`, because the
-      query writes the role as a literal
-- [ ] Config unit tests for: empty, one id, several, whitespace around commas, duplicates,
-      the same id in both lists
-- [ ] Mutations: dropping the promotion from the upsert; applying it only on insert and not
-      on conflict; reading the list from the request instead of the config — each turns a
-      test red
+- [x] Integration, against a real Postgres: a granted subject lands as `agent` on insert; an
+      existing `customer` is promoted and keeps **the same row id**, proving it was updated
+      rather than recreated
+- [x] Integration: an agent survives an upsert that passes `customer`, and the rest of that
+      update still applies — a conflict clause that protected the role by doing nothing at
+      all would have passed the first assertion alone
+- [x] Integration: `GrantRole` moves an agent to admin, refuses a demotion, and reports an
+      unknown subject as `ErrNoSuchUser`
+- [x] Unit: 8 domain cases and 3 config cases — empty, one id, several, whitespace and
+      trailing commas, a repeat within one list, the same id in both, and the zero value
+- [x] Unit: the service promotes an existing customer, does **not** write when the role
+      already matches, and does **not** demote when the list is emptied
+- [x] **7 mutations, 7 dead**: `EnsureUser` skipping the grant on an existing row; `applyGrant`
+      losing the already-matching guard; `NewRoleGrants` accepting a subject in both lists;
+      `splitList` not trimming; `GrantUserRole` without its predicate; `Upsert` writing the
+      literal instead of the parameter; the `ON CONFLICT` clause writing the role
+- [x] `make check` and `make test-int` clean
 
 **Dependencies:** None
-**Files:** `internal/platform/config/config.go`, `internal/modules/identity/application/service.go`,
-`internal/modules/identity/infrastructure/postgres/queries/users.sql`, `internal/modules/identity/module.go`,
-`cmd/api/main.go`, plus tests
+**Files:** `internal/modules/identity/domain/grants.go`, `internal/modules/identity/application/service.go`,
+`internal/modules/identity/infrastructure/postgres/queries/users.sql`,
+`internal/modules/identity/infrastructure/postgres/repository.go`, `internal/modules/identity/module.go`,
+`internal/platform/config/config.go`, `cmd/api/main.go`, `docs/local-development.md`, plus tests
 **Scope:** M
+
+**Decisions taken during T17:**
+
+- **The no-demotion rule is a SQL predicate, not an `if`.** The card asked for it to be
+  *asserted*; it is enforced instead. `GrantUserRole` carries `AND @role::text <> 'customer'`,
+  so there is no argument to the method that takes a role away. A rule that lives in a caller
+  is a rule the next caller can forget to write, and this one protects against a typo in an
+  environment variable silently stripping an agent mid-shift.
+- **Promotion is a second query, not a widened upsert.** The role stays out of the upsert's
+  conflict clause, which is the guarantee that existed before slice 2 turned it into a
+  parameter. Refreshing someone's name must not be able to change what they may do, in either
+  direction, and `Upsert` is the method the webhook calls with whatever Clerk sent.
+- **`identity.New` and `NewWith` now return an error.** A subject in both lists has no
+  defensible winner, and Go's map iteration order is deliberately random — resolving it
+  silently would make a deployed role depend on something no reader can see and no test can
+  pin. Same rule as the Clerk webhook secret: a configuration that cannot be obeyed stops the
+  process at startup.
+- **`applyGrant` has two early returns and neither is an optimisation.** Skipping when the
+  role already matches is what stops every request an agent makes from becoming a write —
+  `EnsureUser` runs on all of them. Skipping when the grant is `customer` is the no-demotion
+  rule restated in Go, so the SQL predicate is never even reached in the ordinary case.
+- **`domain.RoleGrants` has a usable zero value.** A caller who forgets to build one gets
+  "nobody is privileged" rather than a nil-map panic on the first request.
+
+**Two things this cost, both worth recording:**
+
+- **Widening `UserRepository` broke every stub.** Four test doubles across three packages
+  needed the new method. That is the price of a consumer-declared interface and it is the
+  right price — the compiler found all of them, and each one had to state what it does when
+  asked to grant a role.
+- **`Config` stopped being comparable.** Two existing tests asserted `got != Config{}`, which
+  no longer compiles once the struct holds a slice. They now use `reflect.DeepEqual`, and the
+  assertion they were making is unchanged.
+
+**Left for the human:** `.env.example` needs the two new variables added by hand. A local
+permission rule keeps the assistant out of `.env*`, the same rule recorded in T1.
 
 ---
 
