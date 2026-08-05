@@ -213,7 +213,7 @@ func TestUpsertDoesNotDemoteAnExistingAgent(t *testing.T) {
 }
 
 // The repository translates the driver's "no rows" into the module's own
-// sentinel. Resolve branches on it to decide whether to provision, so a
+// sentinel. EnsureUser branches on it to decide whether to provision, so a
 // translation that stopped happening would turn every first request into a 500
 // instead of a signup.
 func TestUnknownSubjectIsReportedAsNoSuchUser(t *testing.T) {

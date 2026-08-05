@@ -311,11 +311,11 @@ func (stubTicketRepo) Transition(context.Context, ticketapp.StatusChange, ticket
 
 func (stubTicketRepo) PolicyIDOf(context.Context, uuid.UUID) (int64, error) { return 1, nil }
 
-func (stubTicketRepo) ListByRequester(context.Context, ticketapp.ListFilter) ([]ticketdomain.Ticket, error) {
+func (stubTicketRepo) ListForRequester(context.Context, ticketapp.ListFilter) ([]ticketdomain.Ticket, error) {
 	return nil, nil
 }
 
-func (stubTicketRepo) GetForRequester(context.Context, uuid.UUID, uuid.UUID) (ticketdomain.Ticket, error) {
+func (stubTicketRepo) OneForRequester(context.Context, uuid.UUID, uuid.UUID) (ticketdomain.Ticket, error) {
 	return ticketdomain.Ticket{}, nil
 }
 

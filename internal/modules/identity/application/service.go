@@ -51,15 +51,20 @@ func NewService(users UserRepository, ids IdentityProvider) *Service {
 	return &Service{users: users, ids: ids}
 }
 
-// Resolve turns a verified Clerk subject into one of our users, creating the
+// EnsureUser turns a verified Clerk subject into one of our users, creating the
 // row if this is the first time we have seen them.
+//
+// Named for the write it may perform, not for the read it usually is. On the
+// miss it calls Clerk over the network and inserts a row, and the middleware
+// runs it on every authenticated request — so a caller reasoning about cost or
+// about side effects has to be told, by the name, that both are on the table.
 //
 // This is the fallback half of docs/spec.md §4.5. The webhook is the primary
 // path, but the browser holds a valid token the instant signup completes and
 // the webhook may still be seconds away, so every new user's first request
 // would otherwise fail. Both paths end at the same idempotent upsert; whichever
 // arrives first wins and the other is a no-op.
-func (s *Service) Resolve(ctx context.Context, subject string) (domain.User, error) {
+func (s *Service) EnsureUser(ctx context.Context, subject string) (domain.User, error) {
 	user, err := s.users.ByClerkID(ctx, subject)
 	if err == nil {
 		return user, nil

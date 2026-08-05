@@ -25,7 +25,7 @@ import (
 // strings and mean different things, so the translation is real — see
 // docs/adr/0005.
 type SLAPolicies struct {
-	Calculator *slaapp.Calculator
+	Policies *slaapp.Policies
 }
 
 var _ ticketapp.SLAPolicies = SLAPolicies{}
@@ -36,15 +36,18 @@ func (s SLAPolicies) ForPriority(ctx context.Context, p ticketdomain.Priority) (
 	// ticket is, the other is the key a budget is filed under. Both are
 	// constrained by a CHECK in their own module's table, so the conversion
 	// cannot widen either vocabulary.
-	policy, err := s.Calculator.ForPriority(ctx, sladomain.Priority(p))
+	policy, err := s.Policies.ForPriority(ctx, sladomain.Priority(p))
 	if err != nil {
 		return nil, translateSLAError(err)
 	}
 	return slaClock{policy: policy}, nil
 }
 
+// ForPolicy keeps its name: it takes a policy id and returns a clock, so both
+// ends of the trip are in the signature. Only the SLA module's own method, which
+// took a policy id and returned a policy, was renamed to ByID.
 func (s SLAPolicies) ForPolicy(ctx context.Context, id int64) (ticketapp.SLAClock, error) {
-	policy, err := s.Calculator.ForPolicy(ctx, id)
+	policy, err := s.Policies.ByID(ctx, id)
 	if err != nil {
 		return nil, translateSLAError(err)
 	}

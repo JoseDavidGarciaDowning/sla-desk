@@ -87,7 +87,7 @@ func newRepoFixture(t *testing.T) repoFixture {
 	// had to rebuild the translation by hand — importing the SLA module from
 	// inside ticket, which depguard now refuses. Here it is one import, and the
 	// test exercises the very code cmd/api wires.
-	sla := app.SLAPolicies{Calculator: slaapp.NewCalculator(slapostgres.NewPolicyRepository(pool))}
+	sla := app.SLAPolicies{Policies: slaapp.NewPolicies(slapostgres.NewPolicyRepository(pool))}
 
 	return repoFixture{
 		ctx:       ctx,

@@ -42,27 +42,36 @@ type PolicyRepository interface {
 	ByID(ctx context.Context, id int64) (domain.Policy, error)
 }
 
-// Calculator hands out resolved policies.
-type Calculator struct {
-	policies PolicyRepository
+// Policies hands out stored SLA policies.
+//
+// Called Policies rather than Calculator, which is what it was named first: no
+// method here computes anything. The arithmetic is on domain.Policy, and the
+// package comment above says so — a type named for a calculation it does not
+// perform sends whoever goes looking for the deadline maths to the wrong file.
+type Policies struct {
+	repo PolicyRepository
 }
 
-func NewCalculator(policies PolicyRepository) *Calculator {
-	return &Calculator{policies: policies}
+func NewPolicies(repo PolicyRepository) *Policies {
+	return &Policies{repo: repo}
 }
 
 // ForPriority resolves the policy that serves a priority.
-func (c *Calculator) ForPriority(ctx context.Context, p domain.Priority) (domain.Policy, error) {
-	policy, err := c.policies.ActiveByPriority(ctx, p)
+func (p *Policies) ForPriority(ctx context.Context, prio domain.Priority) (domain.Policy, error) {
+	policy, err := p.repo.ActiveByPriority(ctx, prio)
 	if err != nil {
-		return domain.Policy{}, fmt.Errorf("resolving the policy for %s: %w", p, err)
+		return domain.Policy{}, fmt.Errorf("resolving the policy for %s: %w", prio, err)
 	}
 	return policy, nil
 }
 
-// ForPolicy reads the policy something was snapshotted with.
-func (c *Calculator) ForPolicy(ctx context.Context, id int64) (domain.Policy, error) {
-	policy, err := c.policies.ByID(ctx, id)
+// ByID reads the policy something was snapshotted with.
+//
+// ByID rather than ForPolicy, which took a policy id and returned a policy and
+// so named neither end of the trip. It matches PolicyRepository.ByID, which had
+// the better name all along.
+func (p *Policies) ByID(ctx context.Context, id int64) (domain.Policy, error) {
+	policy, err := p.repo.ByID(ctx, id)
 	if err != nil {
 		return domain.Policy{}, fmt.Errorf("reading policy %d: %w", id, err)
 	}
