@@ -44,6 +44,18 @@ jobs:
       - name: Lint
         run: make lint
 
+      # Named as its own step so an architecture violation is legible in the
+      # checks list rather than buried in a test log. `go test ./...` below runs
+      # the same package again, which costs a second and means a green suite is
+      # green with the boundaries intact even if someone edits this file.
+      #
+      # depguard, in the lint step above, is the fast half of the same rules —
+      # it catches a direct illegal import. This half follows the import graph,
+      # so it catches a module reached through an intermediate package. Neither
+      # subsumes the other; see docs/architecture.md.
+      - name: Architecture boundaries
+        run: make arch
+
       # The generated frontend contract must match the Go declarations it comes
       # from. This is the same TestGeneratedContractIsUpToDate that runs below;
       # naming it here is what makes the failure legible when someone changes a

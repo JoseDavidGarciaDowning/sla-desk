@@ -22,12 +22,12 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
 	identityapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/config"
 )
 
 func testRouter(t *testing.T) http.Handler {

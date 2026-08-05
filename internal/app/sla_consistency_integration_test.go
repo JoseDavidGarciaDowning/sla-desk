@@ -1,6 +1,6 @@
 //go:build integration
 
-package postgres_test
+package app_test
 
 import (
 	"math/rand/v2"
@@ -9,8 +9,8 @@ import (
 
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
 )
 
@@ -66,11 +66,11 @@ func TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom(t *testing.T) {
 			// drop.
 			time.Sleep(time.Millisecond)
 
-			tk, err = f.svc.Transition(f.ctx, application.StatusChange{
+			tk, err = f.svc.Transition(f.ctx, ticketapp.StatusChange{
 				TicketID:  tk.ID,
 				Target:    target,
 				ActorID:   f.requester,
-				ActorRole: domain.RoleAdmin,
+				ActorRole: ticketdomain.RoleAdmin,
 			})
 			if err != nil {
 				t.Fatalf("run %d step %d: Transition to %s: %v", run, step, target, err)
@@ -85,7 +85,7 @@ func TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom(t *testing.T) {
 // it against what is cached. It reads both back from the database rather than
 // using the value Create or Transition returned, so a cache that was never
 // written cannot pass by handing back the value it meant to write.
-func assertCacheMatchesHistory(t *testing.T, f repoFixture, q *ticketdb.Queries, tk domain.Ticket, when string) {
+func assertCacheMatchesHistory(t *testing.T, f repoFixture, q *ticketdb.Queries, tk ticketdomain.Ticket, when string) {
 	t.Helper()
 
 	stored, err := f.repo.GetForRequester(f.ctx, tk.ID, f.requester)
@@ -155,24 +155,24 @@ func sameInstant(a, b *time.Time) bool {
 	}
 }
 
-func randomPriority(rng *rand.Rand) domain.Priority {
-	all := []domain.Priority{
-		domain.PriorityUrgent, domain.PriorityHigh, domain.PriorityNormal, domain.PriorityLow,
+func randomPriority(rng *rand.Rand) ticketdomain.Priority {
+	all := []ticketdomain.Priority{
+		ticketdomain.PriorityUrgent, ticketdomain.PriorityHigh, ticketdomain.PriorityNormal, ticketdomain.PriorityLow,
 	}
 	return all[rng.IntN(len(all))]
 }
 
 // randomLegalTarget picks a status the ticket can actually move to, using
-// domain.Transition as the oracle for what is legal. Generating illegal moves
+// ticketdomain.Transition as the oracle for what is legal. Generating illegal moves
 // would only exercise the rejection path, which the unit tests already cover.
-func randomLegalTarget(rng *rand.Rand, from domain.Status) (domain.Status, bool) {
-	candidates := []domain.Status{
-		domain.StatusOpen, domain.StatusPending, domain.StatusResolved, domain.StatusClosed,
+func randomLegalTarget(rng *rand.Rand, from ticketdomain.Status) (ticketdomain.Status, bool) {
+	candidates := []ticketdomain.Status{
+		ticketdomain.StatusOpen, ticketdomain.StatusPending, ticketdomain.StatusResolved, ticketdomain.StatusClosed,
 	}
 
-	var legal []domain.Status
+	var legal []ticketdomain.Status
 	for _, target := range candidates {
-		if _, err := domain.Transition(from, target, domain.RoleAdmin); err == nil {
+		if _, err := ticketdomain.Transition(from, target, ticketdomain.RoleAdmin); err == nil {
 			legal = append(legal, target)
 		}
 	}

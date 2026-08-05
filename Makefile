@@ -99,6 +99,17 @@ fmt: ## Format the Go sources
 tidy: ## Prune and verify module requirements
 	go mod tidy
 
+arch: ## Check the module boundaries and layer direction
+	@# Its own target so a boundary failure has somewhere to be reproduced
+	@# from, and so `make arch` is the answer to "did I break the structure".
+	@#
+	@# This is the transitive half. The fast half is depguard, in `make lint`:
+	@# it catches a direct illegal import in seconds. This one follows the
+	@# import graph, so it catches a module reached through an intermediate
+	@# package — verified by injecting both shapes, where depguard finds the
+	@# first and nothing at all of the second. It also survives a //nolint.
+	go test ./internal/architecture/ -count=1 -v
+
 lint: ## Lint every source, Go and web
 	go tool golangci-lint run ./...
 	@# Build-tagged files are invisible to the run above, so the integration
@@ -151,5 +162,5 @@ test: test-go ## Run every test suite
 	@# broken deploy. Guarded on node_modules so a Go-only clone still passes.
 	@if [ -d web/node_modules ]; then cd web && pnpm test && pnpm build; fi
 
-check: lint test ## Everything that must pass before a commit
+check: lint arch test ## Everything that must pass before a commit
 	@echo "check: ok"

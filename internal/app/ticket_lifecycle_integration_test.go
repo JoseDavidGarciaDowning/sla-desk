@@ -1,6 +1,6 @@
 //go:build integration
 
-package postgres_test
+package app_test
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/app"
+
 	"github.com/google/uuid"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,9 +18,9 @@ import (
 	slaapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres"
+	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	ticketpostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
 )
 
@@ -27,62 +29,15 @@ import (
 type repoFixture struct {
 	ctx  context.Context
 	pool *pgxpool.Pool
-	repo *postgres.Repository
+	repo *ticketpostgres.Repository
 
 	// svc is the repository behind the use cases that resolve an SLA clock for
 	// it. The write paths are exercised through this rather than through repo,
 	// because resolving-then-writing is the sequence production runs and the
 	// repository alone cannot produce a clock.
-	svc *application.Service
+	svc *ticketapp.Service
 
 	requester uuid.UUID
-}
-
-// slaPolicies is the adapter the composition root supplies in production,
-// rebuilt here so these tests run the real translation rather than a stub.
-//
-// It is a copy today. In the next step internal/app owns the only one, and this
-// becomes an import — which is the point at which the duplication stops being
-// acceptable and starts being a smell.
-type slaPolicies struct{ calc *slaapp.Calculator }
-
-func (s slaPolicies) ForPriority(ctx context.Context, p domain.Priority) (application.SLAClock, error) {
-	policy, err := s.calc.ForPriority(ctx, sladomain.Priority(p))
-	if err != nil {
-		if errors.Is(err, slaapp.ErrNoPolicyForPriority) {
-			return nil, errors.Join(application.ErrNoSLAPolicy, err)
-		}
-		return nil, err
-	}
-	return slaClock{policy}, nil
-}
-
-func (s slaPolicies) ForPolicy(ctx context.Context, id int64) (application.SLAClock, error) {
-	policy, err := s.calc.ForPolicy(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return slaClock{policy}, nil
-}
-
-type slaClock struct{ policy sladomain.Policy }
-
-func (c slaClock) PolicyID() int64 { return c.policy.ID }
-
-func (c slaClock) Compute(timeline []domain.Phase) (application.ClockState, error) {
-	phases := make([]sladomain.Phase, len(timeline))
-	for i, p := range timeline {
-		phases[i] = sladomain.Phase{At: p.At, Running: p.Running}
-	}
-	state, err := sladomain.Reconstruct(c.policy, phases)
-	if err != nil {
-		return application.ClockState{}, err
-	}
-	return application.ClockState{
-		BudgetUsed:   state.BudgetUsed,
-		RunningSince: state.RunningSince,
-		DueAt:        state.DueAt,
-	}, nil
 }
 
 func newRepoFixture(t *testing.T) repoFixture {
@@ -127,25 +82,29 @@ func newRepoFixture(t *testing.T) repoFixture {
 		}
 	})
 
-	repo := postgres.NewRepository(pool)
-	sla := slaPolicies{calc: slaapp.NewCalculator(slapostgres.NewPolicyRepository(pool))}
+	repo := ticketpostgres.NewRepository(pool)
+	// The production adapter, not a copy of it. In the ticket module this test
+	// had to rebuild the translation by hand — importing the SLA module from
+	// inside ticket, which depguard now refuses. Here it is one import, and the
+	// test exercises the very code cmd/api wires.
+	sla := app.SLAPolicies{Calculator: slaapp.NewCalculator(slapostgres.NewPolicyRepository(pool))}
 
 	return repoFixture{
 		ctx:       ctx,
 		pool:      pool,
 		repo:      repo,
-		svc:       application.NewService(repo, sla),
+		svc:       ticketapp.NewService(repo, sla),
 		requester: requester,
 	}
 }
 
-func (f repoFixture) newTicket(priority domain.Priority) application.NewTicket {
-	return application.NewTicket{
+func (f repoFixture) newTicket(priority ticketdomain.Priority) ticketapp.NewTicket {
+	return ticketapp.NewTicket{
 		RequesterID: f.requester,
-		ActorRole:   domain.RoleCustomer,
+		ActorRole:   ticketdomain.RoleCustomer,
 		Title:       "Cannot download my invoice",
 		Description: "The download button returns a 500.",
-		Category:    domain.CategoryBilling,
+		Category:    ticketdomain.CategoryBilling,
 		Priority:    priority,
 	}
 }
@@ -153,12 +112,12 @@ func (f repoFixture) newTicket(priority domain.Priority) application.NewTicket {
 func TestCreateStartsTheClockRunning(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if tk.Status != domain.StatusOpen {
+	if tk.Status != ticketdomain.StatusOpen {
 		t.Errorf("status = %q, want open", tk.Status)
 	}
 	if tk.SLAClockStartedAt == nil {
@@ -185,11 +144,11 @@ func TestCreateStartsTheClockRunning(t *testing.T) {
 func TestDeadlineIsTheSeededBudgetForEveryPriority(t *testing.T) {
 	f := newRepoFixture(t)
 
-	budgets := map[domain.Priority]time.Duration{
-		domain.PriorityUrgent: 60 * time.Minute,
-		domain.PriorityHigh:   240 * time.Minute,
-		domain.PriorityNormal: 1440 * time.Minute,
-		domain.PriorityLow:    4320 * time.Minute,
+	budgets := map[ticketdomain.Priority]time.Duration{
+		ticketdomain.PriorityUrgent: 60 * time.Minute,
+		ticketdomain.PriorityHigh:   240 * time.Minute,
+		ticketdomain.PriorityNormal: 1440 * time.Minute,
+		ticketdomain.PriorityLow:    4320 * time.Minute,
 	}
 
 	for priority, budget := range budgets {
@@ -222,7 +181,7 @@ func TestDeadlineIsTheSeededBudgetForEveryPriority(t *testing.T) {
 func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityUrgent))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityUrgent))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -239,7 +198,7 @@ func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 	if rows[0].FromStatus != nil {
 		t.Errorf("from_status = %q, want nil on the creation row", *rows[0].FromStatus)
 	}
-	if rows[0].ToStatus != domain.StatusOpen {
+	if rows[0].ToStatus != ticketdomain.StatusOpen {
 		t.Errorf("to_status = %q, want open", rows[0].ToStatus)
 	}
 
@@ -274,7 +233,7 @@ func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 func TestAFailedHistoryWriteLeavesNoTicket(t *testing.T) {
 	f := newRepoFixture(t)
 
-	in := f.newTicket(domain.PriorityNormal)
+	in := f.newTicket(ticketdomain.PriorityNormal)
 	in.ActorRole = "superadmin" // rejected by ticket_status_history_actor_role_valid
 
 	if _, err := f.svc.Create(f.ctx, in); err == nil {
@@ -302,7 +261,7 @@ func TestCreateReportsAnUnservedPriority(t *testing.T) {
 	in := f.newTicket("critical") // no seeded policy, and not a legal value
 
 	_, err := f.svc.Create(f.ctx, in)
-	if !errors.Is(err, application.ErrNoSLAPolicy) {
+	if !errors.Is(err, ticketapp.ErrNoSLAPolicy) {
 		t.Errorf("err = %v, want ErrNoPolicyForPriority", err)
 	}
 }
@@ -317,7 +276,7 @@ func TestPaginationIsStableAcrossAnInsert(t *testing.T) {
 
 	const total = 5
 	for range total {
-		if _, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal)); err != nil {
+		if _, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
@@ -344,7 +303,7 @@ func TestPaginationIsStableAcrossAnInsert(t *testing.T) {
 	// A ticket arrives between the two reads. With OFFSET 2 the second page
 	// would start one row too late and the caller would never see one of the
 	// original tickets.
-	if _, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityUrgent)); err != nil {
+	if _, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityUrgent)); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -376,7 +335,7 @@ func TestCursorSeparatesTicketsSharingATimestamp(t *testing.T) {
 
 	// Each Create is its own transaction, so force the tie instead.
 	for range 3 {
-		if _, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal)); err != nil {
+		if _, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
@@ -429,7 +388,7 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 	f := newRepoFixture(t)
 	q := ticketdb.New(f.pool)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -458,11 +417,11 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 		t.Fatalf("breaking the policy: %v", err)
 	}
 
-	if _, err := f.svc.Transition(f.ctx, application.StatusChange{
+	if _, err := f.svc.Transition(f.ctx, ticketapp.StatusChange{
 		TicketID:  tk.ID,
-		Target:    domain.StatusPending,
+		Target:    ticketdomain.StatusPending,
 		ActorID:   f.requester,
-		ActorRole: domain.RoleAdmin,
+		ActorRole: ticketdomain.RoleAdmin,
 	}); !errors.Is(err, slapostgres.ErrUnsupportedScheduleMode) {
 		t.Fatalf("err = %v, want ErrUnsupportedScheduleMode — the SLA module refuses a schedule it cannot compute with", err)
 	}
@@ -481,7 +440,7 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the ticket: %v", err)
 	}
-	if stored.Status != domain.StatusOpen {
+	if stored.Status != ticketdomain.StatusOpen {
 		t.Errorf("status = %q, want it unchanged at open", stored.Status)
 	}
 }
@@ -492,24 +451,24 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 func TestTransitionRefusesToLeaveClosed(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityNormal))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
-	for _, target := range []domain.Status{domain.StatusResolved, domain.StatusClosed} {
-		tk, err = f.svc.Transition(f.ctx, application.StatusChange{
-			TicketID: tk.ID, Target: target, ActorID: f.requester, ActorRole: domain.RoleAdmin,
+	for _, target := range []ticketdomain.Status{ticketdomain.StatusResolved, ticketdomain.StatusClosed} {
+		tk, err = f.svc.Transition(f.ctx, ticketapp.StatusChange{
+			TicketID: tk.ID, Target: target, ActorID: f.requester, ActorRole: ticketdomain.RoleAdmin,
 		})
 		if err != nil {
 			t.Fatalf("moving to %s: %v", target, err)
 		}
 	}
 
-	_, err = f.svc.Transition(f.ctx, application.StatusChange{
-		TicketID: tk.ID, Target: domain.StatusOpen, ActorID: f.requester, ActorRole: domain.RoleAdmin,
+	_, err = f.svc.Transition(f.ctx, ticketapp.StatusChange{
+		TicketID: tk.ID, Target: ticketdomain.StatusOpen, ActorID: f.requester, ActorRole: ticketdomain.RoleAdmin,
 	})
-	if !errors.Is(err, domain.ErrInvalidTransition) {
+	if !errors.Is(err, ticketdomain.ErrInvalidTransition) {
 		t.Errorf("err = %v, want ErrInvalidTransition — closed is terminal", err)
 	}
 }
@@ -520,15 +479,15 @@ func TestTransitionRefusesToLeaveClosed(t *testing.T) {
 func TestPausingStopsTheClockAndResumingKeepsWhatWasSpent(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(domain.PriorityUrgent))
+	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityUrgent))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
 	time.Sleep(5 * time.Millisecond)
 
-	paused, err := f.svc.Transition(f.ctx, application.StatusChange{
-		TicketID: tk.ID, Target: domain.StatusPending, ActorID: f.requester, ActorRole: domain.RoleAdmin,
+	paused, err := f.svc.Transition(f.ctx, ticketapp.StatusChange{
+		TicketID: tk.ID, Target: ticketdomain.StatusPending, ActorID: f.requester, ActorRole: ticketdomain.RoleAdmin,
 	})
 	if err != nil {
 		t.Fatalf("pausing: %v", err)
@@ -548,8 +507,8 @@ func TestPausingStopsTheClockAndResumingKeepsWhatWasSpent(t *testing.T) {
 	// Time spent waiting on the customer must not consume budget.
 	time.Sleep(20 * time.Millisecond)
 
-	resumed, err := f.svc.Transition(f.ctx, application.StatusChange{
-		TicketID: tk.ID, Target: domain.StatusOpen, ActorID: f.requester, ActorRole: domain.RoleCustomer,
+	resumed, err := f.svc.Transition(f.ctx, ticketapp.StatusChange{
+		TicketID: tk.ID, Target: ticketdomain.StatusOpen, ActorID: f.requester, ActorRole: ticketdomain.RoleCustomer,
 	})
 	if err != nil {
 		t.Fatalf("resuming: %v", err)

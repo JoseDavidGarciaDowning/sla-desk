@@ -106,7 +106,7 @@ func TestModuleDomainsArePure(t *testing.T) {
 		// would have quietly weakened the rule while the test count still
 		// looked fine.
 		modulePath + "/internal/api",
-		modulePath + "/internal/config",
+		modulePath + "/internal/platform",
 	}
 
 	for _, pkg := range packagesUnder(t, root, "internal/modules") {
@@ -152,8 +152,8 @@ func TestTheHTTPLeavesDependOnNothingInThisModule(t *testing.T) {
 	root := moduleRoot(t)
 
 	for _, pkg := range []string{
-		modulePath + "/internal/httperr",
-		modulePath + "/internal/httpx",
+		modulePath + "/internal/platform/httperr",
+		modulePath + "/internal/platform/httpx",
 	} {
 		t.Run(shortName(pkg), func(t *testing.T) {
 			for imported := range transitiveImports(t, root, pkg) {
@@ -208,7 +208,7 @@ func TestEachModuleOwnsItsOwnSQLCConfig(t *testing.T) {
 func TestNothingReachesTheCompositionRoot(t *testing.T) {
 	root := moduleRoot(t)
 
-	for _, dir := range []string{"internal/modules", "internal/httperr", "internal/httpx", "internal/config"} {
+	for _, dir := range []string{"internal/modules", "internal/platform"} {
 		for _, pkg := range packagesUnder(t, root, dir) {
 			for imported := range transitiveImports(t, root, pkg) {
 				if matches(imported, modulePath+"/internal/app") {
@@ -218,6 +218,31 @@ func TestNothingReachesTheCompositionRoot(t *testing.T) {
 						"another module declares a contract instead.",
 						shortName(pkg))
 				}
+			}
+		}
+	}
+}
+
+// internal/platform holds cross-cutting infrastructure and nothing else:
+// configuration, what an error looks like on the wire, how a body gets onto it.
+//
+// This is the rule that stops a shared package becoming a dumping ground, and
+// the admission test is not "more than one thing uses it" — that is a fact
+// about the call graph, not about the concept. It is "does this decide
+// something no business module owns". A package here that reaches a module has
+// failed it, and is not platform code: it belongs in the module whose concept
+// it is.
+func TestPlatformKnowsNoBusiness(t *testing.T) {
+	root := moduleRoot(t)
+
+	for _, pkg := range packagesUnder(t, root, "internal/platform") {
+		for imported := range transitiveImports(t, root, pkg) {
+			if matches(imported, modulePath+"/internal/modules") {
+				t.Errorf("%s reaches %s\n\n"+
+					"internal/platform holds cross-cutting infrastructure and nothing\n"+
+					"else. If this needs to know what a ticket is, it is not platform\n"+
+					"code — move it into the module whose concept it is.",
+					shortName(pkg), shortName(imported))
 			}
 		}
 	}

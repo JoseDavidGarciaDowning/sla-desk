@@ -15,11 +15,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/app"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/config"
 )
 
 // startupPingTimeout bounds the one connectivity check made at boot.

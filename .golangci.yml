@@ -19,6 +19,13 @@ linters:
     # Enforces that context.Context is the first parameter.
     - containedctx
     - govet
+    # The architecture rules, fast half. depguard reads one file's import block
+    # and catches a direct illegal import in seconds, on every lint run and
+    # every CI run. The slow half is internal/architecture, which follows the
+    # import graph and so catches a module reached through two hops. Neither
+    # subsumes the other — verified by injecting both shapes — and a rule held
+    # by only one of them is a rule that lasts until someone adds a hop.
+    - depguard
 
   # govet's `shadow` analyzer is deliberately NOT enabled. It was, briefly, and
   # it produced two findings — both on `if err := f(); err != nil`, which is the
@@ -27,6 +34,118 @@ linters:
   # code, or carrying suppressions next to it. The bug it is meant to catch —
   # an outer err that is never checked because an inner one took its name — is
   # already caught by errcheck.
+
+  settings:
+    depguard:
+      # ── The architecture rules (docs/adr/0005, docs/architecture.md) ────────
+      #
+      # Every deny below is a rule someone would otherwise have to remember.
+      # The messages say what to do instead, because a lint failure that only
+      # says "forbidden" gets suppressed rather than fixed.
+      #
+      # `files` matches the file being linted; `deny.pkg` is a prefix on the
+      # import path. Test files are covered deliberately: a test that reaches
+      # across a boundary is a boundary that does not hold, and it is the
+      # easiest place for one to be breached.
+      rules:
+        # ── Module boundaries ──────────────────────────────────────────────
+        ticket-module:
+          files: ["**/internal/modules/ticket/**"]
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla
+              desc: >-
+                The ticket module must not import the SLA module. Declare what
+                you need as a contract in ticket/application (see SLAPolicies)
+                and wire the implementation in internal/app.
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity
+              desc: >-
+                The ticket module must not import the identity module. It
+                declares CallerResolver in ticket/transport/http for exactly
+                this; internal/app supplies one.
+
+        sla-module:
+          files: ["**/internal/modules/sla/**"]
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket
+              desc: >-
+                The SLA module must not import the ticket module. It works in
+                running and paused phases, not in ticket statuses — which
+                statuses burn budget is the ticket module's decision.
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity
+              desc: The SLA module has no business knowing who a user is.
+
+        identity-module:
+          files: ["**/internal/modules/identity/**"]
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket
+              desc: >-
+                The identity module must not import the ticket module. It
+                answers who someone is; what that means on a ticket is decided
+                in internal/app.
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla
+              desc: The identity module has no business knowing about SLAs.
+
+        # ── The composition root is a sink, never a source ─────────────────
+        nothing-imports-the-composition-root:
+          files: ["**", "!**/internal/app/**", "!**/cmd/**"]
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/app
+              desc: >-
+                internal/app is the composition root. Only cmd may build it. A
+                module needing something from another module declares a
+                contract instead.
+
+        # ── Shared code stays cross-cutting ────────────────────────────────
+        platform-knows-no-business:
+          files: ["**/internal/platform/**"]
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules
+              desc: >-
+                internal/platform must not import a business module. If it
+                needs to know what a ticket is, it is not platform code — move
+                it into the module whose concept it is.
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/app
+              desc: internal/platform sits below the composition root, not above it.
+
+        # ── Layer direction inside a module ────────────────────────────────
+        domain-depends-on-nothing:
+          files: ["**/internal/modules/*/domain/**"]
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/app
+              desc: A domain package must not know the composition root exists.
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/platform
+              desc: >-
+                A domain package imports no infrastructure, not even ours.
+                Everything it needs is an argument — that is what keeps it
+                testable with nothing running.
+            - pkg: github.com/jackc/pgx
+              desc: >-
+                The domain has no database. A driver type in a domain struct is
+                how "testable with nothing running" stops being true.
+            - pkg: database/sql
+              desc: The domain has no database.
+            - pkg: net/http
+              desc: >-
+                The domain has no HTTP. Status codes and request shapes belong
+                in transport.
+            - pkg: github.com/go-chi/chi
+              desc: The domain has no router.
+            - pkg: github.com/clerk/clerk-sdk-go
+              desc: The domain has no third-party SDK.
+
+        application-depends-on-no-implementation:
+          files: ["**/internal/modules/*/application/**"]
+          deny:
+            - pkg: github.com/jackc/pgx
+              desc: >-
+                The application layer names no driver type. If a port needs an
+                id, give it one the domain owns.
+            - pkg: net/http
+              desc: >-
+                The application layer decides no status codes. Return an error
+                the transport layer can map.
+            - pkg: github.com/go-chi/chi
+              desc: The application layer has no router.
 
   exclusions:
     # The generated store is sqlc's output. Linting code we do not write means
