@@ -1,0 +1,112 @@
+version: "2"
+
+sql:
+  - engine: "postgresql"
+    # The ticket module's own sqlc setup, and the last config to move: there is no
+# root sqlc.yaml any more, which the architecture test asserts.
+#
+# sqlc reads the goose migrations directly, so the schema it compiles
+    # against is the schema that actually ships. There is no second copy of the
+    # DDL to drift out of sync.
+    schema: "../../../../../db/migrations"
+    queries: "queries"
+    gen:
+      go:
+        package: "ticketdb"
+        out: "ticketdb"
+        sql_package: "pgx/v5"
+
+        # Nullable columns become *string rather than pgtype.Text, so callers
+        # work with ordinary Go values instead of driver types.
+        emit_pointers_for_null_types: true
+
+        # Only tables these queries actually touch get a struct. tickets carries
+        # a foreign key into users, and without this that alone would generate a
+        # store.User here — a second definition of a table another module owns,
+        # sitting in scope offering to be used.
+        omit_unused_structs: true
+
+        overrides:
+          # uuid.UUID rather than pgtype.UUID, so nothing this module returns
+          # carries a driver type and the domain can stay free of pgx. Long form
+          # for both spellings: the short one makes sqlc emit the import twice.
+          - db_type: "uuid"
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "UUID"
+
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "UUID"
+              pointer: true
+
+          # Every timestamp in this schema is TIMESTAMPTZ. pgx would hand back
+          # pgtype.Timestamptz, whose Valid flag means nothing on a NOT NULL
+          # column and which no caller outside the store should have to know
+          # about. Nullable ones become *time.Time, so "no deadline" is
+          # expressed as nil rather than as a struct field.
+          #
+          # The identifier is the bare "timestamptz". sqlc's own documentation
+          # writes it as "pg_catalog.timestamptz"; that form silently matches
+          # nothing and the columns come back as pgtype.Timestamptz. Verified
+          # against sqlc v1.31.1 by generating with each spelling.
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+
+          # The domain already owns this vocabulary (internal/ticket). Mapping
+          # the columns straight onto those types is what keeps it to one type
+          # instead of two: the CHECK constraint enforces the value set in the
+          # database and the Go type enforces it in Go, and nothing has to
+          # translate between them.
+          #
+          # users.role and sla_policies.priority are deliberately absent: those
+          # tables belong to the identity and SLA modules, which generate them
+          # from their own configs against their own domains.
+          - column: "tickets.priority"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Priority"
+
+          - column: "tickets.status"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Status"
+
+          - column: "tickets.category"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Category"
+
+          # Nullable on the row that records creation, so a pointer: nil is
+          # "there was no previous status", which is different from any status.
+          - column: "ticket_status_history.from_status"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Status"
+              pointer: true
+
+          - column: "ticket_status_history.to_status"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Status"
+
+          - column: "ticket_status_history.actor_role"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+              package: "domain"
+              type: "Role"

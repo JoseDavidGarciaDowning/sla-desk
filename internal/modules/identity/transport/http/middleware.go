@@ -9,8 +9,8 @@ import (
 
 	clerksdk "github.com/clerk/clerk-sdk-go/v2"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httperr"
 )
 
 // Resolver is the slice of the module this middleware needs.

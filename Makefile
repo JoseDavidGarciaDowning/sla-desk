@@ -59,11 +59,11 @@ migrate-new: ## Create a migration: make migrate-new name=add_tickets
 	@test -n "$(name)" || { echo "usage: make migrate-new name=add_tickets"; exit 1; }
 	go tool goose -dir db/migrations create $(name) sql
 
-# One config per module that owns tables, plus the root one for what has not
-# moved yet. Discovered rather than listed: a module added with its own queries
+# One config per module that owns tables. There is no root config any more, and
+# an architecture test asserts that. Discovered rather than listed: a module added with its own queries
 # and left out of a hand-written list would silently never be regenerated, and
 # the drift only shows up as a compile error days later.
-SQLC_CONFIGS := sqlc.yaml $(shell find internal/modules -name sqlc.yaml 2>/dev/null | sort)
+SQLC_CONFIGS := $(shell find internal/modules -name sqlc.yaml 2>/dev/null | sort)
 
 sqlc: ## Regenerate the type-safe query code for every config
 	@for cfg in $(SQLC_CONFIGS); do \
@@ -98,6 +98,17 @@ fmt: ## Format the Go sources
 
 tidy: ## Prune and verify module requirements
 	go mod tidy
+
+arch: ## Check the module boundaries and layer direction
+	@# Its own target so a boundary failure has somewhere to be reproduced
+	@# from, and so `make arch` is the answer to "did I break the structure".
+	@#
+	@# This is the transitive half. The fast half is depguard, in `make lint`:
+	@# it catches a direct illegal import in seconds. This one follows the
+	@# import graph, so it catches a module reached through an intermediate
+	@# package — verified by injecting both shapes, where depguard finds the
+	@# first and nothing at all of the second. It also survives a //nolint.
+	go test ./internal/architecture/ -count=1 -v
 
 lint: ## Lint every source, Go and web
 	go tool golangci-lint run ./...
@@ -151,5 +162,5 @@ test: test-go ## Run every test suite
 	@# broken deploy. Guarded on node_modules so a Go-only clone still passes.
 	@if [ -d web/node_modules ]; then cd web && pnpm test && pnpm build; fi
 
-check: lint test ## Everything that must pass before a commit
+check: lint arch test ## Everything that must pass before a commit
 	@echo "check: ok"

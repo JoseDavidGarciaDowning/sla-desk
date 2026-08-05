@@ -14,11 +14,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/app"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/config"
 )
 
 // startupPingTimeout bounds the one connectivity check made at boot.
@@ -65,13 +66,9 @@ func run() error {
 	// Redis is intentionally not probed: nothing uses it until slice 5, and a
 	// health check that fails on an unused dependency would take the service
 	// down for no reason.
-	probes := map[string]api.Probe{
+	probes := map[string]app.Probe{
 		"database": pool.Ping,
 	}
-
-	// Queries reads; TicketRepo writes, because creating a ticket spans two
-	// statements that have to commit together.
-	queries := store.New(pool)
 
 	// The identity module builds its own repository and Clerk client from the
 	// handle and its own config. This is the only place that knows both exist.
@@ -84,11 +81,16 @@ func run() error {
 		WebhookSecret: cfg.ClerkWebhookSecret,
 	})
 
-	handler, err := api.NewRouter(cfg, api.Deps{
+	// The SLA module reads reference data on the pool. The ticket module gets
+	// it as the contract it declared, never as the module itself: it is handed
+	// something that can resolve a clock, and does not learn where from.
+	slaModule := sla.New(pool)
+	ticketModule := ticket.New(pool, app.SLAPolicies{Calculator: slaModule.Calculator})
+
+	handler, err := app.NewRouter(cfg, app.Deps{
 		Probes:   probes,
 		Identity: identityModule,
-		Tickets:  store.NewTicketRepo(pool),
-		Reader:   queries,
+		Tickets:  ticketModule,
 	})
 	if err != nil {
 		// Configuration the router cannot work with, most likely a malformed
