@@ -17,6 +17,12 @@ sql:
         # work with ordinary Go values instead of driver types.
         emit_pointers_for_null_types: true
 
+        # Only tables these queries actually touch get a struct. tickets carries
+        # a foreign key into users, and without this that alone would generate a
+        # store.User here — a second definition of a table another module owns,
+        # sitting in scope offering to be used.
+        omit_unused_structs: true
+
         overrides:
           # Every timestamp in this schema is TIMESTAMPTZ. pgx would hand back
           # pgtype.Timestamptz, whose Valid flag means nothing on a NOT NULL
@@ -40,14 +46,12 @@ sql:
           # The domain already owns this vocabulary (internal/ticket). Mapping
           # the columns straight onto those types is what keeps it to one type
           # instead of two: the CHECK constraint enforces the value set in the
-          # database, ticket.Role and ticket.Priority enforce it in Go, and
-          # nothing has to translate between them.
-          - column: "users.role"
-            go_type:
-              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
-              package: "ticket"
-              type: "Role"
-
+          # database and the Go type enforces it in Go, and nothing has to
+          # translate between them.
+          #
+          # users.role is deliberately absent: the users table belongs to the
+          # identity module, which generates it from its own config against its
+          # own domain.
           - column: "sla_policies.priority"
             go_type:
               import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"

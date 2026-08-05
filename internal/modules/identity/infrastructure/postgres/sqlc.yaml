@@ -1,0 +1,74 @@
+# The identity module's own sqlc setup. It owns users and nothing else.
+#
+# This config is what breaks the cycle that stopped internal/auth owning its
+# Role. The root config generates one `store` package holding every table, so
+# mapping users.role onto an auth-owned type made the generated store import
+# auth, which already imported store. Here the generated package sits *inside*
+# the module and depends on the module's own domain, which imports nothing —
+# there is no cycle to close.
+#
+# `schema` points at the shared goose migrations rather than a local schema.sql:
+# there is one database and one migration sequence, tickets carries foreign keys
+# into users, and a copied DDL is a second copy that drifts. What is per-module
+# is the *queries*, which is where ownership actually lives. A module owns a
+# table if it holds the statements that read and write it.
+#
+# `omit_unused_structs` is what turns that from a convention into a structural
+# fact: only tables these queries touch get a struct, so this package contains
+# no Ticket and no SlaPolicy to reach across the boundary with.
+version: "2"
+
+sql:
+  - engine: "postgresql"
+    schema: "../../../../../db/migrations"
+    queries: "queries"
+    gen:
+      go:
+        package: "identitydb"
+        out: "identitydb"
+        sql_package: "pgx/v5"
+        emit_pointers_for_null_types: true
+        omit_unused_structs: true
+
+        overrides:
+          # The bare "timestamptz", not "pg_catalog.timestamptz" — the latter is
+          # what sqlc's own documentation shows and it silently matches nothing.
+          # See the root config for the verification.
+          - db_type: "timestamptz"
+            go_type: "time.Time"
+
+          - db_type: "timestamptz"
+            nullable: true
+            go_type:
+              type: "time.Time"
+              pointer: true
+
+          # uuid.UUID rather than pgtype.UUID, so nothing this module returns
+          # carries a driver type. The domain must not import pgx, and a
+          # repository that had to convert on every read would be converting
+          # because the generated code chose badly.
+          #
+          # Long form for both spellings: the short `go_type: "uuid.UUID"` makes
+          # sqlc emit the import twice and the generated file stops compiling.
+          - db_type: "uuid"
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "UUID"
+
+          - db_type: "uuid"
+            nullable: true
+            go_type:
+              import: "github.com/google/uuid"
+              package: "uuid"
+              type: "UUID"
+              pointer: true
+
+          # This module's own domain owns the role vocabulary. The CHECK
+          # constraint enforces the value set in the database and domain.Role
+          # enforces it in Go, so nothing has to translate between them.
+          - column: "users.role"
+            go_type:
+              import: "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+              package: "domain"
+              type: "Role"

@@ -16,13 +16,17 @@ import (
 	"time"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
+	identityapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
+	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
+	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
 
 func testRouter(t *testing.T) http.Handler {
 	t.Helper()
-	h, err := NewRouter(testConfig(), Deps{})
+	h, err := NewRouter(testConfig(), Deps{Identity: testIdentity(testConfig(), routerStubUsers{})})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -88,7 +92,7 @@ func TestTheClerkWebhookIsNotBehindRequireAuth(t *testing.T) {
 	router := testRouter(t)
 
 	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, ClerkWebhookPath,
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, identityhttp.WebhookPath,
 		strings.NewReader(`{"type":"user.created","data":{"id":"user_1"}}`)))
 
 	if rec.Code == http.StatusUnauthorized {
@@ -147,8 +151,15 @@ func TestRouterRefusesAnUnusableWebhookSecret(t *testing.T) {
 	cfg := testConfig()
 	cfg.ClerkWebhookSecret = "not-a-svix-secret"
 
-	if _, err := NewRouter(cfg, Deps{}); err == nil {
-		t.Error("expected an error — a bad secret must stop the process at startup")
+	// The identity module is supplied, and built from the same bad config, so
+	// this fails for the reason under test. Passing Deps{} would now fail on
+	// the missing module instead and the test would pass having proved nothing.
+	_, err := NewRouter(cfg, Deps{Identity: testIdentity(cfg, routerStubUsers{})})
+	if err == nil {
+		t.Fatal("expected an error — a bad secret must stop the process at startup")
+	}
+	if strings.Contains(err.Error(), "Deps.Identity") {
+		t.Errorf("failed on the missing module, not on the secret: %v", err)
 	}
 }
 
@@ -183,12 +194,12 @@ func TestASignedRequestReachesTheHandlerThroughTheRouter(t *testing.T) {
 	cfg := testConfig()
 	cfg.ClerkAPIURL = jwksServer.URL
 
-	caller := store.User{ClerkUserID: "user_router", Email: "router@example.test", Role: ticket.RoleCustomer}
+	caller := identitydomain.User{ClerkUserID: "user_router", Email: "router@example.test", Role: identitydomain.RoleCustomer}
 	reader := routerFakeReader{}
 
 	router, err := NewRouter(cfg, Deps{
-		Users:  routerStubProvisioner{user: caller},
-		Reader: reader,
+		Identity: testIdentity(cfg, routerStubUsers{user: caller}),
+		Reader:   reader,
 	})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
@@ -239,13 +250,16 @@ func mintRouterToken(t *testing.T, key *rsa.PrivateKey, kid, subject string) str
 	return signing + "." + base64.RawURLEncoding.EncodeToString(sig)
 }
 
-type routerStubProvisioner struct{ user store.User }
+// routerStubUsers stands in for the users table, so the router can be built
+// with the real identity module — real middleware, real Clerk verification
+// against the stub JWKS — and no database.
+type routerStubUsers struct{ user identitydomain.User }
 
-func (s routerStubProvisioner) GetUserByClerkID(context.Context, string) (store.User, error) {
+func (s routerStubUsers) ByClerkID(context.Context, string) (identitydomain.User, error) {
 	return s.user, nil
 }
 
-func (s routerStubProvisioner) UpsertUserFromClerk(context.Context, store.UpsertUserFromClerkParams) (store.User, error) {
+func (s routerStubUsers) Upsert(context.Context, string, identitydomain.Identity) (identitydomain.User, error) {
 	return s.user, nil
 }
 
@@ -263,4 +277,19 @@ func (routerFakeReader) ListTicketStatusHistoryForRequester(
 	context.Context, store.ListTicketStatusHistoryForRequesterParams,
 ) ([]store.TicketStatusHistory, error) {
 	return nil, nil
+}
+
+// testIdentity builds the identity module the way NewRouter's caller does, so a
+// router test exercises the real middleware chain rather than a stand-in for
+// it. Only the users table and the JWKS endpoint are replaced.
+func testIdentity(cfg config.Config, users identityapp.UserRepository) *identity.Module {
+	clerkCfg := clerk.Config{
+		SecretKey:       cfg.ClerkSecretKey,
+		AuthorizedParty: cfg.ClerkAuthorizedParty,
+		APIURL:          cfg.ClerkAPIURL,
+	}
+	return identity.NewWith(users, clerk.NewIdentityProvider(clerkCfg), identity.Config{
+		Clerk:         clerkCfg,
+		WebhookSecret: cfg.ClerkWebhookSecret,
+	})
 }

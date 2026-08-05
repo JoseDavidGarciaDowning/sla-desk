@@ -1,4 +1,4 @@
-package auth_test
+package http_test
 
 import (
 	"context"
@@ -10,50 +10,63 @@ import (
 	"testing"
 
 	"github.com/clerk/clerk-sdk-go/v2"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/google/uuid"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/auth"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 )
 
-// fakeStore stands in for *store.Queries. A fake rather than a mock: the tests
+// fakeStore stands in for the users table. A fake rather than a mock: the tests
 // assert on what the middleware produced, not on which methods it happened to
 // call — except for the upsert, where "was it called at all" is the behaviour
 // under test.
 type fakeStore struct {
-	user      store.User
+	user      domain.User
 	getErr    error
 	upsertErr error
 
-	upserts     int
-	upsertParam store.UpsertUserFromClerkParams
+	upserts        int
+	upsertClerkID  string
+	upsertIdentity domain.Identity
 }
 
-func (f *fakeStore) GetUserByClerkID(_ context.Context, _ string) (store.User, error) {
+var _ application.UserRepository = (*fakeStore)(nil)
+
+func (f *fakeStore) ByClerkID(_ context.Context, _ string) (domain.User, error) {
 	if f.getErr != nil {
-		return store.User{}, f.getErr
+		return domain.User{}, f.getErr
 	}
 	return f.user, nil
 }
 
-func (f *fakeStore) UpsertUserFromClerk(_ context.Context, arg store.UpsertUserFromClerkParams) (store.User, error) {
+func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Identity) (domain.User, error) {
 	f.upserts++
-	f.upsertParam = arg
+	f.upsertClerkID = clerkUserID
+	f.upsertIdentity = id
 	if f.upsertErr != nil {
-		return store.User{}, f.upsertErr
+		return domain.User{}, f.upsertErr
 	}
 	return f.user, nil
 }
 
-func uuidOf(t *testing.T, s string) pgtype.UUID {
+func uuidOf(t *testing.T, s string) uuid.UUID {
 	t.Helper()
-	var id pgtype.UUID
-	if err := id.Scan(s); err != nil {
+	id, err := uuid.Parse(s)
+	if err != nil {
 		t.Fatalf("parsing uuid %q: %v", s, err)
 	}
 	return id
+}
+
+// requireAuth wires the real service behind the real middleware, so these tests
+// still exercise the resolve-or-provision path rather than a stub standing in
+// for it. Only the collaborators at the very edge are fake.
+func requireAuth(users application.UserRepository, ids application.IdentityProvider) func(http.Handler) http.Handler {
+	if users == nil && ids == nil {
+		return identityhttp.RequireAuth(nil)
+	}
+	return identityhttp.RequireAuth(application.NewService(users, ids))
 }
 
 // withClaims builds the request clerkhttp.WithHeaderAuthorization would have
@@ -85,7 +98,7 @@ func (r *reached) handler() http.Handler {
 func TestRequireAuthRejectsARequestWithNoSessionClaims(t *testing.T) {
 	var protected reached
 
-	handler := auth.RequireAuth(nil, nil)(protected.handler())
+	handler := requireAuth(nil, nil)(protected.handler())
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/tickets", nil))
@@ -101,18 +114,18 @@ func TestRequireAuthRejectsARequestWithNoSessionClaims(t *testing.T) {
 // The role is read from our users table, never from the token. A client that
 // forges a role claim gets whatever our own row says.
 func TestRequireAuthPutsOurUserInTheContext(t *testing.T) {
-	want := store.User{
+	want := domain.User{
 		ID:          uuidOf(t, "11111111-1111-1111-1111-111111111111"),
 		ClerkUserID: "user_existing",
 		Email:       "agent@example.test",
-		Role:        ticket.RoleAgent,
+		Role:        domain.RoleAgent,
 	}
 	users := &fakeStore{user: want}
 
-	var got auth.User
+	var got domain.User
 	var ok bool
-	handler := auth.RequireAuth(users, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, ok = auth.UserFromContext(r.Context())
+	handler := requireAuth(users, nil)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, ok = identityhttp.UserFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -131,7 +144,7 @@ func TestRequireAuthPutsOurUserInTheContext(t *testing.T) {
 	if got.ID != want.ID {
 		t.Errorf("id = %v, want %v", got.ID, want.ID)
 	}
-	if got.Role != ticket.RoleAgent {
+	if got.Role != domain.RoleAgent {
 		t.Errorf("role = %q, want agent — the role must come from our table", got.Role)
 	}
 	if users.upserts != 0 {
@@ -143,12 +156,14 @@ func TestRequireAuthPutsOurUserInTheContext(t *testing.T) {
 // only the subject, so email and name have to be fetched the first time we see
 // a user.
 type fakeFetcher struct {
-	identity auth.Identity
+	identity domain.Identity
 	err      error
 	calls    int
 }
 
-func (f *fakeFetcher) FetchIdentity(_ context.Context, _ string) (auth.Identity, error) {
+var _ application.IdentityProvider = (*fakeFetcher)(nil)
+
+func (f *fakeFetcher) FetchIdentity(_ context.Context, _ string) (domain.Identity, error) {
 	f.calls++
 	return f.identity, f.err
 }
@@ -157,18 +172,18 @@ func (f *fakeFetcher) FetchIdentity(_ context.Context, _ string) (auth.Identity,
 // instant signup completes, while Clerk's webhook is still in flight. Every
 // first page load would fail without this path.
 func TestRequireAuthProvisionsAUserItHasNeverSeen(t *testing.T) {
-	provisioned := store.User{
+	provisioned := domain.User{
 		ID:          uuidOf(t, "22222222-2222-2222-2222-222222222222"),
 		ClerkUserID: "user_brand_new",
 		Email:       "new@example.test",
-		Role:        ticket.RoleCustomer,
+		Role:        domain.RoleCustomer,
 	}
-	users := &fakeStore{getErr: pgx.ErrNoRows, user: provisioned}
-	clerkAPI := &fakeFetcher{identity: auth.Identity{Email: "new@example.test", Name: "New Person"}}
+	users := &fakeStore{getErr: application.ErrNoSuchUser, user: provisioned}
+	clerkAPI := &fakeFetcher{identity: domain.Identity{Email: "new@example.test", Name: "New Person"}}
 
-	var got auth.User
-	handler := auth.RequireAuth(users, clerkAPI)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = auth.UserFromContext(r.Context())
+	var got domain.User
+	handler := requireAuth(users, clerkAPI)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = identityhttp.UserFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -184,26 +199,26 @@ func TestRequireAuthProvisionsAUserItHasNeverSeen(t *testing.T) {
 	if clerkAPI.calls != 1 {
 		t.Errorf("Clerk API calls = %d, want 1", clerkAPI.calls)
 	}
-	if users.upsertParam.ClerkUserID != "user_brand_new" {
-		t.Errorf("upsert clerk id = %q, want user_brand_new", users.upsertParam.ClerkUserID)
+	if users.upsertClerkID != "user_brand_new" {
+		t.Errorf("upsert clerk id = %q, want user_brand_new", users.upsertClerkID)
 	}
-	if users.upsertParam.Email != "new@example.test" {
-		t.Errorf("upsert email = %q, want the address fetched from Clerk", users.upsertParam.Email)
+	if users.upsertIdentity.Email != "new@example.test" {
+		t.Errorf("upsert email = %q, want the address fetched from Clerk", users.upsertIdentity.Email)
 	}
-	if users.upsertParam.Name == nil || *users.upsertParam.Name != "New Person" {
-		t.Errorf("upsert name = %v, want New Person", users.upsertParam.Name)
+	if users.upsertIdentity.Name != "New Person" {
+		t.Errorf("upsert name = %q, want New Person", users.upsertIdentity.Name)
 	}
-	if got.Role != ticket.RoleCustomer {
+	if got.Role != domain.RoleCustomer {
 		t.Errorf("role = %q, want customer — new users are never seeded with any other role", got.Role)
 	}
 }
 
 // An existing user must not cost a Clerk API round trip.
 func TestRequireAuthDoesNotCallClerkForAKnownUser(t *testing.T) {
-	users := &fakeStore{user: store.User{ClerkUserID: "user_known", Role: ticket.RoleCustomer}}
+	users := &fakeStore{user: domain.User{ClerkUserID: "user_known", Role: domain.RoleCustomer}}
 	clerkAPI := &fakeFetcher{}
 
-	handler := auth.RequireAuth(users, clerkAPI)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	handler := requireAuth(users, clerkAPI)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	handler.ServeHTTP(httptest.NewRecorder(), withClaims("user_known"))
@@ -216,9 +231,9 @@ func TestRequireAuthDoesNotCallClerkForAKnownUser(t *testing.T) {
 // A forged claim is not a role. docs/spec.md §4.3: the role lives in our table
 // and a client-supplied token can never assert one.
 func TestRoleComesFromOurTableNotFromTheToken(t *testing.T) {
-	users := &fakeStore{user: store.User{
+	users := &fakeStore{user: domain.User{
 		ClerkUserID: "user_ambitious",
-		Role:        ticket.RoleCustomer, // what our table says
+		Role:        domain.RoleCustomer, // what our table says
 	}}
 
 	r := httptest.NewRequest(http.MethodGet, "/api/tickets", nil)
@@ -229,23 +244,23 @@ func TestRoleComesFromOurTableNotFromTheToken(t *testing.T) {
 	claims.Custom = map[string]string{"role": "admin"}
 	r = r.WithContext(clerk.ContextWithSessionClaims(r.Context(), claims))
 
-	var got auth.User
-	handler := auth.RequireAuth(users, &fakeFetcher{})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = auth.UserFromContext(r.Context())
+	var got domain.User
+	handler := requireAuth(users, &fakeFetcher{})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = identityhttp.UserFromContext(r.Context())
 	}))
 	handler.ServeHTTP(httptest.NewRecorder(), r)
 
-	if got.Role != ticket.RoleCustomer {
+	if got.Role != domain.RoleCustomer {
 		t.Errorf("role = %q, want customer — a claim in the token became a role", got.Role)
 	}
 }
 
 func TestRequireAuthFailsClosedWhenClerkIsUnreachable(t *testing.T) {
-	users := &fakeStore{getErr: pgx.ErrNoRows}
+	users := &fakeStore{getErr: application.ErrNoSuchUser}
 	clerkAPI := &fakeFetcher{err: errors.New("clerk: connection refused")}
 
 	var protected reached
-	handler := auth.RequireAuth(users, clerkAPI)(protected.handler())
+	handler := requireAuth(users, clerkAPI)(protected.handler())
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, withClaims("user_unreachable"))
@@ -266,7 +281,7 @@ func TestRequireAuthFailsClosedWhenTheDatabaseErrors(t *testing.T) {
 	clerkAPI := &fakeFetcher{}
 
 	var protected reached
-	handler := auth.RequireAuth(users, clerkAPI)(protected.handler())
+	handler := requireAuth(users, clerkAPI)(protected.handler())
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, withClaims("user_db_down"))
@@ -282,17 +297,20 @@ func TestRequireAuthFailsClosedWhenTheDatabaseErrors(t *testing.T) {
 	}
 }
 
-// Clerk does not guarantee a name. It must arrive as NULL rather than as an
-// empty string, so the column can distinguish "not provided" from "blank".
-func TestProvisioningWithoutANameStoresNull(t *testing.T) {
-	users := &fakeStore{getErr: pgx.ErrNoRows}
-	clerkAPI := &fakeFetcher{identity: auth.Identity{Email: "noname@example.test"}}
+// Clerk does not guarantee a name, and the absence has to survive the whole
+// path. That it lands as NULL rather than as a blank string is the repository's
+// decision and is asserted against a real database by
+// TestUpsertAcceptsAMissingName; what is checked here is that nothing between
+// Clerk and the repository invents one.
+func TestProvisioningWithoutANameCarriesNoName(t *testing.T) {
+	users := &fakeStore{getErr: application.ErrNoSuchUser}
+	clerkAPI := &fakeFetcher{identity: domain.Identity{Email: "noname@example.test"}}
 
-	handler := auth.RequireAuth(users, clerkAPI)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	handler := requireAuth(users, clerkAPI)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	handler.ServeHTTP(httptest.NewRecorder(), withClaims("user_no_name"))
 
-	if users.upsertParam.Name != nil {
-		t.Errorf("name = %q, want nil", *users.upsertParam.Name)
+	if users.upsertIdentity.Name != "" {
+		t.Errorf("name = %q, want empty — nothing may invent one", users.upsertIdentity.Name)
 	}
 }
 
@@ -313,13 +331,13 @@ func TestRequireAuthAnswersWithAProblemDocument(t *testing.T) {
 	}{
 		{
 			name:    "no session claims",
-			handler: auth.RequireAuth(nil, nil)(nil),
+			handler: requireAuth(nil, nil)(nil),
 			request: httptest.NewRequest(http.MethodGet, "/api/tickets", nil),
 			want:    http.StatusUnauthorized,
 		},
 		{
 			name: "the database is unreachable",
-			handler: auth.RequireAuth(
+			handler: requireAuth(
 				&fakeStore{getErr: errors.New("connection refused")},
 				&fakeFetcher{},
 			)(nil),
@@ -352,7 +370,7 @@ func TestRequireAuthAnswersWithAProblemDocument(t *testing.T) {
 // The 500 above must not carry the cause. "connection refused" is the mildest
 // thing a pgx error can say; they also carry host names, ports and table names.
 func TestRequireAuthDoesNotEchoTheDatabaseError(t *testing.T) {
-	handler := auth.RequireAuth(
+	handler := requireAuth(
 		&fakeStore{getErr: errors.New("dial tcp 10.1.2.3:5432: connection refused")},
 		&fakeFetcher{},
 	)(nil)

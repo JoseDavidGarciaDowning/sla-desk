@@ -1,9 +1,17 @@
 # ADR 0002: Validation ownership between `internal/sla` and `internal/ticket`
 
-- **Status:** Accepted
+- **Status:** Accepted, superseded in part by [ADR 0005](./0005-modules-do-not-share-a-vocabulary.md)
 - **Date:** 2026-08-01
 - **Context:** Slice 1, task T5 (`internal/sla`)
 - **Related:** [ADR 0001](./0001-single-calculation-path-for-the-sla-clock.md), `docs/spec.md` §4.1, §4.2
+
+> **Superseded in part.** Two things below are no longer true: `internal/sla` no longer
+> imports `internal/ticket`, and `ErrHistoryMustStartOpen` is now
+> `ErrTimelineMustStartRunning` — a rule about timelines rather than about tickets. What
+> this ADR decided about **validation ownership** still stands: `Reconstruct` returns an
+> error rather than panicking, validates its own preconditions and nothing else, and does
+> not check transition legality. See ADR 0005 for the reasoning and for why the change was
+> a split rather than a rename.
 
 ## Context
 

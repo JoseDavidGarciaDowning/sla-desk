@@ -11,13 +11,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/clerk/clerk-sdk-go/v2"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/auth"
+	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/ticket"
 )
@@ -39,43 +40,40 @@ func (f *fakeCreator) Create(_ context.Context, in store.NewTicket) (store.Ticke
 	return f.out, nil
 }
 
-func uuid(t *testing.T, s string) pgtype.UUID {
+// uuidOf parses a domain identifier. pgUUID converts one into the driver's
+// shape, for the assertions that read what the store was handed.
+func uuidOf(t *testing.T, s string) uuid.UUID {
 	t.Helper()
-	var id pgtype.UUID
-	if err := id.Scan(s); err != nil {
+	id, err := uuid.Parse(s)
+	if err != nil {
 		t.Fatalf("parsing uuid: %v", err)
 	}
 	return id
 }
 
-// stubProvisioner satisfies auth.Provisioner so the request can go through the
-// real RequireAuth rather than a test-only way of putting a user in the
-// context. That matters: it proves the handler reads the caller from where the
-// middleware actually puts it, and that there is no back door to forge one.
-type stubProvisioner struct{ user store.User }
-
-func (s stubProvisioner) GetUserByClerkID(context.Context, string) (store.User, error) {
-	return s.user, nil
-}
-
-func (s stubProvisioner) UpsertUserFromClerk(context.Context, store.UpsertUserFromClerkParams) (store.User, error) {
-	return s.user, nil
-}
-
-// authenticated wraps a handler in RequireAuth and returns a request already
-// carrying verified Clerk claims, as clerkhttp.WithHeaderAuthorization would
-// have left it.
-func authenticated(t *testing.T, caller store.User, h http.Handler, body string) (http.Handler, *http.Request) {
+func pgUUIDOf(t *testing.T, s string) pgtype.UUID {
 	t.Helper()
+	return pgtype.UUID{Bytes: uuidOf(t, s), Valid: true}
+}
 
-	wrapped := auth.RequireAuth(stubProvisioner{user: caller}, nil)(h)
+// authenticated returns a request carrying the caller the identity middleware
+// would have attached.
+//
+// It uses identityhttp.ContextWithUser — the very function RequireAuth calls —
+// rather than running the middleware itself. That keeps the property the
+// previous version was after: the handler still has to read the caller from
+// exactly where the middleware puts it, through the same unexported context
+// key, so a handler that looked anywhere else would fail here.
+//
+// What is no longer exercised from this package is RequireAuth's own behaviour,
+// and that is deliberate: it belongs to the identity module and is tested there
+// against the real Clerk verification chain.
+func authenticated(t *testing.T, caller identitydomain.User, h http.Handler, body string) (http.Handler, *http.Request) {
+	t.Helper()
 
 	r := httptest.NewRequest(http.MethodPost, "/api/tickets", strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
-	claims := &clerk.SessionClaims{
-		RegisteredClaims: clerk.RegisteredClaims{Subject: caller.ClerkUserID},
-	}
-	return wrapped, r.WithContext(clerk.ContextWithSessionClaims(r.Context(), claims))
+	return h, r.WithContext(identityhttp.ContextWithUser(r.Context(), caller))
 }
 
 const validTicketBody = `{
@@ -85,13 +83,13 @@ const validTicketBody = `{
 	"priority": "normal"
 }`
 
-func customer(t *testing.T) store.User {
+func customer(t *testing.T) identitydomain.User {
 	t.Helper()
-	return store.User{
-		ID:          uuid(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+	return identitydomain.User{
+		ID:          uuidOf(t, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
 		ClerkUserID: "user_customer",
 		Email:       "customer@example.test",
-		Role:        ticket.RoleCustomer,
+		Role:        identitydomain.RoleCustomer,
 	}
 }
 
@@ -99,7 +97,7 @@ func TestCreateTicketReturns201WithTheTicket(t *testing.T) {
 	caller := customer(t)
 	due := time.Now().Add(24 * time.Hour).UTC()
 	creator := &fakeCreator{out: store.Ticket{
-		ID:          uuid(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+		ID:          pgUUIDOf(t, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
 		Title:       "Cannot download my invoice",
 		Description: "The download button returns a 500.",
 		Category:    ticket.CategoryBilling,
@@ -156,9 +154,11 @@ func TestRequesterComesFromTheSessionNotTheBody(t *testing.T) {
 	if creator.calls != 1 {
 		t.Fatalf("Create calls = %d, want 1", creator.calls)
 	}
-	if creator.got.RequesterID != caller.ID {
+	if creator.got.RequesterID != pgUUIDOf(t, caller.ID.String()) {
 		t.Errorf("requester = %v, want the authenticated caller %v", creator.got.RequesterID, caller.ID)
 	}
+	// ticket.RoleCustomer, not the identity role the caller carries: the
+	// handler is expected to have translated one vocabulary into the other.
 	if creator.got.ActorRole != ticket.RoleCustomer {
 		t.Errorf("actor role = %q, want the caller's role from our table", creator.got.ActorRole)
 	}
@@ -167,7 +167,9 @@ func TestRequesterComesFromTheSessionNotTheBody(t *testing.T) {
 func TestCreateTicketRejectsAnUnauthenticatedRequest(t *testing.T) {
 	creator := &fakeCreator{}
 
-	handler := auth.RequireAuth(stubProvisioner{}, nil)(api.CreateTicketHandler(creator))
+	// No caller in the context at all, which is what a route mounted without
+	// the identity middleware in front of it would produce.
+	handler := api.CreateTicketHandler(creator)
 	r := httptest.NewRequest(http.MethodPost, "/api/tickets", strings.NewReader(validTicketBody))
 
 	rec := httptest.NewRecorder()
@@ -316,7 +318,7 @@ func sampleTicket(t *testing.T, id string, created time.Time) store.Ticket {
 	t.Helper()
 	due := created.Add(24 * time.Hour)
 	return store.Ticket{
-		ID:        uuid(t, id),
+		ID:        pgUUIDOf(t, id),
 		Title:     "Ticket " + id[:8],
 		Category:  ticket.CategoryOther,
 		Priority:  ticket.PriorityNormal,
@@ -331,15 +333,14 @@ func sampleTicket(t *testing.T, id string, created time.Time) store.Ticket {
 // be served from, because GetTicketHandler reads {id} out of chi's route
 // context. Calling the handler directly leaves that context empty and every id
 // looks malformed — which is how the first version of these tests failed.
-func getRequest(t *testing.T, caller store.User, h http.Handler, pattern, target string) (http.Handler, *http.Request) {
+func getRequest(t *testing.T, caller identitydomain.User, h http.Handler, pattern, target string) (http.Handler, *http.Request) {
 	t.Helper()
 
 	router := chi.NewRouter()
-	router.With(auth.RequireAuth(stubProvisioner{user: caller}, nil)).Method(http.MethodGet, pattern, h)
+	router.Method(http.MethodGet, pattern, h)
 
 	r := httptest.NewRequest(http.MethodGet, target, nil)
-	claims := &clerk.SessionClaims{RegisteredClaims: clerk.RegisteredClaims{Subject: caller.ClerkUserID}}
-	return router, r.WithContext(clerk.ContextWithSessionClaims(r.Context(), claims))
+	return router, r.WithContext(identityhttp.ContextWithUser(r.Context(), caller))
 }
 
 // docs/spec.md §4.3: the scope is in the SQL. The handler never sees another
@@ -355,7 +356,7 @@ func TestListScopesToTheCallerInTheQuery(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if reader.listParams.RequesterID != caller.ID {
+	if reader.listParams.RequesterID != pgUUIDOf(t, caller.ID.String()) {
 		t.Errorf("requester = %v, want the authenticated caller", reader.listParams.RequesterID)
 	}
 }
@@ -460,7 +461,7 @@ func TestCursorResumesWhereThePageStopped(t *testing.T) {
 	if !second.listParams.AfterCreatedAt.Equal(now) {
 		t.Errorf("after = %v, want the first page's last row %v", second.listParams.AfterCreatedAt, now)
 	}
-	if second.listParams.AfterID != uuid(t, page.Tickets[0].ID) {
+	if second.listParams.AfterID != pgUUIDOf(t, page.Tickets[0].ID) {
 		t.Errorf("after id = %v", second.listParams.AfterID)
 	}
 }
@@ -533,7 +534,7 @@ func TestGetScopesToTheCallerInTheQuery(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if reader.getParams.RequesterID != caller.ID {
+	if reader.getParams.RequesterID != pgUUIDOf(t, caller.ID.String()) {
 		t.Errorf("requester = %v, want the authenticated caller", reader.getParams.RequesterID)
 	}
 }
@@ -766,7 +767,7 @@ func TestHistoryScopesToTheCallerInTheQuery(t *testing.T) {
 		"/api/tickets/6f1b5f2a-0000-4000-8000-000000000001/history")
 	handler.ServeHTTP(httptest.NewRecorder(), r)
 
-	if reader.historyParams.RequesterID != caller.ID {
+	if reader.historyParams.RequesterID != pgUUIDOf(t, caller.ID.String()) {
 		t.Errorf("requester = %v, want the authenticated caller", reader.historyParams.RequesterID)
 	}
 }

@@ -180,17 +180,17 @@ func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 		t.Fatalf("resolving the policy: %v", err)
 	}
 
-	history := make([]sla.StatusChange, len(rows))
+	timeline := make([]sla.Phase, len(rows))
 	for i, row := range rows {
-		history[i] = sla.StatusChange{To: row.ToStatus, At: row.CreatedAt}
+		timeline[i] = sla.Phase{At: row.CreatedAt, Running: row.ToStatus.RunsClock()}
 	}
 
 	state, err := sla.Reconstruct(sla.Policy{
 		ID:       policyRow.ID,
-		Priority: policyRow.Priority,
+		Priority: sla.Priority(policyRow.Priority),
 		Budget:   time.Duration(policyRow.BudgetMinutes) * time.Minute,
 		Schedule: sla.Always24x7{},
-	}, history)
+	}, timeline)
 	if err != nil {
 		t.Fatalf("Reconstruct: %v", err)
 	}
