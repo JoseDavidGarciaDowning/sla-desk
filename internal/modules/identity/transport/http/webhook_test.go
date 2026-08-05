@@ -1,4 +1,4 @@
-package api_test
+package http_test
 
 import (
 	"bytes"
@@ -14,9 +14,8 @@ import (
 
 	svix "github.com/svix/svix-webhooks/go"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/api"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/auth"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 )
 
 // A real Svix signing secret is base64 after the whsec_ prefix. This one is not
@@ -26,19 +25,17 @@ import (
 const testWebhookSecret = "whsec_lzIrAAiI15CsoFs852lFmxfJ1xYXoQ5x"
 
 type recordingProvisioner struct {
-	calls  int
-	params store.UpsertUserFromClerkParams
-	err    error
+	calls       int
+	clerkUserID string
+	identity    domain.Identity
+	err         error
 }
 
-func (r *recordingProvisioner) GetUserByClerkID(context.Context, string) (store.User, error) {
-	return store.User{}, nil
-}
-
-func (r *recordingProvisioner) UpsertUserFromClerk(_ context.Context, arg store.UpsertUserFromClerkParams) (store.User, error) {
+func (r *recordingProvisioner) Provision(_ context.Context, clerkUserID string, id domain.Identity) (domain.User, error) {
 	r.calls++
-	r.params = arg
-	return store.User{ClerkUserID: arg.ClerkUserID, Email: arg.Email}, r.err
+	r.clerkUserID = clerkUserID
+	r.identity = id
+	return domain.User{ClerkUserID: clerkUserID, Email: id.Email}, r.err
 }
 
 func fixture(t *testing.T, name string) []byte {
@@ -92,11 +89,11 @@ func TestWebhookRejectsAnUnsignedRequest(t *testing.T) {
 
 func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 
-func newWebhookHandler(t *testing.T, users auth.Provisioner) http.Handler {
+func newWebhookHandler(t *testing.T, p identityhttp.Provisioner) http.Handler {
 	t.Helper()
-	h, err := api.ClerkWebhookHandler(testWebhookSecret, users)
+	h, err := identityhttp.WebhookHandler(testWebhookSecret, p)
 	if err != nil {
-		t.Fatalf("ClerkWebhookHandler: %v", err)
+		t.Fatalf("WebhookHandler: %v", err)
 	}
 	return h
 }
@@ -114,14 +111,14 @@ func TestWebhookProvisionsTheUserFromASignedEvent(t *testing.T) {
 	if users.calls != 1 {
 		t.Fatalf("upserts = %d, want 1", users.calls)
 	}
-	if users.params.ClerkUserID != "user_2abcDEF123" {
-		t.Errorf("clerk id = %q, want user_2abcDEF123", users.params.ClerkUserID)
+	if users.clerkUserID != "user_2abcDEF123" {
+		t.Errorf("clerk id = %q, want user_2abcDEF123", users.clerkUserID)
 	}
-	if users.params.Email != "grace@example.test" {
-		t.Errorf("email = %q, want the primary address, not the first in the list", users.params.Email)
+	if users.identity.Email != "grace@example.test" {
+		t.Errorf("email = %q, want the primary address, not the first in the list", users.identity.Email)
 	}
-	if users.params.Name == nil || *users.params.Name != "Grace Hopper" {
-		t.Errorf("name = %v, want Grace Hopper", users.params.Name)
+	if users.identity.Name != "Grace Hopper" {
+		t.Errorf("name = %q, want Grace Hopper", users.identity.Name)
 	}
 }
 
@@ -207,8 +204,8 @@ func TestWebhookAcceptsTheSameEventTwice(t *testing.T) {
 	if users.calls != 2 {
 		t.Errorf("upserts = %d, want 2 — both deliveries must reach the idempotent write", users.calls)
 	}
-	if users.params.ClerkUserID != "user_2abcDEF123" {
-		t.Errorf("clerk id = %q after the replay", users.params.ClerkUserID)
+	if users.clerkUserID != "user_2abcDEF123" {
+		t.Errorf("clerk id = %q after the replay", users.clerkUserID)
 	}
 }
 
@@ -243,7 +240,7 @@ func TestWebhookRejectsAUserPayloadWithNoID(t *testing.T) {
 }
 
 func TestWebhookHandlerRefusesAnUnusableSigningSecret(t *testing.T) {
-	if _, err := api.ClerkWebhookHandler("not-a-svix-secret", &recordingProvisioner{}); err == nil {
+	if _, err := identityhttp.WebhookHandler("not-a-svix-secret", &recordingProvisioner{}); err == nil {
 		t.Error("expected an error — a bad secret must stop the deploy, not become runtime 500s")
 	}
 }
@@ -258,7 +255,7 @@ func TestWebhookHandlerRefusesAnUnusableSigningSecret(t *testing.T) {
 // it being inconsistent: the delivery log in Clerk's dashboard shows it, and
 // it costs nothing to say the same thing everywhere.
 func TestWebhookErrorsAreProblemDocuments(t *testing.T) {
-	handler, err := api.ClerkWebhookHandler(testWebhookSecret, &recordingProvisioner{})
+	handler, err := identityhttp.WebhookHandler(testWebhookSecret, &recordingProvisioner{})
 	if err != nil {
 		t.Fatalf("building the handler: %v", err)
 	}
@@ -271,7 +268,7 @@ func TestWebhookErrorsAreProblemDocuments(t *testing.T) {
 		{
 			name: "an unsigned request",
 			request: func(*testing.T) *http.Request {
-				return httptest.NewRequest(http.MethodPost, api.ClerkWebhookPath,
+				return httptest.NewRequest(http.MethodPost, identityhttp.WebhookPath,
 					bytes.NewReader([]byte(`{"type":"user.created","data":{}}`)))
 			},
 			want: http.StatusBadRequest,

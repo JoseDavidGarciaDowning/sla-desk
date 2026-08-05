@@ -49,13 +49,3 @@ type TicketStatusHistory struct {
 	Reason     *string
 	CreatedAt  time.Time
 }
-
-type User struct {
-	ID          pgtype.UUID
-	ClerkUserID string
-	Email       string
-	Name        *string
-	Role        ticket.Role
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-}

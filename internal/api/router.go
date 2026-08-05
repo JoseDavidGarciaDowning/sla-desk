@@ -5,6 +5,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,8 +13,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/auth"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
 )
 
 // HealthPath is the health endpoint.
@@ -30,9 +31,10 @@ type Deps struct {
 	// Probes back the health endpoint.
 	Probes map[string]Probe
 
-	// Users is the provisioning side of the store, used by both the webhook
-	// and the lazy fallback in RequireAuth.
-	Users auth.Provisioner
+	// Identity answers who is making a request, and owns the webhook Clerk
+	// posts user events to. Passed as the built module rather than as its
+	// collaborators, so this package never names what is inside it.
+	Identity *identity.Module
 
 	// Tickets writes; Reader reads. Two interfaces rather than one because the
 	// write path needs a transaction and the read path does not.
@@ -74,26 +76,25 @@ func NewRouter(cfg config.Config, deps Deps) (http.Handler, error) {
 	// carries a Svix signature, not a session JWT, so RequireAuth would reject
 	// every delivery — and Svix would retry each one until it gave up, silently
 	// breaking the primary provisioning path in docs/spec.md §4.5.
-	webhook, err := ClerkWebhookHandler(cfg.ClerkWebhookSecret, deps.Users)
+	// A nil module is a wiring mistake, and without this it is a nil pointer
+	// dereference on the first request to reach a protected route — in
+	// production, at 3am, rather than here.
+	if deps.Identity == nil {
+		return nil, errors.New("api: Deps.Identity is required; every protected route sits behind it")
+	}
+
+	webhookPath, webhook, err := deps.Identity.WebhookRoute()
 	if err != nil {
 		return nil, err
 	}
-	r.Method(http.MethodPost, ClerkWebhookPath, webhook)
-
-	clerkCfg := auth.Config{
-		SecretKey:       cfg.ClerkSecretKey,
-		AuthorizedParty: cfg.ClerkAuthorizedParty,
-		APIURL:          cfg.ClerkAPIURL,
-	}
+	r.Method(http.MethodPost, webhookPath, webhook)
 
 	r.Group(func(r chi.Router) {
-		// Two middlewares, in this order and both required. The first verifies
-		// the token and attaches claims but rejects nothing; the second is what
-		// turns an unauthenticated request into a 401 and resolves the caller
-		// into one of our users. Mounting only the first leaves these routes
-		// open (docs/spec.md §4.3).
-		r.Use(auth.Middleware(clerkCfg))
-		r.Use(auth.RequireAuth(deps.Users, auth.NewIdentityFetcher(clerkCfg)))
+		// One chain, from the module. Both middlewares are required and in a
+		// fixed order, and returning them together is what stops a caller
+		// mounting only the token check and leaving these routes open
+		// (docs/spec.md §4.3).
+		r.Use(deps.Identity.Authenticate)
 
 		r.Method(http.MethodPost, TicketsPath, CreateTicketHandler(deps.Tickets))
 		r.Method(http.MethodGet, TicketsPath, ListTicketsHandler(deps.Reader))

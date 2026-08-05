@@ -1,29 +1,38 @@
-package api
+package http
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 
-	"github.com/clerk/clerk-sdk-go/v2"
+	clerksdk "github.com/clerk/clerk-sdk-go/v2"
 	svix "github.com/svix/svix-webhooks/go"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/auth"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	clerkadapter "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 )
 
-// ClerkWebhookPath is where Clerk posts user events.
+// WebhookPath is where Clerk posts user events.
 //
 // It goes straight to the Go API rather than through Next.js, which would add a
 // hop for no reason, and it is the one route that must be mounted outside
 // RequireAuth: Clerk sends a Svix signature, not a session JWT.
-const ClerkWebhookPath = "/api/webhooks/clerk"
+const WebhookPath = "/api/webhooks/clerk"
 
 // maxWebhookBody caps what we will read before verifying anything. Clerk's user
 // events are a few kilobytes; anything near this is not one.
 const maxWebhookBody = 1 << 20 // 1 MiB
+
+// Provisioner is the slice of the module this handler needs. Declared here for
+// the same reason Resolver is: a webhook test should exercise signature
+// verification and payload handling without a database behind it.
+type Provisioner interface {
+	Provision(ctx context.Context, clerkUserID string, id domain.Identity) (domain.User, error)
+}
 
 // clerkEvent is the envelope Clerk wraps every event in. Data is left raw so
 // the payload is only decoded for the event types we act on.
@@ -32,12 +41,12 @@ type clerkEvent struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// ClerkWebhookHandler verifies and applies Clerk user events.
+// WebhookHandler verifies and applies Clerk user events.
 //
 // It returns an error rather than a handler that fails at request time, so a
 // bad signing secret stops the deploy instead of turning into 500s nobody is
 // watching.
-func ClerkWebhookHandler(signingSecret string, users auth.Provisioner) (http.Handler, error) {
+func WebhookHandler(signingSecret string, p Provisioner) (http.Handler, error) {
 	verifier, err := svix.NewWebhook(signingSecret)
 	if err != nil {
 		return nil, fmt.Errorf("clerk webhook: %w", err)
@@ -70,7 +79,7 @@ func ClerkWebhookHandler(signingSecret string, users auth.Provisioner) (http.Han
 
 		switch event.Type {
 		case "user.created", "user.updated":
-			var u clerk.User
+			var u clerksdk.User
 			if err := json.Unmarshal(event.Data, &u); err != nil {
 				httperr.Write(w, http.StatusBadRequest, "malformed user payload")
 				return
@@ -80,7 +89,7 @@ func ClerkWebhookHandler(signingSecret string, users auth.Provisioner) (http.Han
 				return
 			}
 
-			if _, err := auth.Provision(r.Context(), users, u.ID, auth.IdentityFromClerkUser(&u)); err != nil {
+			if _, err := p.Provision(r.Context(), u.ID, clerkadapter.IdentityFrom(&u)); err != nil {
 				// 500 on purpose. Svix retries any non-2xx, and a transient
 				// database failure is exactly the case where we want it to.
 				slog.ErrorContext(r.Context(), "provisioning from a Clerk webhook failed",

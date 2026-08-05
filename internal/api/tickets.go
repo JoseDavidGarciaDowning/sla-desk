@@ -18,7 +18,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/auth"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/store"
 )
@@ -43,7 +42,7 @@ type TicketCreator interface {
 // has no field one could arrive in anyway.
 func CreateTicketHandler(tickets TicketCreator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := auth.UserFromContext(r.Context())
+		caller, ok := callerFromContext(r.Context())
 		if !ok {
 			// Only reachable if this route is mounted without RequireAuth in
 			// front of it, which is a wiring mistake rather than a bad request.
@@ -188,7 +187,7 @@ func filterParam[T ~string](q url.Values, name string, valid []T) (*string, stri
 // replacement for it.
 func ListTicketsHandler(tickets TicketReader) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := auth.UserFromContext(r.Context())
+		caller, ok := callerFromContext(r.Context())
 		if !ok {
 			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return
@@ -261,7 +260,7 @@ func ListTicketsHandler(tickets TicketReader) http.Handler {
 // cases, so the handler cannot tell them apart either.
 func GetTicketHandler(tickets TicketReader) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := auth.UserFromContext(r.Context())
+		caller, ok := callerFromContext(r.Context())
 		if !ok {
 			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return
@@ -306,7 +305,7 @@ const TicketHistorySuffix = "/history"
 // that the id names a real ticket (docs/spec.md §11).
 func GetTicketHistoryHandler(tickets TicketReader) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		caller, ok := auth.UserFromContext(r.Context())
+		caller, ok := callerFromContext(r.Context())
 		if !ok {
 			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return

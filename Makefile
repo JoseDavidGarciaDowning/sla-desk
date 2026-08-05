@@ -59,8 +59,17 @@ migrate-new: ## Create a migration: make migrate-new name=add_tickets
 	@test -n "$(name)" || { echo "usage: make migrate-new name=add_tickets"; exit 1; }
 	go tool goose -dir db/migrations create $(name) sql
 
-sqlc: ## Regenerate the type-safe query code from db/queries
-	go tool sqlc generate
+# One config per module that owns tables, plus the root one for what has not
+# moved yet. Discovered rather than listed: a module added with its own queries
+# and left out of a hand-written list would silently never be regenerated, and
+# the drift only shows up as a compile error days later.
+SQLC_CONFIGS := sqlc.yaml $(shell find internal/modules -name sqlc.yaml 2>/dev/null | sort)
+
+sqlc: ## Regenerate the type-safe query code for every config
+	@for cfg in $(SQLC_CONFIGS); do \
+		echo "sqlc: $$cfg"; \
+		go tool sqlc -f $$cfg generate || exit 1; \
+	done
 
 contract: ## Regenerate web/lib/contract.ts from the API's own bounds and vocabularies
 	go run ./cmd/gencontract
