@@ -18,10 +18,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httpx"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httperr"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httpx"
 )
 
 // TicketsPath is the collection endpoint.

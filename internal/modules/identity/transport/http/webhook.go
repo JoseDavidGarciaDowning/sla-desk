@@ -11,9 +11,9 @@ import (
 	clerksdk "github.com/clerk/clerk-sdk-go/v2"
 	svix "github.com/svix/svix-webhooks/go"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	clerkadapter "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httperr"
 )
 
 // WebhookPath is where Clerk posts user events.

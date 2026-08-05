@@ -12,8 +12,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
-	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
 )
@@ -22,11 +20,7 @@ import (
 // than hardcoded, because identity values depend on how often the seed has run.
 func normalPolicyID(t *testing.T, ctx testContext) int64 {
 	t.Helper()
-	p, err := slapostgres.NewPolicyRepository(ctx.tx).ActiveByPriority(ctx.ctx, sladomain.PriorityNormal)
-	if err != nil {
-		t.Fatalf("resolving the normal policy: %v", err)
-	}
-	return p.ID
+	return policyIDFor(t, ctx, domain.PriorityNormal)
 }
 
 // testContext bundles what every ticket test needs, so the helpers below do not
@@ -592,11 +586,18 @@ func newTicketWith(t *testing.T, c testContext, requester uuid.UUID, title strin
 
 func policyIDFor(t *testing.T, c testContext, priority domain.Priority) int64 {
 	t.Helper()
-	p, err := slapostgres.NewPolicyRepository(c.tx).ActiveByPriority(c.ctx, sladomain.Priority(priority))
-	if err != nil {
+	// Read with SQL rather than through the SLA module's repository. These
+	// tests are about this module's tables, and reaching into another module to
+	// look up a foreign key would be the boundary breaking in a test — which is
+	// where it always breaks first, because "it is only a test" is how every
+	// such import gets justified.
+	var id int64
+	if err := c.tx.QueryRow(c.ctx,
+		`SELECT id FROM sla_policies WHERE priority = $1 AND active`, string(priority),
+	).Scan(&id); err != nil {
 		t.Fatalf("resolving the %s policy: %v", priority, err)
 	}
-	return p.ID
+	return id
 }
 
 func titlesOf(rows []ticketdb.Ticket) []string {

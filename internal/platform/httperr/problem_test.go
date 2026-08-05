@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httperr"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httperr"
 )
 
 func decodeProblem(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {

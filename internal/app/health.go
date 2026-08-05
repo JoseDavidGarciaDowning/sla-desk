@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/httpx"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httpx"
 )
 
 // Probe reports whether one dependency is reachable.

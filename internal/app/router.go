@@ -19,10 +19,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/config"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket"
 	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/config"
 )
 
 // HealthPath is the health endpoint.
