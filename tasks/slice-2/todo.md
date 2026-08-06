@@ -399,31 +399,79 @@ plus tests
 
 ## Phase 4: The agent in a browser
 
-### T23: `(agent)` route group, role guard, queue view
+### T23: `(agent)` route group, role guard, queue view ✅
 
 **Description:** The agent's half of the app. A second route group beside `(customer)`,
-guarded the same way §4.3 guards the API — and, like T12, the guard here is UX and the real
+guarded the same way §4.3 guards the API — and, like T12, the guard here is UX while the real
 boundary stays on the API side.
 
 **Acceptance criteria:**
-- [ ] `web/app/(agent)/` group with its own layout, calling `auth.protect()` **and** checking
-      the role from the API — Clerk does not hold the role, our database does
-- [ ] A customer visiting `/agent` is redirected; a signed-out visitor goes to sign-in
-- [ ] Queue table: requester, title, priority, status, assignee, SLA remaining
-- [ ] `sla-timer.tsx` reused unchanged — no second implementation of the countdown
-- [ ] Filters in URL query params, as T14a established
-- [ ] Loading, empty and error states, including the 403 state for a customer who forced the URL
+- [x] `web/app/(agent)/` group with its own layout, calling `auth.protect()` **and** reading
+      the role from the API — Clerk holds no role, our database does
+- [x] A customer visiting `/queue` is redirected; a signed-out visitor goes to sign-in
+- [x] Queue table: requester, title, priority, status, SLA remaining
+- [x] `sla-timer.tsx` reused unchanged — no second implementation of the countdown
+- [x] Filters in URL query params, as T14a established
+- [x] Loading, two empty states, and the 403 state for a customer who forced the URL
 
 **Verification:**
-- [ ] Component tests for the table, the filters and the 403 state
-- [ ] `pnpm build`, `pnpm lint`, `tsc --noEmit` clean
-- [ ] Measured, not assumed: the actual redirect target is inspected, because T12 shipped a
-      correct `307` pointing at the wrong host
+- [x] 7 component tests: the requester is shown; rows keep the API's order; every filter
+      reaches the request and absent ones do not; each filter combination caches separately;
+      a 403 renders a sentence rather than a status code; the two empty states differ
+- [x] `pnpm build`, `pnpm lint` and `tsc --noEmit` clean; `/queue` builds as a dynamic route
+- [x] **5 mutations, 5 dead**: reordering the rows in the browser; dropping the filters from
+      the query key; rendering the 403 as a plain status code; collapsing the two empty
+      states; omitting the requester's name
+- [x] **Measured, not assumed**, the way T12 required — see below
 
 **Dependencies:** T19
-**Files:** `web/app/(agent)/layout.tsx`, `web/app/(agent)/queue/`, `web/lib/use-agent-tickets.ts`,
-`web/lib/agent.ts`, plus tests
+**Files:** `web/lib/agent.ts`, `web/app/(agent)/layout.tsx`,
+`web/app/(agent)/queue/{page,agent-queue,queue-filters}.tsx`, plus tests
 **Scope:** M
+
+**Decisions taken during T23:**
+
+- **The role check runs on the server, in the layout.** A client-side check would flash the
+  agent chrome before redirecting a customer. It costs one request per navigation into the
+  group, against `/api/agent/me` — the cheapest endpoint in the API — with `cache: "no-store"`,
+  because a cached role would outlive a promotion or survive a demotion.
+- **Any failure of that request redirects, and the reasons are deliberately not told apart.**
+  A 403 means "not staff"; an unreachable API means we cannot know. Showing the agent shell on
+  "cannot know" is the one outcome worth avoiding: failing closed sends a real agent to their
+  own tickets during an outage, which is recoverable, while failing open shows a customer a
+  queue that errors on every request.
+- **`agentKeys` is a separate cache tree from `ticketKeys`.** Not tidiness: invalidating the
+  customer's list must not refetch the queue, and a ticket read as an agent is not the same
+  cached value as the same ticket read by its requester — one is reachable and the other
+  answers 404.
+- **The assignee filter's vocabulary is transcribed, not generated.** Status and priority come
+  from the generated contract; `any`/`unassigned`/`me` exist only on this endpoint and there is
+  nothing in the shared contract to generate them from. Acceptable because an unknown value is
+  answered with a 400 naming the field — it fails loudly on the first click rather than quietly
+  returning the wrong rows.
+- **The ordering is stated on the page.** A list of rows does not show its own sort order, and
+  an agent who assumes newest-first reads the whole screen wrong when the point is that the top
+  row is the next breach.
+
+**Measured rather than assumed.** T12 shipped a correct `307` that pointed at Clerk's hosted
+sign-in — a page that is not part of this app — so a status code is not evidence here. The
+signed-out surface, read off a running dev server:
+
+```
+/          200
+/queue     307 → http://localhost:3000/sign-in?redirect_url=…  [x-middleware-rewrite: /queue]
+/tickets   307 → http://localhost:3000/sign-in?redirect_url=…
+/sign-in   200
+```
+
+Two things that a bare 307 would not have shown: the target is **our** sign-in route rather
+than the hosted one, and `x-middleware-rewrite` is present, which is what proves the proxy
+passed the request through instead of short-circuiting it. Without that header the 307 could
+equally be Clerk's development-instance handshake, which produces the same status.
+
+**Not verified this way, and it needs a real session:** that a signed-in *customer* is
+redirected from `/queue` to `/tickets`. The component test covers the 403 the API answers; the
+layout's redirect on a non-staff role is covered by neither, and belongs in the E2E work of T25.
 
 ---
 
