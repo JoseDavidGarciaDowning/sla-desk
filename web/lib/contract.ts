@@ -39,3 +39,29 @@ export const STATUSES = [
   "closed",
 ] as const;
 export type TicketStatus = (typeof STATUSES)[number];
+
+export const ACTOR_ROLES = [
+  "customer",
+  "agent",
+  "admin",
+] as const;
+export type ActorRole = (typeof ACTOR_ROLES)[number];
+
+export const TRANSITIONS: Record<
+  TicketStatus,
+  Partial<Record<TicketStatus, readonly ActorRole[]>>
+> = {
+  "open": {
+    "pending": ["agent", "admin"],
+    "resolved": ["agent", "admin"],
+  },
+  "pending": {
+    "open": ["customer", "agent", "admin"],
+    "resolved": ["agent", "admin"],
+  },
+  "resolved": {
+    "open": ["customer", "agent", "admin"],
+    "closed": ["agent", "admin"],
+  },
+  "closed": {},
+} as const;
