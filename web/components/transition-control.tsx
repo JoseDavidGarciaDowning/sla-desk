@@ -5,13 +5,14 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
+  type AgentTicket,
   type NewTransition,
   agentKeys,
   allowedTransitions,
 } from "@/lib/agent";
 import { ApiError } from "@/lib/api";
 import type { ActorRole, TicketStatus } from "@/lib/contract";
-import type { Ticket } from "@/lib/tickets";
+
 import { useApiFetch } from "@/lib/use-api";
 
 /**
@@ -33,7 +34,7 @@ export function TransitionControl({
   ticket,
   role,
 }: {
-  ticket: Ticket;
+  ticket: AgentTicket;
   role: ActorRole;
 }) {
   const apiFetch = useApiFetch();
@@ -44,7 +45,7 @@ export function TransitionControl({
 
   const move = useMutation({
     mutationFn: (body: NewTransition) =>
-      apiFetch<Ticket>(`/api/agent/tickets/${ticket.id}/transitions`, {
+      apiFetch<AgentTicket>(`/api/agent/tickets/${ticket.id}/transitions`, {
         method: "POST",
         body: JSON.stringify(body),
       }),

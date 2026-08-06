@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TransitionControl } from "@/components/transition-control";
 import { ApiError } from "@/lib/api";
-import type { Ticket } from "@/lib/tickets";
+import type { AgentTicket } from "@/lib/agent";
 
 const { apiFetch } = vi.hoisted(() => ({ apiFetch: vi.fn() }));
 
@@ -13,7 +13,7 @@ vi.mock("@/lib/use-api", () => ({
   useApiFetch: () => apiFetch,
 }));
 
-function ticket(status: string): Ticket {
+function ticket(status: string): AgentTicket {
   return {
     id: "6f1b5f2a-0000-4000-8000-000000000001",
     title: "Cannot download my invoice",
@@ -23,6 +23,7 @@ function ticket(status: string): Ticket {
     status,
     sla_due_at: "2099-01-01T00:00:00Z",
     sla_breached: false,
+    assignee_id: null,
     created_at: "2026-08-03T12:00:00Z",
     updated_at: "2026-08-03T12:00:00Z",
   };

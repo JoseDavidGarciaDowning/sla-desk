@@ -120,6 +120,6 @@ func AssignTicketHandler(tickets TicketAssigner, resolve CallerResolver) http.Ha
 			return
 		}
 
-		httpx.WriteJSON(w, r, http.StatusOK, NewTicketResponse(updated))
+		httpx.WriteJSON(w, r, http.StatusOK, NewAgentTicketResponse(updated))
 	})
 }

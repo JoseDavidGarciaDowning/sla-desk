@@ -2,11 +2,18 @@
 
 import { useQuery } from "@tanstack/react-query";
 
+import { AssignControl } from "@/components/assign-control";
 import { SlaTimer } from "@/components/sla-timer";
 import { StatusTimeline } from "@/components/status-timeline";
-import { agentKeys } from "@/lib/agent";
+import { TransitionControl } from "@/components/transition-control";
+import {
+  type AgentMe,
+  type AgentTicket,
+  agentKeys,
+  asActorRole,
+} from "@/lib/agent";
 import { ApiError } from "@/lib/api";
-import type { Ticket, TicketHistory } from "@/lib/tickets";
+import type { TicketHistory } from "@/lib/tickets";
 import { useApiFetch } from "@/lib/use-api";
 
 /**
@@ -30,7 +37,16 @@ export function AgentTicketDetail({ id }: { id: string }) {
 
   const ticket = useQuery({
     queryKey: agentKeys.detail(id),
-    queryFn: () => apiFetch<Ticket>(`/api/agent/tickets/${id}`),
+    queryFn: () => apiFetch<AgentTicket>(`/api/agent/tickets/${id}`),
+  });
+
+  // Who the caller is, from our database rather than from Clerk. The role
+  // decides which moves the transition control offers, and the id is what
+  // "assign to me" sends — neither is derivable in the browser.
+  const me = useQuery({
+    queryKey: agentKeys.me(),
+    queryFn: () => apiFetch<AgentMe>("/api/agent/me"),
+    staleTime: 5 * 60 * 1000,
   });
 
   const history = useQuery({
@@ -82,6 +98,24 @@ export function AgentTicketDetail({ id }: { id: string }) {
       </header>
 
       <p className="whitespace-pre-wrap">{ticket.data.description}</p>
+
+      {/* The controls wait for the caller rather than guessing at one. A
+          transition control rendered with the wrong role would offer moves the
+          API then refuses, which is the drift the generated table exists to
+          prevent. */}
+      {me.data && (
+        <section className="grid gap-6 rounded-md border p-4 sm:grid-cols-2">
+          <div className="space-y-2">
+            <h2 className="text-sm font-medium">Assignment</h2>
+            <AssignControl ticket={ticket.data} me={me.data} />
+          </div>
+
+          <div className="space-y-2">
+            <h2 className="text-sm font-medium">Move this ticket</h2>
+            <TransitionControl ticket={ticket.data} role={asActorRole(me.data.role)} />
+          </div>
+        </section>
+      )}
 
       <section className="space-y-3">
         <h2 className="text-sm font-medium">History</h2>

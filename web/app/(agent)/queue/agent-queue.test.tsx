@@ -32,6 +32,7 @@ function entry(overrides: Partial<QueueEntry> = {}): QueueEntry {
     sla_breached: false,
     created_at: "2026-08-03T12:00:00Z",
     updated_at: "2026-08-03T12:00:00Z",
+    assignee_id: null,
     requester_name: "Ada Lovelace",
     ...overrides,
   };

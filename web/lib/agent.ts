@@ -1,4 +1,9 @@
-import { TRANSITIONS, type ActorRole, type TicketStatus } from "@/lib/contract";
+import {
+  ACTOR_ROLES,
+  TRANSITIONS,
+  type ActorRole,
+  type TicketStatus,
+} from "@/lib/contract";
 import type { Ticket } from "@/lib/tickets";
 
 /**
@@ -29,7 +34,19 @@ export type AgentMe = {
  * does not send one. It is another user's primary key, and a queue needs a name
  * to show, not an identifier to enumerate.
  */
-export type QueueEntry = Ticket & {
+export type AgentTicket = Ticket & {
+  /**
+   * Null when nobody is on it. Explicitly null rather than absent, so a client
+   * can tell "nobody" from "this endpoint does not say".
+   *
+   * It is on the agent's shape and not on Ticket, because the customer's
+   * endpoints return the same type and an assignee id there would hand every
+   * customer the primary key of the agent working their case.
+   */
+  assignee_id: string | null;
+};
+
+export type QueueEntry = AgentTicket & {
   requester_name: string;
 };
 
@@ -164,6 +181,27 @@ export function allowedTransitions(
   return (Object.entries(targets) as [TicketStatus, readonly ActorRole[]][])
     .filter(([, roles]) => roles.includes(role))
     .map(([to]) => to);
+}
+
+/**
+ * Converts the role our database reports into the one the state machine keys
+ * its edges on.
+ *
+ * They hold the same three strings and are different vocabularies on purpose:
+ * `/api/agent/me` answers with the identity module's role — what somebody *is*
+ * — while TRANSITIONS is keyed on the ticket module's — what somebody *was when
+ * they acted* (docs/adr/0005). Go performs the same conversion in its
+ * composition root, exhaustively, for the same reason.
+ *
+ * Anything unrecognised becomes `customer`, the least privileged. A role added
+ * to the database and not accounted for here then offers no moves at all, which
+ * is a permission complaint somebody reports rather than a request the API
+ * rejects at write time.
+ */
+export function asActorRole(role: string): ActorRole {
+  return ACTOR_ROLES.includes(role as ActorRole)
+    ? (role as ActorRole)
+    : "customer";
 }
 
 /** The roles this app treats as staff. Mirrors RequireRole in the API. */

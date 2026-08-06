@@ -137,7 +137,7 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 
 		// The updated ticket, so a client needs no follow-up read to see the
 		// new deadline — which is the whole point of the request for a pause.
-		httpx.WriteJSON(w, r, http.StatusOK, NewTicketResponse(updated))
+		httpx.WriteJSON(w, r, http.StatusOK, NewAgentTicketResponse(updated))
 	})
 }
 

@@ -49,8 +49,14 @@ function renderDetail() {
   );
 }
 
+const me = { id: "11111111-1111-4111-8111-111111111111", role: "agent" };
+
 // Routes the mock by path, so the ticket and the history can succeed and fail
 // independently — which is the behaviour under test.
+//
+// /me is answered unconditionally: it is what the controls need to know who is
+// asking, and a test about the ticket failing should not also be a test about
+// the caller being unknown.
 function respond({
   onTicket,
   onHistory,
@@ -59,6 +65,12 @@ function respond({
   onHistory?: () => unknown;
 }) {
   apiFetch.mockImplementation((path: string) => {
+    if (path.endsWith("/me")) {
+      return Promise.resolve(me);
+    }
+    if (path.endsWith("/assignable")) {
+      return Promise.resolve({ users: [] });
+    }
     if (path.endsWith("/history")) {
       return onHistory ? Promise.resolve(onHistory()) : Promise.reject(new Error("no"));
     }
@@ -81,11 +93,14 @@ describe("the agent ticket detail", () => {
     renderDetail();
 
     expect(await screen.findByText(ticket.title)).toBeTruthy();
-    // The endpoints it reads are the agent's, not the customer's. The customer
-    // ones would answer 404 for a ticket that is not the caller's, so pointing
-    // at them would be invisible in a mock and fatal in production.
-    const paths = apiFetch.mock.calls.map((c) => c[0] as string);
-    expect(paths.every((p) => p.startsWith("/api/agent/tickets/"))).toBe(true);
+    // Every *ticket* read goes to the agent endpoints. The customer ones would
+    // answer 404 for a ticket that is not the caller's, so pointing at them
+    // would be invisible against a mock and fatal in production.
+    const ticketPaths = apiFetch.mock.calls
+      .map((c) => c[0] as string)
+      .filter((p) => p.includes("/tickets/"));
+    expect(ticketPaths.length).toBeGreaterThan(0);
+    expect(ticketPaths.every((p) => p.startsWith("/api/agent/tickets/"))).toBe(true);
   });
 
   it("keeps the ticket on screen when the history fails", async () => {
@@ -100,7 +115,7 @@ describe("the agent ticket detail", () => {
   });
 
   it("says the ticket does not exist, rather than showing a status code", async () => {
-    apiFetch.mockRejectedValue(new ApiError(404, "/api/agent/tickets/x"));
+    respond({ onTicket: () => { throw new ApiError(404, "/api/agent/tickets/x"); } });
 
     renderDetail();
 
@@ -109,7 +124,7 @@ describe("the agent ticket detail", () => {
   });
 
   it("does not ask for the history of a ticket that is not there", async () => {
-    apiFetch.mockRejectedValue(new ApiError(404, "/api/agent/tickets/x"));
+    respond({ onTicket: () => { throw new ApiError(404, "/api/agent/tickets/x"); } });
 
     renderDetail();
     await screen.findByRole("alert");
