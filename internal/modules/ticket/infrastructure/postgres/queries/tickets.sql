@@ -199,3 +199,26 @@ LIMIT @page_size;
 -- customer because there is no id in its path to confirm; an id that names no
 -- ticket is a different question, and §11's rule applies to it unchanged.
 SELECT * FROM tickets WHERE id = $1;
+
+-- name: AssignTicket :one
+-- Puts an agent on a ticket, or takes whoever is there off it.
+--
+-- One column. No ticket_status_history row is written by this or alongside it,
+-- and that is a decision rather than an omission (tasks/slice-2/plan.md §E):
+-- the history is the fact the SLA clock is rebuilt from (docs/spec.md §4.2),
+-- and assignment does not move a ticket's status. A row for it would pad the
+-- timeline sla.Reconstruct walks, and the consistency test would be right to
+-- fail. Who assigned what to whom belongs to the audit log in slice 9.
+--
+-- Nothing here checks that the assignee may hold tickets. assignee_id is a bare
+-- foreign key to users, so this statement would accept a customer's id — the
+-- check is a port the module declares and the composition root answers. A CHECK
+-- constraint joining users.role was rejected: it would freeze the answer, and
+-- demoting an agent who still holds open tickets would then fail at write time.
+--
+-- No rows means no such ticket, which the handler turns into a 404.
+UPDATE tickets
+   SET assignee_id = sqlc.narg(assignee_id)::uuid,
+       updated_at  = now()
+ WHERE id = @id
+RETURNING *;

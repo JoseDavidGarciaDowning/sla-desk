@@ -10,6 +10,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/google/uuid"
+
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 )
 
@@ -25,6 +27,9 @@ var ErrNoSuchUser = errors.New("identity: no user for that Clerk subject")
 type UserRepository interface {
 	// ByClerkID returns ErrNoSuchUser when there is no row, and only then.
 	ByClerkID(ctx context.Context, clerkUserID string) (domain.User, error)
+
+	// ByID reads by our own primary key. Same contract on the error.
+	ByID(ctx context.Context, id uuid.UUID) (domain.User, error)
 
 	// Upsert is the idempotent provisioning write.
 	//
@@ -116,6 +121,30 @@ func (s *Service) applyGrant(ctx context.Context, user domain.User) (domain.User
 		return user, nil
 	}
 	return s.users.GrantRole(ctx, user.ClerkUserID, granted)
+}
+
+// MayHoldTickets answers whether a user is one of ours who can be put on a
+// ticket.
+//
+// It answers false for an id that names nobody, rather than reporting a
+// missing user. The caller is deciding whether to accept an assignee, and "this
+// person does not exist" and "this person is a customer" have to be the same
+// answer there: two different ones would let a caller enumerate which uuids
+// name real users.
+//
+// The roles are named here rather than by the caller, because what counts as
+// privileged is this module's business — the RBAC matrix in docs/spec.md §4.3
+// is about our users, and the ticket module never learns the word "agent".
+func (s *Service) MayHoldTickets(ctx context.Context, id uuid.UUID) (bool, error) {
+	user, err := s.users.ByID(ctx, id)
+	if errors.Is(err, ErrNoSuchUser) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	return user.Role == domain.RoleAgent || user.Role == domain.RoleAdmin, nil
 }
 
 // Provision writes the users row for a Clerk identity, creating it if this is

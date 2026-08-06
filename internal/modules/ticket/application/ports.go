@@ -77,6 +77,33 @@ type SLAPolicies interface {
 	ForPolicy(ctx context.Context, id int64) (SLAClock, error)
 }
 
+// ErrNotAssignable means the id offered as an assignee may not hold tickets.
+//
+// One error for two situations — a customer's id, and an id that names nobody —
+// and that is deliberate. Two different refusals would let an agent enumerate
+// which uuids name real users, which is the same reasoning that makes a ticket
+// that is not yours a 404 rather than a 403 (docs/spec.md §11).
+var ErrNotAssignable = errors.New("ticket: that user may not hold tickets")
+
+// AssigneeDirectory answers whether an id may be put on a ticket.
+//
+// Declared here, by the consumer, and implemented in the composition root
+// against the identity module (docs/adr/0005). assignee_id is a bare foreign
+// key to users, so the database will happily accept a customer's id there; this
+// module cannot check it, because it does not know the identity module exists.
+//
+// So it asks the question in its own words. "May this person hold tickets" is
+// what this module needs to know; that the answer happens to be "their role is
+// agent or admin" is the other module's business.
+//
+// Rejected: a CHECK constraint or a trigger joining users.role. It would
+// enforce the rule at the right layer but freeze the answer — demoting an agent
+// who still holds open tickets would then fail at write time, on unrelated
+// updates to those rows.
+type AssigneeDirectory interface {
+	CanHoldTickets(ctx context.Context, id uuid.UUID) (bool, error)
+}
+
 // NewTicket is everything a caller supplies to create one.
 //
 // The status, the clock and the policy are not in it — they are consequences,
@@ -226,6 +253,15 @@ type Repository interface {
 	// caller ask the wrong one by leaving a field unset.
 	OneByID(ctx context.Context, id uuid.UUID) (domain.Ticket, error)
 	Timeline(ctx context.Context, ticketID uuid.UUID) ([]domain.HistoryEntry, error)
+
+	// Assign writes the assignee and nothing else. A nil assignee unassigns.
+	//
+	// It writes no ticket_status_history row, and that is a decision rather
+	// than an omission (tasks/slice-2/plan.md §E): the history is the fact the
+	// SLA clock is rebuilt from, and assignment does not move a ticket's
+	// status. A row for it would pad the timeline Reconstruct walks, and the
+	// consistency test would be right to fail.
+	Assign(ctx context.Context, ticketID uuid.UUID, assignee *uuid.UUID) (domain.Ticket, error)
 	OneForRequester(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error)
 	HistoryForRequester(ctx context.Context, ticketID, requesterID uuid.UUID) ([]domain.HistoryEntry, error)
 }

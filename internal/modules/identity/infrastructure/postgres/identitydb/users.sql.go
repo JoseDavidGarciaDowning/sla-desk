@@ -9,6 +9,7 @@ import (
 	"context"
 
 	domain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	uuid "github.com/google/uuid"
 )
 
 const getUserByClerkID = `-- name: GetUserByClerkID :one
@@ -18,6 +19,29 @@ WHERE clerk_user_id = $1
 
 func (q *Queries) GetUserByClerkID(ctx context.Context, clerkUserID string) (User, error) {
 	row := q.db.QueryRow(ctx, getUserByClerkID, clerkUserID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.ClerkUserID,
+		&i.Email,
+		&i.Name,
+		&i.Role,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getUserByID = `-- name: GetUserByID :one
+SELECT id, clerk_user_id, email, name, role, created_at, updated_at FROM users WHERE id = $1
+`
+
+// Reads a user by our own primary key rather than by their Clerk subject.
+//
+// Added in slice 2 for the assignee check: the ticket module holds a uuid that
+// came out of its own assignee_id column, and has never seen a Clerk id.
+func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByID, id)
 	var i User
 	err := row.Scan(
 		&i.ID,

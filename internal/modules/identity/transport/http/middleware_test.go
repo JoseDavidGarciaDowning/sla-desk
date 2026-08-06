@@ -53,6 +53,13 @@ func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Iden
 	return f.user, nil
 }
 
+func (f *fakeStore) ByID(context.Context, uuid.UUID) (domain.User, error) {
+	if f.getErr != nil {
+		return domain.User{}, f.getErr
+	}
+	return f.user, nil
+}
+
 func (f *fakeStore) GrantRole(_ context.Context, _ string, role domain.Role) (domain.User, error) {
 	f.grants++
 	granted := f.user

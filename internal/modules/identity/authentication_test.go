@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
@@ -197,6 +199,13 @@ func (f *fakeStore) ByClerkID(context.Context, string) (domain.User, error) {
 func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Identity, role domain.Role) (domain.User, error) {
 	f.upserts++
 	return domain.User{ClerkUserID: clerkUserID, Email: id.Email, Role: role}, nil
+}
+
+func (f *fakeStore) ByID(context.Context, uuid.UUID) (domain.User, error) {
+	if f.getErr != nil {
+		return domain.User{}, f.getErr
+	}
+	return f.user, nil
 }
 
 func (f *fakeStore) GrantRole(_ context.Context, clerkUserID string, role domain.Role) (domain.User, error) {
