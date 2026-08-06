@@ -38,6 +38,10 @@ func (s *stubRepository) Upsert(_ context.Context, clerkUserID string, id domain
 	return domain.User{ID: uuid.New(), ClerkUserID: clerkUserID, Email: id.Email, Name: id.Name, Role: role}, nil
 }
 
+func (s *stubRepository) Assignable(context.Context) ([]domain.User, error) {
+	return nil, nil
+}
+
 func (s *stubRepository) GrantRole(_ context.Context, clerkUserID string, role domain.Role) (domain.User, error) {
 	s.grantCalls++
 	s.grantedRole = &role

@@ -58,6 +58,24 @@ func (r *UserRepository) ByID(ctx context.Context, id uuid.UUID) (domain.User, e
 	return userFrom(row), nil
 }
 
+// Assignable lists the users a ticket may be handed to.
+//
+// An empty result is an empty slice and not an error: a deploy with no agents
+// configured is the default state (T17), and that is a fact about the roster
+// rather than a failure to read it.
+func (r *UserRepository) Assignable(ctx context.Context) ([]domain.User, error) {
+	rows, err := r.q.ListAssignableUsers(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("listing the assignable users: %w", err)
+	}
+
+	out := make([]domain.User, len(rows))
+	for i, row := range rows {
+		out[i] = userFrom(row)
+	}
+	return out, nil
+}
+
 // Upsert is the idempotent provisioning write from docs/spec.md §4.5.
 //
 // The role applies to the insert only — the query omits it from the conflict

@@ -98,6 +98,65 @@ func (q *Queries) GrantUserRole(ctx context.Context, arg GrantUserRoleParams) (U
 	return i, err
 }
 
+const listAssignableUsers = `-- name: ListAssignableUsers :many
+SELECT id, clerk_user_id, email, name, role, created_at, updated_at FROM users
+WHERE role IN ('agent', 'admin')
+ORDER BY name NULLS LAST, email
+`
+
+// The people a ticket may be assigned to: agents and admins, never customers.
+//
+// Added in slice 2 for the assignment control. It is the first query in this
+// project that hands another user's id to a caller, and that is a departure
+// worth naming: T14b dropped actor_id from the history DTO and T19 sends
+// requester_name rather than requester_id, both to avoid handing out
+// identifiers to enumerate.
+//
+// The departure is unavoidable rather than careless. PATCH .../assignee takes
+// an id, so a UI that lets one agent hand a ticket to another has to know it.
+// What limits the exposure is the shape of the answer: it is the staff roster,
+// not the user table — customers are excluded by the predicate, not filtered
+// afterwards — and it is reachable only from inside the agent route group, so
+// the people who can read it are the people already in it.
+//
+// Ordered by name so the control renders the same way twice, with the unnamed
+// at the end: Clerk holds no name for someone who signed up with an email and a
+// password, and an unnamed colleague belongs after the named ones rather than
+// above them.
+//
+// NULLS LAST is Postgres's default for ASC and is written anyway. Measured
+// rather than assumed — a mutation that removed it changed nothing, which is
+// how it was noticed. It stays because the default flips to NULLS FIRST the
+// moment somebody writes DESC, and a silent reordering of the roster is not
+// worth the two words saved.
+func (q *Queries) ListAssignableUsers(ctx context.Context) ([]User, error) {
+	rows, err := q.db.Query(ctx, listAssignableUsers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []User
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.ClerkUserID,
+			&i.Email,
+			&i.Name,
+			&i.Role,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const upsertUserFromClerk = `-- name: UpsertUserFromClerk :one
 INSERT INTO users (clerk_user_id, email, name, role)
 VALUES ($1, $2, $3, $4)

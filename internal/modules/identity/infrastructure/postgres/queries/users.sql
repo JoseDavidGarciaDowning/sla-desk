@@ -51,3 +51,33 @@ WHERE clerk_user_id = $1;
 -- Added in slice 2 for the assignee check: the ticket module holds a uuid that
 -- came out of its own assignee_id column, and has never seen a Clerk id.
 SELECT * FROM users WHERE id = $1;
+
+-- name: ListAssignableUsers :many
+-- The people a ticket may be assigned to: agents and admins, never customers.
+--
+-- Added in slice 2 for the assignment control. It is the first query in this
+-- project that hands another user's id to a caller, and that is a departure
+-- worth naming: T14b dropped actor_id from the history DTO and T19 sends
+-- requester_name rather than requester_id, both to avoid handing out
+-- identifiers to enumerate.
+--
+-- The departure is unavoidable rather than careless. PATCH .../assignee takes
+-- an id, so a UI that lets one agent hand a ticket to another has to know it.
+-- What limits the exposure is the shape of the answer: it is the staff roster,
+-- not the user table — customers are excluded by the predicate, not filtered
+-- afterwards — and it is reachable only from inside the agent route group, so
+-- the people who can read it are the people already in it.
+--
+-- Ordered by name so the control renders the same way twice, with the unnamed
+-- at the end: Clerk holds no name for someone who signed up with an email and a
+-- password, and an unnamed colleague belongs after the named ones rather than
+-- above them.
+--
+-- NULLS LAST is Postgres's default for ASC and is written anyway. Measured
+-- rather than assumed — a mutation that removed it changed nothing, which is
+-- how it was noticed. It stays because the default flips to NULLS FIRST the
+-- moment somebody writes DESC, and a silent reordering of the roster is not
+-- worth the two words saved.
+SELECT * FROM users
+WHERE role IN ('agent', 'admin')
+ORDER BY name NULLS LAST, email;
