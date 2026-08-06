@@ -1,3 +1,4 @@
+import { TRANSITIONS, type ActorRole, type TicketStatus } from "@/lib/contract";
 import type { Ticket } from "@/lib/tickets";
 
 /**
@@ -65,6 +66,51 @@ export type QueueFilters = {
  * cached value as the same ticket read by its requester — one of them is
  * reachable and the other answers 404.
  */
+/**
+ * One person a ticket may be handed to — the `users` member of
+ * GET /api/agent/assignable.
+ *
+ * There is an id here, and it is the only place in this app that carries
+ * another user's. The API sends it because PATCH .../assignee needs one; every
+ * other view is given a name instead (T14b, T19). Nothing outside the
+ * assignment control should read this field.
+ *
+ * `name` is already resolved by the API: an agent with no name in Clerk arrives
+ * as their email address rather than as a blank.
+ */
+export type AssignableUser = {
+  id: string;
+  name: string;
+  role: ActorRole;
+};
+
+/** The roster — GET /api/agent/assignable. */
+export type AssignableUsers = {
+  users: AssignableUser[];
+};
+
+/**
+ * The body of POST /api/agent/tickets/{id}/transitions.
+ *
+ * `reason` is optional and short. It is not a comment — comments are slice 4 —
+ * it is the note that explains a move in the timeline.
+ */
+export type NewTransition = {
+  to: TicketStatus;
+  reason?: string;
+};
+
+/**
+ * The body of PATCH /api/agent/tickets/{id}/assignee.
+ *
+ * `null` unassigns, and it has to be sent explicitly: the API refuses a body
+ * with the field absent rather than treating it as an unassignment, so that a
+ * client sending {} by accident cannot take somebody off a ticket.
+ */
+export type NewAssignee = {
+  assignee_id: string | null;
+};
+
 export const agentKeys = {
   all: ["agent"] as const,
   me: () => [...agentKeys.all, "me"] as const,
@@ -72,6 +118,11 @@ export const agentKeys = {
   queue: (filters: QueueFilters) => [...agentKeys.queues(), filters] as const,
   detail: (id: string) => [...agentKeys.all, "detail", id] as const,
   history: (id: string) => [...agentKeys.all, "history", id] as const,
+
+  // The roster is not per-ticket and not per-filter. It changes when somebody
+  // is granted a role, which is a deploy-time event (T17), so one key for the
+  // whole app is the right granularity.
+  assignable: () => [...agentKeys.all, "assignable"] as const,
 };
 
 /**
@@ -87,6 +138,32 @@ export function queueQuery(filters: QueueFilters): string {
   }
   const query = params.toString();
   return query ? `?${query}` : "";
+}
+
+/**
+ * The moves `role` may make from `from`, taken from the generated contract.
+ *
+ * The table is generated rather than transcribed for the reason T13 gives about
+ * the categories: the day an edge changes in docs/spec.md §4.1, a transcribed
+ * copy leaves the button on screen while the API starts refusing it. A Go test
+ * fails while web/lib/contract.ts is stale.
+ *
+ * The server is still the authority. Anything this lets the UI offer is checked
+ * again by domain.Transition, which answers 403 for an edge a role may not take
+ * and a field error for one that does not exist — so a stale bundle in
+ * somebody's browser cannot make an illegal move, only offer one.
+ */
+export function allowedTransitions(
+  from: TicketStatus,
+  role: ActorRole,
+): TicketStatus[] {
+  const targets = TRANSITIONS[from] ?? {};
+
+  // Object.entries loses the key type, so the cast restores what the contract
+  // already guarantees: every key of a TRANSITIONS entry is a TicketStatus.
+  return (Object.entries(targets) as [TicketStatus, readonly ActorRole[]][])
+    .filter(([, roles]) => roles.includes(role))
+    .map(([to]) => to);
 }
 
 /** The roles this app treats as staff. Mirrors RequireRole in the API. */
