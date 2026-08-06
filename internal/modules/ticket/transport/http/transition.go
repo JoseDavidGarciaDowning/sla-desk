@@ -2,7 +2,6 @@ package http
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -65,8 +64,7 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 		}
 
 		var body transitionRequest
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTicketBody))
-		if err := decoder.Decode(&body); err != nil {
+		if err := decodeBody(w, r, &body); err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the request body is not valid JSON")
 			return
 		}

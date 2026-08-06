@@ -3,9 +3,7 @@ package http
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -55,7 +53,7 @@ func CreateTicketHandler(tickets TicketCreator, resolve CallerResolver) http.Han
 		}
 
 		var req CreateTicketRequest
-		if err := json.NewDecoder(io.LimitReader(r.Body, maxTicketBody)).Decode(&req); err != nil {
+		if err := decodeBody(w, r, &req); err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the request body is not valid JSON")
 			return
 		}

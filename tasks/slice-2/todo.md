@@ -457,6 +457,45 @@ written in T11. The duplicates were removed rather than kept: a second copy of a
 assertion is slower to run and no more convincing, and it makes the file harder to read for
 whoever comes next.
 
+**Review feedback from CodeRabbit on PR #13, and what was done with it.**
+
+Two findings, both acted on, neither applied as proposed.
+
+*Reject a value after the body.* Valid. `json.Decoder` reads one value and
+stops, so `{"to":"pending"}{}` decoded happily and the trailing object was never
+seen. Nothing downstream was wrong about it — it simply was not read — but a
+client shipping garbage after a valid body should be told, because the next
+thing it ships may be the half the caller meant.
+
+Fixed in **all three** endpoints that take a body rather than the one flagged.
+Two left lax is a rule that holds where somebody happened to look. `decodeBody`
+now owns it, and it closed a second inconsistency found on the way: the create
+endpoint capped its body with `io.LimitReader`, which **truncates silently**, so
+an oversized body arrived as invalid JSON and was reported as a syntax error
+rather than as a size one. All three now use `http.MaxBytesReader`.
+
+*Reconstruct the SLA clock in `TestTheCacheStillMatchesTheHistoryAfterATransition`
+and compare the `sla_*` columns.* **The suggestion was declined; the finding was
+not.** That reconstruction already exists, and is stronger:
+`TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom` is property-based over 15
+generated sequences of up to 6 transitions and asserts it after creation and
+after every step. Three fixed steps here would be slower and strictly weaker —
+the same reason three other tests were deleted from this task.
+
+But the finding pointed at a real defect that the proposed fix would have
+buried: **the test's name claimed it compared a cache, and it counted rows.**
+That is [ADR 0010](docs/adr/0010-a-name-that-lies-is-a-bug.md) applied to a test
+name — a name is a defect when it lies about what the thing does. Renamed to
+`TestEveryTransitionAppendsExactlyOneHistoryRow`, which is what it asserts and
+what the property test does *not*: a write path appending two rows, or none,
+would still satisfy a reconstruction, because `Reconstruct` reads whatever rows
+are there. It also now checks the last row records the move just made, so the
+right number of rows in the wrong order does not pass.
+
+Both fixes were mutation-checked: removing the EOF check turns the trailing-value
+test red, and recording the wrong status in the history row turns the renamed one
+red.
+
 **The test cleanup hit the schema a second time.** T21 released `tickets.assignee_id` before
 deleting a seeded user; transitions add `ticket_status_history.actor_id`, which is NOT NULL and
 therefore cannot be released — those rows have to go. §10 forbids hard-deleting history *in the

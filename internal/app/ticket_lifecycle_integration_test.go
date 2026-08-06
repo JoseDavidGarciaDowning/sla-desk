@@ -829,10 +829,25 @@ func TestAssigningAnUnknownTicketIsNotFound(t *testing.T) {
 // this same fixture, and a second copy would be slower to run and no more
 // convincing.
 
-// The consistency property of docs/spec.md §9, after a transition made the way
-// the endpoint makes it: the cache in tickets.sla_* equals what the history
-// rebuilds to.
-func TestTheCacheStillMatchesTheHistoryAfterATransition(t *testing.T) {
+// Every transition appends exactly one history row.
+//
+// The name used to say this asserted the cache matched the history, and it did
+// not — it counted rows. CodeRabbit caught it on PR #13 and proposed
+// reconstructing the clock here and comparing the sla_* columns against it.
+//
+// That is already done, better, one file over.
+// TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom is property-based over 15
+// generated sequences of up to 6 transitions each and asserts exactly that
+// after creation and after every single step. Repeating three fixed steps of it
+// here would be slower to run and strictly weaker.
+//
+// So the name was fixed rather than the test, which leaves this asserting the
+// one thing that file does not: that the *count* grows by one per transition. A
+// write path that appended two rows, or none, would still satisfy a
+// reconstruction — Reconstruct reads whatever rows are there — while making the
+// timeline an agent reads wrong. See docs/adr/0010: a name that lies is a bug,
+// and a test name is a name.
+func TestEveryTransitionAppendsExactlyOneHistoryRow(t *testing.T) {
 	f := newRepoFixture(t)
 
 	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
@@ -841,6 +856,12 @@ func TestTheCacheStillMatchesTheHistoryAfterATransition(t *testing.T) {
 	}
 
 	agent := f.assignable(t, "consistency_agent", identitydomain.RoleAgent)
+
+	before, err := f.repo.Timeline(f.ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+	want := len(before)
 
 	for _, target := range []ticketdomain.Status{
 		ticketdomain.StatusPending, ticketdomain.StatusOpen, ticketdomain.StatusResolved,
@@ -851,15 +872,21 @@ func TestTheCacheStillMatchesTheHistoryAfterATransition(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("moving to %s: %v", target, err)
 		}
+		want++
 
 		timeline, err := f.repo.Timeline(f.ctx, created.ID)
 		if err != nil {
-			t.Fatalf("Timeline: %v", err)
+			t.Fatalf("Timeline after %s: %v", target, err)
 		}
-		// Every transition appends exactly one row. A write path that skipped
-		// the history would leave the clock unreconstructable.
-		if len(timeline) < 2 {
-			t.Fatalf("after moving to %s the timeline has %d rows", target, len(timeline))
+		if len(timeline) != want {
+			t.Fatalf("after moving to %s the timeline has %d rows, want %d",
+				target, len(timeline), want)
+		}
+		// The last row has to be the move just made. A path that appended the
+		// right number of rows in the wrong order would pass the count alone.
+		last := timeline[len(timeline)-1]
+		if last.ToStatus != target {
+			t.Errorf("the last history row says %s, want %s", last.ToStatus, target)
 		}
 	}
 }

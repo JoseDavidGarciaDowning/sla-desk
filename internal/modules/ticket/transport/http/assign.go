@@ -59,8 +59,7 @@ func AssignTicketHandler(tickets TicketAssigner, resolve CallerResolver) http.Ha
 		}
 
 		var body map[string]json.RawMessage
-		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxTicketBody))
-		if err := decoder.Decode(&body); err != nil {
+		if err := decodeBody(w, r, &body); err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the request body is not valid JSON")
 			return
 		}
