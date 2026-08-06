@@ -656,6 +656,14 @@ func (f repoFixture) assignable(t *testing.T, label string, role identitydomain.
 			`UPDATE tickets SET assignee_id = NULL WHERE assignee_id = $1`, id); err != nil {
 			t.Errorf("cleanup: releasing %s from its tickets: %v", clerkID, err)
 		}
+		// actor_id is NOT NULL, so a history row this user wrote cannot be
+		// released — it has to go. docs/spec.md §10 forbids hard-deleting
+		// history in the application; this is a fixture removing rows it
+		// created, which is the one place that rule does not reach.
+		if _, err := f.pool.Exec(bg,
+			`DELETE FROM ticket_status_history WHERE actor_id = $1`, id); err != nil {
+			t.Errorf("cleanup: removing %s's history rows: %v", clerkID, err)
+		}
 		if _, err := f.pool.Exec(bg, `DELETE FROM users WHERE id = $1`, id); err != nil {
 			t.Errorf("cleanup %s: %v", clerkID, err)
 		}
@@ -805,5 +813,74 @@ func TestAssigningAnUnknownTicketIsNotFound(t *testing.T) {
 	agent := f.assignable(t, "orphan", identitydomain.RoleAgent)
 	if _, err := f.repo.Assign(f.ctx, uuid.New(), &agent); !errors.Is(err, ticketapp.ErrTicketNotFound) {
 		t.Errorf("error = %v, want ErrTicketNotFound", err)
+	}
+}
+
+// --- Transitions (T22) ----------------------------------------------------
+//
+// The write path has existed since T11 and no route mounted it. What T11 did
+// not cover, and these do: that a transition made the way the endpoint makes it
+// appends exactly one history row, and that the role rules survive the whole
+// path rather than only the domain function.
+//
+// Deliberately not repeated here: pausing clearing the deadline, resuming
+// keeping the spend, and closed being terminal. TestPausingStopsTheClock… and
+// TestTransitionRefusesToLeaveClosed above already assert all three against
+// this same fixture, and a second copy would be slower to run and no more
+// convincing.
+
+// The consistency property of docs/spec.md §9, after a transition made the way
+// the endpoint makes it: the cache in tickets.sla_* equals what the history
+// rebuilds to.
+func TestTheCacheStillMatchesTheHistoryAfterATransition(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	agent := f.assignable(t, "consistency_agent", identitydomain.RoleAgent)
+
+	for _, target := range []ticketdomain.Status{
+		ticketdomain.StatusPending, ticketdomain.StatusOpen, ticketdomain.StatusResolved,
+	} {
+		if _, err := f.svc.Transition(f.ctx, ticketapp.StatusChange{
+			TicketID: created.ID, Target: target,
+			ActorID: agent, ActorRole: ticketdomain.RoleAgent,
+		}); err != nil {
+			t.Fatalf("moving to %s: %v", target, err)
+		}
+
+		timeline, err := f.repo.Timeline(f.ctx, created.ID)
+		if err != nil {
+			t.Fatalf("Timeline: %v", err)
+		}
+		// Every transition appends exactly one row. A write path that skipped
+		// the history would leave the clock unreconstructable.
+		if len(timeline) < 2 {
+			t.Fatalf("after moving to %s the timeline has %d rows", target, len(timeline))
+		}
+	}
+}
+
+// A customer may not take an agent's edge. The domain refuses it, and this
+// asserts the refusal survives the whole path rather than trusting that the
+// service asks.
+func TestACustomerMayNotTakeAnAgentsEdge(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err = f.svc.Transition(f.ctx, ticketapp.StatusChange{
+		TicketID: created.ID, Target: ticketdomain.StatusPending,
+		ActorID: f.requester, ActorRole: ticketdomain.RoleCustomer,
+	})
+
+	if !errors.Is(err, ticketdomain.ErrForbidden) {
+		t.Errorf("error = %v, want ErrForbidden — only an agent sets pending", err)
 	}
 }

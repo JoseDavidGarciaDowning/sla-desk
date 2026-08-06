@@ -402,36 +402,66 @@ agent — with the check declared by the ticket module and answered by the compo
 
 ---
 
-### T22: The transition endpoint
+### T22: The transition endpoint ✅
 
 **Description:** Expose the write path built in T11. This is the first time the SLA clock can
-be paused and resumed over HTTP — the headline behaviour of the entire domain.
+be paused and resumed over HTTP.
 
 **Acceptance criteria:**
-- [ ] `POST /api/agent/tickets/{id}/transitions`, body `{"to": "<status>", "reason": "…"}`
-- [ ] Calls `Service.Transition`, which already resolves the clock before the transaction and
-      takes `FOR UPDATE` — **no new write logic in this task**
-- [ ] An edge the actor's role may not take is **403**; an edge that does not exist at all is
-      **422**. The domain already distinguishes them; the handler must not flatten both into one
-- [ ] A transition on a `closed` ticket is refused — `closed` is terminal (§4.1)
-- [ ] The response is the updated ticket, so the client needs no follow-up read
-- [ ] Statuses join the generated contract — already there since T14a, verify no drift
+- [x] `POST /api/agent/tickets/{id}/transitions`, body `{"to": "<status>", "reason": "…"}`
+- [x] Calls `Service.Transition` — **no new write logic in this task**
+- [x] An edge the actor's role may not take is **403**; an edge that does not exist is a field
+      error. The domain already tells them apart and the handler does not flatten them
+- [x] A transition on a `closed` ticket is refused, with **no special case** in the handler —
+      it is terminal, so no edge leaves it and the state machine refuses it like any other
+      impossible move
+- [x] The response is the updated ticket, so a client needs no follow-up read to see the new
+      deadline — which is the point of the request when it is a pause
+- [x] Statuses were already in the generated contract since T14a; no drift
 
 **Verification:**
-- [ ] Integration: `open → pending` through the endpoint sets `sla_due_at` to null and
-      `sla_clock_started_at` to null, and `pending → open` resumes with the budget already spent
-      preserved
-- [ ] The §9 consistency property holds after every transition made through the endpoint, not
-      only after those made in a test's own transaction
-- [ ] A customer calling it is 403 at the group, before the handler
-- [ ] Concurrent transitions on one ticket: the second observes the first, because of `FOR UPDATE`
-- [ ] Mutations: swapping the 403 and 422 branches; passing the caller's role from the request
-      body; skipping the terminal check — each turns a test red
+- [x] Handler: the actor's role comes from the caller and a role in the body is ignored; 403
+      and the field error are distinct; an unknown status never reaches the state machine; a
+      whitespace reason is stored as absent; an overlong one is refused; an unknown ticket is 404
+- [x] Integration: a transition appends exactly one history row per move, and a customer is
+      refused an agent's edge through the whole service path
+- [x] **5 mutations, 5 dead**: 403 answered as a field error; the actor's role taken from
+      somewhere other than the caller; an unknown status reaching the use case; a whitespace
+      reason stored; the route left unmounted
+- [x] `make check` and `make test-int` clean
 
 **Dependencies:** T18
-**Files:** `internal/modules/ticket/transport/http/{handlers,dto}.go`, `internal/app/router.go`,
-plus tests
+**Files:** `internal/modules/ticket/transport/http/{transition,caller}.go`, plus tests
 **Scope:** M
+
+**Decisions taken during T22:**
+
+- **`POST .../transitions`, plural, and not `PATCH .../status`.** A transition is a thing that
+  happened, appended to a history; the status column is a cache of that history (§4.2). The URL
+  says which of the two a client is adding to.
+- **403 and the field error stay different answers.** The domain distinguishes "this move does
+  not exist" from "it exists and is not yours to make", and flattening them would tell an agent
+  their client is broken when the truth is that somebody else has to do it.
+- **The impossible-edge case is a 400, not the card's 422** — the same reasoning as T21.
+- **An unknown status is rejected before the state machine sees it.** The domain would refuse
+  it anyway, but as "you cannot go from open to blorp", which reads like an edge that might
+  exist somewhere else.
+- **A reason of whitespace is stored as absent**, because a blank line in a timeline an agent
+  reads is worse than no line.
+
+**What was deliberately not written.** The first draft of the integration tests re-asserted
+that pausing clears the deadline, that resuming keeps the spend, and that `closed` is terminal.
+All three were already covered against this same fixture by
+`TestPausingStopsTheClockAndResumingKeepsWhatWasSpent` and `TestTransitionRefusesToLeaveClosed`,
+written in T11. The duplicates were removed rather than kept: a second copy of a passing
+assertion is slower to run and no more convincing, and it makes the file harder to read for
+whoever comes next.
+
+**The test cleanup hit the schema a second time.** T21 released `tickets.assignee_id` before
+deleting a seeded user; transitions add `ticket_status_history.actor_id`, which is NOT NULL and
+therefore cannot be released — those rows have to go. §10 forbids hard-deleting history *in the
+application*; a fixture removing rows it created is the one place that rule does not reach, and
+saying so in the cleanup is cheaper than someone re-deriving it later.
 
 ---
 

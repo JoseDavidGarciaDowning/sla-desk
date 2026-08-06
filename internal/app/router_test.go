@@ -449,6 +449,7 @@ func agentPaths() []agentRoute {
 		{http.MethodGet, ticket, ""},
 		{http.MethodGet, ticket + tickethttp.TicketHistorySuffix, ""},
 		{http.MethodPatch, ticket + tickethttp.AssigneeSuffix, `{"assignee_id":null}`},
+		{http.MethodPost, ticket + tickethttp.TransitionsSuffix, `{"to":"pending"}`},
 	}
 }
 
