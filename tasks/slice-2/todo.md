@@ -586,29 +586,83 @@ layout's redirect on a non-staff role is covered by neither, and belongs in the 
 
 ---
 
-### T24: Agent ticket detail with actions
+### T24: Agent ticket detail with actions ✅
 
-**Description:** The detail view an agent works from: the timeline, the assign control and the
-transition control.
+**Description:** The detail view an agent works from: the timeline, the assign control and
+the transition control.
 
 **Acceptance criteria:**
-- [ ] Reuses `status-timeline.tsx` and `sla-timer.tsx` unchanged
-- [ ] Assign control lists agents and offers "unassign"; "assign to me" is one click
-- [ ] Transition control offers **only the edges this actor may take from the current status** —
-      derived from the contract, not hardcoded in the component
-- [ ] A rejected action renders the API's own sentence, verbatim from the problem document
-- [ ] Both actions invalidate the queue and the detail, and neither loses the view's scroll state
+- [x] Reuses `status-timeline.tsx` and `sla-timer.tsx` unchanged
+- [x] Assign control lists agents and offers "unassign"; "assign to me" is one click
+- [x] Transition control offers **only the edges this actor may take from the current
+      status** — derived from the contract, not hardcoded
+- [x] A rejected action renders the API's own sentence, verbatim from the problem document
+- [x] Both actions invalidate what they invalidate, and they differ — see below
 
 **Verification:**
-- [ ] Component tests: the offered edges change with the current status; a 403 renders; a 422
-      renders its field errors
-- [ ] Mutations: offering every status regardless of the current one; invalidating `all`
-      instead of the two specific keys — each turns a test red
+- [x] 4 component tests on the detail, 8 on the transition control, 9 on the assign control,
+      6 on `lib/agent.ts`, plus 4 Go tests on the published table and 3 on the DTO shapes
+- [x] Integration: the roster holds staff and nobody else, orders unnamed colleagues last,
+      and an empty roster is not an error
+- [x] **17 mutations, 17 dead** across the six commits
+- [x] `make check`, `make test-int` and the whole web suite clean
 
 **Dependencies:** T20, T21, T22
-**Files:** `web/app/(agent)/queue/[id]/`, `web/components/{assign-control,transition-control}.tsx`,
-`web/lib/use-agent-tickets.ts`, plus tests
-**Scope:** M
+**Files:** `internal/modules/ticket/domain/{transition,status,role}.go`,
+`internal/modules/ticket/transport/http/{contract,dto,queue,assign,transition}.go`,
+`internal/modules/identity/{application/service.go,infrastructure/postgres/*,transport/http/assignable.go}`,
+`internal/app/router.go`, `web/lib/agent.ts`, `web/app/(agent)/queue/[id]/*`,
+`web/components/{assign-control,transition-control}.tsx`, `docs/spec.md`, plus tests
+**Scope:** L — the card asked for two things that did not exist yet
+
+**Two acceptance criteria could not be met as written, and both were gaps rather than
+mistakes in the card.**
+
+*"Derived from the contract"* — the transition table was not in the contract. It lives in
+`domain.allowed`, in Go, and `web/lib/contract.ts` published only the three vocabularies. So
+the contract gained it: `domain.Edges()` hands out a copy, `cmd/gencontract` emits
+`TRANSITIONS`, and two Go tests call `domain.Transition` at every published edge in both
+directions rather than comparing the table to itself. Transcribing it in TypeScript was the
+alternative, and it is the copy that breaks silently — the day an edge changes in §4.1, the
+button stays on screen and the API starts refusing it.
+
+*"Lists agents"* — no endpoint listed them. `GET /api/agent/assignable` is new, and it is
+**the first response in this project that carries another user's id**. T14b dropped
+`actor_id` from the history DTO and T19 sends `requester_name` rather than an id, both to
+avoid handing out identifiers to enumerate, so the departure is written down rather than
+slipped in. It is unavoidable — `PATCH .../assignee` takes an id — and what bounds it is the
+shape of the answer: agents and admins by predicate, inside the group that already refuses
+everyone else. The people who can read the roster are the people on it.
+
+**Decisions taken during T24:**
+
+- **`AgentTicketResponse` is a separate wire shape**, because `TicketResponse` is what a
+  customer gets back for their own ticket. Adding `assignee_id` there would hand every
+  customer the primary key of the agent working their case. The test encodes both shapes and
+  greps the wire rather than reading the structs: a field added with the wrong tag would
+  still travel while the type looked untouched.
+- **The two controls settle their caches differently, and the difference is the point.** A
+  transition invalidates the queue *and* the history — the deadline moved and the timeline
+  gained a row. An assignment invalidates only the queue, because it writes no history row
+  (plan §E). Both write the detail from the response rather than refetching it.
+- **`asActorRole` converts at the boundary.** `/api/agent/me` answers with the identity
+  module's role and `TRANSITIONS` is keyed on the ticket module's — the same three strings,
+  two vocabularies, kept apart on purpose (ADR 0005). Go does the same conversion in its
+  composition root; doing it implicitly in TypeScript would have quietly merged them.
+- **A closed ticket renders a sentence and no buttons**, rather than a disabled row. A
+  greyed-out button invites a click that can never work.
+
+**§4.3 now records that assignment is flat.** Both `agent` and `admin` carry `Assign
+ticket`, so any agent may hand any ticket to any other. That was true since the matrix was
+written and had never been *chosen* — the question of who may assign to whom was never
+asked. It is written down now so it stops being an accident, along with where a hierarchy
+would go if one is wanted: `admin` already has its own column and differs from `agent` in
+exactly one row.
+
+**A mutation caught a missing assertion in the transition control.** Nothing checked that
+the queue was invalidated after a move, so an agent would have kept looking at a queue
+showing the ticket where it used to be — on a list ordered by deadline, which a pause
+clears. The test now spies on the client and checks all three caches.
 
 ---
 

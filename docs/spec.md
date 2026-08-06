@@ -307,6 +307,22 @@ RBAC matrix:
 | Read internal notes | ❌ | ✅ | ✅ |
 | Manage SLA policies | ❌ | ❌ | ✅ |
 
+**Assignment is flat, and that was never decided until now.** Both `agent` and `admin`
+carry `Assign ticket`, so any agent may hand any ticket to any other — there is no lead,
+no supervisor and no queue owner. The matrix has said this since it was written, but
+nobody chose it: the question of *who* may assign to *whom* was never asked, and the row
+above is the answer that fell out of not asking.
+
+Recorded here as a decision so it stops being an accident. The flat model is the ordinary
+one for a desk this size — an agent picks up work, or hands it to whoever knows the area —
+and it assumes a team small enough to trust with that. The alternative, where a lead
+distributes the queue and agents only take what they are given, buys load balancing at the
+cost of a role, a guard and a second bootstrap path.
+
+`admin` is where a hierarchy would go if one is ever wanted: it already exists, already has
+its own column, and differs from `agent` in exactly one row today (`Manage SLA policies`,
+slice 9). Restricting assignment to it would move one ✅ rather than redesign anything.
+
 Authorization is enforced **in the data layer, not only in handlers**: customer-scoped
 queries carry `WHERE requester_id = $1`. A missing handler check must not be sufficient
 to leak another customer's ticket.
