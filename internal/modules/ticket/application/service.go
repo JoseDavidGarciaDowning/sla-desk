@@ -13,10 +13,11 @@ import (
 type Service struct {
 	repo Repository
 	sla  SLAPolicies
+	dir  AssigneeDirectory
 }
 
-func NewService(repo Repository, sla SLAPolicies) *Service {
-	return &Service{repo: repo, sla: sla}
+func NewService(repo Repository, sla SLAPolicies, dir AssigneeDirectory) *Service {
+	return &Service{repo: repo, sla: sla, dir: dir}
 }
 
 // Create writes a ticket and its opening history row.
@@ -81,6 +82,29 @@ func (s *Service) Queue(ctx context.Context, f QueueFilter) ([]QueueEntry, error
 		return nil, ErrUnsetAssigneeScope
 	}
 	return s.repo.ListForQueue(ctx, f)
+}
+
+// Assign puts an agent on a ticket, or takes whoever is there off it.
+//
+// The directory is consulted only when there is somebody to ask about.
+// Unassigning has no candidate, and asking anyway would make "take this off my
+// plate" fail whenever the directory is unreachable.
+//
+// A directory that cannot answer is not a refusal. Reporting an outage as "that
+// user may not hold tickets" would be a lie the caller acts on, so the cause
+// travels up instead and the handler answers 500.
+func (s *Service) Assign(ctx context.Context, ticketID uuid.UUID, assignee *uuid.UUID) (domain.Ticket, error) {
+	if assignee != nil {
+		ok, err := s.dir.CanHoldTickets(ctx, *assignee)
+		if err != nil {
+			return domain.Ticket{}, fmt.Errorf("checking whether the assignee may hold tickets: %w", err)
+		}
+		if !ok {
+			return domain.Ticket{}, ErrNotAssignable
+		}
+	}
+
+	return s.repo.Assign(ctx, ticketID, assignee)
 }
 
 // Detail returns any ticket, or ErrTicketNotFound.

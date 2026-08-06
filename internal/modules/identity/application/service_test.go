@@ -26,6 +26,13 @@ func (s *stubRepository) ByClerkID(_ context.Context, _ string) (domain.User, er
 	return *s.existing, nil
 }
 
+func (s *stubRepository) ByID(_ context.Context, _ uuid.UUID) (domain.User, error) {
+	if s.existing == nil {
+		return domain.User{}, ErrNoSuchUser
+	}
+	return *s.existing, nil
+}
+
 func (s *stubRepository) Upsert(_ context.Context, clerkUserID string, id domain.Identity, role domain.Role) (domain.User, error) {
 	s.upsertedRole = &role
 	return domain.User{ID: uuid.New(), ClerkUserID: clerkUserID, Email: id.Email, Name: id.Name, Role: role}, nil

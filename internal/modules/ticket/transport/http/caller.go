@@ -56,6 +56,7 @@ func AgentRoutes(r chi.Router, svc *application.Service, resolve CallerResolver)
 	r.Method(nethttp.MethodGet, QueuePath, QueueTicketsHandler(svc, resolve))
 	r.Method(nethttp.MethodGet, QueuePath+"/{id}", AgentTicketHandler(svc, resolve))
 	r.Method(nethttp.MethodGet, QueuePath+"/{id}"+TicketHistorySuffix, AgentTicketHistoryHandler(svc, resolve))
+	r.Method(nethttp.MethodPatch, QueuePath+"/{id}"+AssigneeSuffix, AssignTicketHandler(svc, resolve))
 }
 
 func Routes(r chi.Router, svc *application.Service, resolve CallerResolver) {

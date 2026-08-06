@@ -327,36 +327,78 @@ well-tested one produce the same green.
 
 ## Phase 3: Acting on a ticket
 
-### T21: Assignment
+### T21: Assignment ✅
 
 **Description:** Put an agent on a ticket, take them off, and refuse anyone who is not an
-agent — with the check declared by the ticket module and implemented in the composition root.
+agent — with the check declared by the ticket module and answered by the composition root.
 
 **Acceptance criteria:**
-- [ ] `PATCH /api/agent/tickets/{id}/assignee`, body `{"assignee_id": "<uuid>|null"}`
-- [ ] `application.AssigneeDirectory` — a consumer-declared port answering *may this id hold
+- [x] `PATCH /api/agent/tickets/{id}/assignee`, body `{"assignee_id": "<uuid>|null"}`
+- [x] `application.AssigneeDirectory` — a consumer-declared port answering *may this id hold
       tickets?*, implemented in `internal/app` against identity, following `SLAPolicies`
-- [ ] Assigning a customer's id is **422**; assigning an id that does not exist is 422 too,
-      and the two are the same answer — an agent must not be able to enumerate user ids
-- [ ] `null` unassigns, and is distinguishable from an absent field
-- [ ] **No `ticket_status_history` row is written** (plan §E) — the timeline the clock walks
-      is not padded
-- [ ] Assigning an already-assigned ticket overwrites; it is not an error
+- [x] Assigning a customer's id and assigning an id that does not exist give the **same**
+      answer, so this endpoint cannot be used to enumerate which uuids name users
+- [x] `null` unassigns, and is distinguishable from an absent field
+- [x] **No `ticket_status_history` row is written**, and no clock column moves
+- [x] Assigning an already-assigned ticket overwrites; it is not an error
 
 **Verification:**
-- [ ] Integration: one case per role for the target — agent succeeds, admin succeeds, customer
-      refused, unknown id refused
-- [ ] Integration: `sla_*` columns and the history row count are **unchanged** by an assignment
-- [ ] The consistency property still holds afterwards
-- [ ] `make arch`: the ticket module still imports no other business module
-- [ ] Mutations: dropping the directory check; treating absent as null; writing a history row —
-      each turns a test red
+- [x] Integration: one case per role for the target — agent and admin succeed, a customer and
+      an unknown id are both refused with `ErrNotAssignable`
+- [x] Integration: the history row count and **every** `sla_*` column are unchanged by an
+      assignment, and so is the status
+- [x] Integration: reassignment overwrites, `nil` clears the column, an unknown ticket is
+      `ErrTicketNotFound`
+- [x] Unit: the directory is not consulted when unassigning, and a directory **failure** is
+      not reported as a refusal
+- [x] Handler: absent field, `null`, a malformed uuid, a non-string, and unparseable JSON
+- [x] **6 mutations, 6 dead**: the service skipping the directory; a directory failure read as
+      a refusal; an absent field treated as null; `MayHoldTickets` admitting anyone; an unknown
+      id answering "yes"; the assignment touching `sla_due_at`
+- [x] `make check` and `make test-int` clean
 
 **Dependencies:** T18
 **Files:** `internal/modules/ticket/application/{ports,service}.go`,
-`internal/modules/ticket/infrastructure/postgres/queries/tickets.sql`,
-`internal/modules/ticket/transport/http/{handlers,dto}.go`, `internal/app/adapters.go`, plus tests
+`internal/modules/ticket/infrastructure/postgres/{queries/tickets.sql,repository.go}`,
+`internal/modules/ticket/transport/http/{assign,caller}.go`, `internal/modules/ticket/module.go`,
+`internal/modules/identity/{application/service.go,infrastructure/postgres/*}`,
+`internal/app/adapters.go`, `cmd/api/main.go`, plus tests
 **Scope:** M
+
+**Decisions taken during T21:**
+
+- **It is a 400, not the 422 the card named.** Every other validation failure in this API is a
+  400 carrying an `errors` member, and the frontend's `ApiError.fieldErrors` already reads it
+  (T13). A second status for the same shape of answer would buy a semantic distinction nobody
+  consumes at the cost of a second code path in the client.
+- **`MayHoldTickets` names the roles, the ticket module does not.** The port asks "may this
+  person hold tickets"; that the answer happens to be "their role is agent or admin" is the
+  identity module's business. The ticket module never learns the word *agent* for this.
+- **An unknown id answers `false`, not "no such user".** The caller is deciding whether to
+  accept an assignee, and "does not exist" and "is a customer" have to be the same answer
+  there — the same reasoning that makes another customer's ticket a 404 rather than a 403.
+- **A directory that cannot answer is not a refusal.** Reporting an outage as "that user may
+  not hold tickets" would be a lie the caller acts on, so the cause travels up and the handler
+  answers 500.
+- **`agentPaths()` now carries the method.** Slice 2 mounts writes as well as reads, and
+  requesting a PATCH route with GET answers 405 — which would read as a guard that let the
+  request through. The guard tests cover the new endpoint without being rewritten.
+
+**Three things measured rather than assumed:**
+
+- **Neither obvious way of telling `null` from absent works.** A `*uuid.UUID` field leaves nil
+  for both — and so does a `*json.RawMessage`, because `encoding/json` sets a pointer to nil
+  when it reads `null`, whatever it points at. That second one was the implementation until a
+  test failed on it. Decoding into a `map[string]json.RawMessage` and asking whether the key is
+  present is what actually distinguishes them, and the difference matters: a client sending
+  `{}` by accident would otherwise silently unassign a ticket somebody is working on.
+- **The test cleanup hit migration 003's deliberate lack of `ON DELETE CASCADE`.** Deleting a
+  seeded agent failed because a ticket still pointed at them — exactly what T6 wanted, stated
+  as "deleting a user or a policy that is still referenced fails loudly". The cleanup now
+  releases the reference first. The schema was right and the test was wrong.
+- **Seeded Clerk ids are unique per call, not derived from the test name.** `clerk_user_id` is
+  UNIQUE, so the first failed run left a row that poisoned every later run with a duplicate-key
+  error that had nothing to do with what was being tested.
 
 ---
 

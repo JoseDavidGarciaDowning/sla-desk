@@ -13,6 +13,58 @@ import (
 	uuid "github.com/google/uuid"
 )
 
+const assignTicket = `-- name: AssignTicket :one
+UPDATE tickets
+   SET assignee_id = $1::uuid,
+       updated_at  = now()
+ WHERE id = $2
+RETURNING id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at
+`
+
+type AssignTicketParams struct {
+	AssigneeID *uuid.UUID
+	ID         uuid.UUID
+}
+
+// Puts an agent on a ticket, or takes whoever is there off it.
+//
+// One column. No ticket_status_history row is written by this or alongside it,
+// and that is a decision rather than an omission (tasks/slice-2/plan.md §E):
+// the history is the fact the SLA clock is rebuilt from (docs/spec.md §4.2),
+// and assignment does not move a ticket's status. A row for it would pad the
+// timeline sla.Reconstruct walks, and the consistency test would be right to
+// fail. Who assigned what to whom belongs to the audit log in slice 9.
+//
+// Nothing here checks that the assignee may hold tickets. assignee_id is a bare
+// foreign key to users, so this statement would accept a customer's id — the
+// check is a port the module declares and the composition root answers. A CHECK
+// constraint joining users.role was rejected: it would freeze the answer, and
+// demoting an agent who still holds open tickets would then fail at write time.
+//
+// No rows means no such ticket, which the handler turns into a 404.
+func (q *Queries) AssignTicket(ctx context.Context, arg AssignTicketParams) (Ticket, error) {
+	row := q.db.QueryRow(ctx, assignTicket, arg.AssigneeID, arg.ID)
+	var i Ticket
+	err := row.Scan(
+		&i.ID,
+		&i.RequesterID,
+		&i.AssigneeID,
+		&i.Title,
+		&i.Description,
+		&i.Category,
+		&i.Priority,
+		&i.Status,
+		&i.SlaPolicyID,
+		&i.SlaConsumedMicros,
+		&i.SlaClockStartedAt,
+		&i.SlaDueAt,
+		&i.SlaBreachedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const createTicket = `-- name: CreateTicket :one
 INSERT INTO tickets (
     requester_id,

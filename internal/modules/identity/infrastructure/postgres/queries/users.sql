@@ -44,3 +44,10 @@ RETURNING *;
 -- name: GetUserByClerkID :one
 SELECT * FROM users
 WHERE clerk_user_id = $1;
+
+-- name: GetUserByID :one
+-- Reads a user by our own primary key rather than by their Clerk subject.
+--
+-- Added in slice 2 for the assignee check: the ticket module holds a uuid that
+-- came out of its own assignee_id column, and has never seen a Clerk id.
+SELECT * FROM users WHERE id = $1;

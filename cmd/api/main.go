@@ -97,7 +97,10 @@ func run() error {
 	// it as the contract it declared, never as the module itself: it is handed
 	// something that can resolve a clock, and does not learn where from.
 	slaModule := sla.New(pool)
-	ticketModule := ticket.New(pool, app.SLAPolicies{Policies: slaModule.Policies})
+	ticketModule := ticket.New(pool,
+		app.SLAPolicies{Policies: slaModule.Policies},
+		app.AssigneeDirectory{Users: identityModule.Service},
+	)
 
 	handler, err := app.NewRouter(cfg, app.Deps{
 		Probes:   probes,

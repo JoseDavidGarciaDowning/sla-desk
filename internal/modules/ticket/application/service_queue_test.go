@@ -51,13 +51,17 @@ func (r *queueStubRepo) Timeline(context.Context, uuid.UUID) ([]domain.HistoryEn
 	return nil, nil
 }
 
+func (r *queueStubRepo) Assign(context.Context, uuid.UUID, *uuid.UUID) (domain.Ticket, error) {
+	return domain.Ticket{}, nil
+}
+
 // A zero scope is a caller who forgot to set one. Defaulting it to "any" would
 // turn forgetting into "return every ticket", on the one query in this module
 // with no predicate to fall back on — so it must not reach the repository at
 // all.
 func TestTheQueueRefusesAFilterWithNoAssigneeScope(t *testing.T) {
 	repo := &queueStubRepo{}
-	svc := application.NewService(repo, nil)
+	svc := application.NewService(repo, nil, nil)
 
 	_, err := svc.Queue(context.Background(), application.QueueFilter{PageSize: 10})
 
@@ -71,7 +75,7 @@ func TestTheQueueRefusesAFilterWithNoAssigneeScope(t *testing.T) {
 
 func TestAScopedQueueFilterReachesTheRepository(t *testing.T) {
 	repo := &queueStubRepo{}
-	svc := application.NewService(repo, nil)
+	svc := application.NewService(repo, nil, nil)
 
 	if _, err := svc.Queue(context.Background(),
 		application.QueueFilter{Assignee: application.AssigneeUnassigned, PageSize: 10}); err != nil {

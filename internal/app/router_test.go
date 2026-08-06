@@ -209,7 +209,7 @@ func TestASignedRequestReachesTheHandlerThroughTheRouter(t *testing.T) {
 
 	router, err := NewRouter(cfg, Deps{
 		Identity: testIdentity(t, cfg, routerStubUsers{user: caller}),
-		Tickets:  ticket.NewWith(stubTicketRepo{}, stubSLA{}),
+		Tickets:  ticket.NewWith(stubTicketRepo{}, stubSLA{}, stubDirectory{}),
 	})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
@@ -277,6 +277,10 @@ func (s routerStubUsers) GrantRole(context.Context, string, identitydomain.Role)
 	return s.user, nil
 }
 
+func (s routerStubUsers) ByID(context.Context, uuid.UUID) (identitydomain.User, error) {
+	return s.user, nil
+}
+
 // testIdentity builds the identity module the way NewRouter's caller does, so a
 // router test exercises the real middleware chain rather than a stand-in for
 // it. Only the users table and the JWKS endpoint are replaced.
@@ -305,8 +309,15 @@ func testIdentity(tb testing.TB, cfg config.Config, users identityapp.UserReposi
 // testTickets builds the real ticket module over stubs, so a router test
 // mounts the real handlers behind the real middleware.
 func testTickets() *ticket.Module {
-	return ticket.NewWith(stubTicketRepo{}, stubSLA{})
+	return ticket.NewWith(stubTicketRepo{}, stubSLA{}, stubDirectory{})
 }
+
+// stubDirectory admits everyone. These tests are about the router, and a
+// directory that refused would make every assignment a 400 that looks like a
+// guard rejecting the request.
+type stubDirectory struct{}
+
+func (stubDirectory) CanHoldTickets(context.Context, uuid.UUID) (bool, error) { return true, nil }
 
 type stubTicketRepo struct{}
 
@@ -340,6 +351,10 @@ func (stubTicketRepo) OneByID(_ context.Context, id uuid.UUID) (ticketdomain.Tic
 
 func (stubTicketRepo) Timeline(context.Context, uuid.UUID) ([]ticketdomain.HistoryEntry, error) {
 	return []ticketdomain.HistoryEntry{{ToStatus: ticketdomain.StatusOpen}}, nil
+}
+
+func (stubTicketRepo) Assign(_ context.Context, ticketID uuid.UUID, assignee *uuid.UUID) (ticketdomain.Ticket, error) {
+	return ticketdomain.Ticket{ID: ticketID, AssigneeID: assignee}, nil
 }
 
 func (stubTicketRepo) OneForRequester(context.Context, uuid.UUID, uuid.UUID) (ticketdomain.Ticket, error) {
@@ -400,7 +415,7 @@ func agentRouter(t *testing.T, role identitydomain.Role) (http.Handler, string) 
 
 	router, err := NewRouter(cfg, Deps{
 		Identity: testIdentity(t, cfg, routerStubUsers{user: caller}),
-		Tickets:  ticket.NewWith(stubTicketRepo{}, stubSLA{}),
+		Tickets:  ticket.NewWith(stubTicketRepo{}, stubSLA{}, stubDirectory{}),
 	})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
@@ -417,12 +432,23 @@ func agentRouter(t *testing.T, role identitydomain.Role) (http.Handler, string) 
 // what these paths exercise is the guard and the wiring, not a lookup.
 const agentPathTicketID = "11111111-2222-3333-4444-555555555555"
 
-func agentPaths() []string {
-	return []string{
-		AgentPathPrefix + identityhttp.MePath,
-		AgentPathPrefix + tickethttp.QueuePath,
-		AgentPathPrefix + tickethttp.QueuePath + "/" + agentPathTicketID,
-		AgentPathPrefix + tickethttp.QueuePath + "/" + agentPathTicketID + tickethttp.TicketHistorySuffix,
+// agentRoute is a mounted endpoint. The method travels with the path because
+// slice 2 mounts writes as well as reads, and requesting a PATCH route with GET
+// answers 405 — which would look like a guard that let the request through.
+type agentRoute struct {
+	method string
+	path   string
+	body   string
+}
+
+func agentPaths() []agentRoute {
+	ticket := AgentPathPrefix + tickethttp.QueuePath + "/" + agentPathTicketID
+	return []agentRoute{
+		{http.MethodGet, AgentPathPrefix + identityhttp.MePath, ""},
+		{http.MethodGet, AgentPathPrefix + tickethttp.QueuePath, ""},
+		{http.MethodGet, ticket, ""},
+		{http.MethodGet, ticket + tickethttp.TicketHistorySuffix, ""},
+		{http.MethodPatch, ticket + tickethttp.AssigneeSuffix, `{"assignee_id":null}`},
 	}
 }
 
@@ -431,15 +457,16 @@ func agentPaths() []string {
 func TestEveryAgentPathRefusesACustomer(t *testing.T) {
 	router, token := agentRouter(t, identitydomain.RoleCustomer)
 
-	for _, path := range agentPaths() {
-		r := httptest.NewRequest(http.MethodGet, path, nil)
+	for _, route := range agentPaths() {
+		r := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
 		r.Header.Set("Authorization", "Bearer "+token)
 
 		rec := httptest.NewRecorder()
 		router.ServeHTTP(rec, r)
 
 		if rec.Code != http.StatusForbidden {
-			t.Errorf("GET %s as a customer = %d, want 403\nbody: %s", path, rec.Code, rec.Body.String())
+			t.Errorf("%s %s as a customer = %d, want 403\nbody: %s",
+				route.method, route.path, rec.Code, rec.Body.String())
 		}
 	}
 }
@@ -452,15 +479,16 @@ func TestEveryAgentPathAdmitsAnAgentAndAnAdmin(t *testing.T) {
 	for _, role := range []identitydomain.Role{identitydomain.RoleAgent, identitydomain.RoleAdmin} {
 		router, token := agentRouter(t, role)
 
-		for _, path := range agentPaths() {
-			r := httptest.NewRequest(http.MethodGet, path, nil)
+		for _, route := range agentPaths() {
+			r := httptest.NewRequest(route.method, route.path, strings.NewReader(route.body))
 			r.Header.Set("Authorization", "Bearer "+token)
 
 			rec := httptest.NewRecorder()
 			router.ServeHTTP(rec, r)
 
 			if rec.Code != http.StatusOK {
-				t.Errorf("GET %s as %s = %d, want 200\nbody: %s", path, role, rec.Code, rec.Body.String())
+				t.Errorf("%s %s as %s = %d, want 200\nbody: %s",
+					route.method, route.path, role, rec.Code, rec.Body.String())
 			}
 		}
 	}
@@ -472,12 +500,12 @@ func TestEveryAgentPathAdmitsAnAgentAndAnAdmin(t *testing.T) {
 func TestTheAgentGroupAnswers401WithoutASession(t *testing.T) {
 	router, _ := agentRouter(t, identitydomain.RoleAgent)
 
-	for _, path := range agentPaths() {
+	for _, route := range agentPaths() {
 		rec := httptest.NewRecorder()
-		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		router.ServeHTTP(rec, httptest.NewRequest(route.method, route.path, strings.NewReader(route.body)))
 
 		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("GET %s with no token = %d, want 401", path, rec.Code)
+			t.Errorf("%s %s with no token = %d, want 401", route.method, route.path, rec.Code)
 		}
 	}
 }

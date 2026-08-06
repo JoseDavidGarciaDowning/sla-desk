@@ -31,14 +31,16 @@ type Module struct {
 // `sla` is the module's contract, not its dependency: whatever can resolve an
 // SLA clock. It names no other module, and supplying it is the composition
 // root's job.
-func New(pool *pgxpool.Pool, sla application.SLAPolicies) *Module {
-	return NewWith(postgres.NewRepository(pool), sla)
+// `dir` is the second contract, added in slice 2: whatever can answer whether
+// a user may hold tickets. Like `sla` it names no other module.
+func New(pool *pgxpool.Pool, sla application.SLAPolicies, dir application.AssigneeDirectory) *Module {
+	return NewWith(postgres.NewRepository(pool), sla, dir)
 }
 
 // NewWith builds the module from its collaborators.
 //
 // It exists so handlers can be exercised in a test without a database, while
 // still running the real use cases.
-func NewWith(repo application.Repository, sla application.SLAPolicies) *Module {
-	return &Module{Service: application.NewService(repo, sla)}
+func NewWith(repo application.Repository, sla application.SLAPolicies, dir application.AssigneeDirectory) *Module {
+	return &Module{Service: application.NewService(repo, sla, dir)}
 }

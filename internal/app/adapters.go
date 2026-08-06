@@ -3,8 +3,12 @@ package app
 import (
 	"context"
 
+	"github.com/google/uuid"
+
+	identityapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
+	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 )
@@ -59,4 +63,22 @@ func actorRole(r identitydomain.Role) ticketdomain.Role {
 	default:
 		return ticketdomain.RoleCustomer
 	}
+}
+
+// AssigneeDirectory answers the ticket module's question about who may hold a
+// ticket, using the identity module's answer about roles.
+//
+// The same shape as SLAPolicies above, and for the same reason: the ticket
+// module states what it needs in its own words — "may this person hold
+// tickets" — and never learns that the answer is a role, or that a module
+// called identity exists (docs/adr/0005). This file is the one place allowed to
+// know both.
+type AssigneeDirectory struct {
+	Users *identityapp.Service
+}
+
+var _ ticketapp.AssigneeDirectory = AssigneeDirectory{}
+
+func (d AssigneeDirectory) CanHoldTickets(ctx context.Context, id uuid.UUID) (bool, error) {
+	return d.Users.MayHoldTickets(ctx, id)
 }
