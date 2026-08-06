@@ -148,6 +148,37 @@ a test whose only job is to notice that: `TestTheClerkWebhookIsNotBehindRequireA
 
 ---
 
+## Two experiences, one ticket
+
+A customer sees their own tickets. An agent sees every ticket, ordered by what breaches
+next, and can take one, hand it to a colleague, or move it through the state machine.
+
+Those are not the same application with a flag. They are two route surfaces with different
+guarantees behind them, and the difference is the most interesting thing in the codebase:
+
+| | Customer | Agent |
+|---|---|---|
+| Routes | `/tickets/*` | `/queue/*` |
+| API | `/api/tickets/*` | `/api/agent/*` |
+| Scoping | `WHERE requester_id = $1`, in SQL | **none** |
+| What stops a leak | the query cannot return someone else's row | the route is mounted behind a role check |
+
+Until slice 2 every read answered one question — *is this yours?* — and the answer lived in
+a predicate, so a forgotten check in Go could not leak a ticket. An agent reads tickets that
+are not theirs, so that mechanism stops applying and something else has to carry the
+guarantee. Widening the customer's query with a role flag was rejected: a boolean that
+disables a security predicate is a boolean that can be wrong, and this project had already
+watched exactly that shape survive a test suite. The reasoning, including what the new design
+gives up, is in
+[ADR 0011](docs/adr/0011-authorization-moves-from-the-predicate-to-the-route.md).
+
+**How somebody becomes an agent.** Not a migration and not an admin endpoint —
+`AGENT_CLERK_USER_IDS` is read at startup and applied when the `users` row is written. A
+migration cannot do it: it is static SQL, so it would mean committing a person's Clerk id to
+git, a value that differs between Clerk instances and names a row that does not exist until
+that person signs up. Local setup is in
+[docs/local-development.md](docs/local-development.md).
+
 ## How the tests are judged
 
 Coverage measures which lines ran. It says nothing about whether a test would notice if the
