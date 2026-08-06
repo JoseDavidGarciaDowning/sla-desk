@@ -1,0 +1,483 @@
+# Todo: Slice 2 — the agent
+
+Plan: [`plan.md`](./plan.md) · Spec: [`docs/spec.md`](../../docs/spec.md) §2, §4.3
+
+Every task is test-first (spec §9, strict TDD). Write the failing test, watch it fail, then
+make it pass. Numbering continues from slice 1, which ended at T16.
+
+---
+
+## Phase 1: Becoming an agent
+
+### T17: Role bootstrap from server config ✅
+
+**Description:** Give the system a way for a `users` row to hold `agent` or `admin`. The
+list of Clerk subjects that get promoted comes from the process environment and is applied
+by the identity module when it writes the row — never from a token, never from a webhook
+payload. Resolves spec §12.4.
+
+**Acceptance criteria:**
+- [x] `AGENT_CLERK_USER_IDS` and `ADMIN_CLERK_USER_IDS` read by `internal/platform/config`,
+      comma-separated, **empty by default** — an unconfigured deploy has no agents
+- [x] A subject in a list lands as that role whether the row is written by the Clerk webhook
+      or by the lazy upsert in `RequireAuth` — both go through `EnsureUser`, so there is one
+      place to change and no way for the two paths to disagree
+- [x] An existing `customer` row whose subject is listed is promoted on the next
+      `EnsureUser`, not only at creation
+- [x] A subject in **both** lists fails the boot with a named error, rather than resolving by
+      map iteration order — the error names the subject, so an operator knows which entry to remove
+- [x] Removing a subject from the list does **not** demote — **enforced by the SQL**, see below
+- [x] Startup logs the **count** in each list, never the ids
+
+**Verification:**
+- [x] Integration, against a real Postgres: a granted subject lands as `agent` on insert; an
+      existing `customer` is promoted and keeps **the same row id**, proving it was updated
+      rather than recreated
+- [x] Integration: an agent survives an upsert that passes `customer`, and the rest of that
+      update still applies — a conflict clause that protected the role by doing nothing at
+      all would have passed the first assertion alone
+- [x] Integration: `GrantRole` moves an agent to admin, refuses a demotion, and reports an
+      unknown subject as `ErrNoSuchUser`
+- [x] Unit: 8 domain cases and 3 config cases — empty, one id, several, whitespace and
+      trailing commas, a repeat within one list, the same id in both, and the zero value
+- [x] Unit: the service promotes an existing customer, does **not** write when the role
+      already matches, and does **not** demote when the list is emptied
+- [x] **7 mutations, 7 dead**: `EnsureUser` skipping the grant on an existing row; `applyGrant`
+      losing the already-matching guard; `NewRoleGrants` accepting a subject in both lists;
+      `splitList` not trimming; `GrantUserRole` without its predicate; `Upsert` writing the
+      literal instead of the parameter; the `ON CONFLICT` clause writing the role
+- [x] `make check` and `make test-int` clean
+
+**Dependencies:** None
+**Files:** `internal/modules/identity/domain/grants.go`, `internal/modules/identity/application/service.go`,
+`internal/modules/identity/infrastructure/postgres/queries/users.sql`,
+`internal/modules/identity/infrastructure/postgres/repository.go`, `internal/modules/identity/module.go`,
+`internal/platform/config/config.go`, `cmd/api/main.go`, `docs/local-development.md`, plus tests
+**Scope:** M
+
+**Decisions taken during T17:**
+
+- **The no-demotion rule is a SQL predicate, not an `if`.** The card asked for it to be
+  *asserted*; it is enforced instead. `GrantUserRole` carries `AND @role::text <> 'customer'`,
+  so there is no argument to the method that takes a role away. A rule that lives in a caller
+  is a rule the next caller can forget to write, and this one protects against a typo in an
+  environment variable silently stripping an agent mid-shift.
+- **Promotion is a second query, not a widened upsert.** The role stays out of the upsert's
+  conflict clause, which is the guarantee that existed before slice 2 turned it into a
+  parameter. Refreshing someone's name must not be able to change what they may do, in either
+  direction, and `Upsert` is the method the webhook calls with whatever Clerk sent.
+- **`identity.New` and `NewWith` now return an error.** A subject in both lists has no
+  defensible winner, and Go's map iteration order is deliberately random — resolving it
+  silently would make a deployed role depend on something no reader can see and no test can
+  pin. Same rule as the Clerk webhook secret: a configuration that cannot be obeyed stops the
+  process at startup.
+- **`applyGrant` has two early returns and neither is an optimisation.** Skipping when the
+  role already matches is what stops every request an agent makes from becoming a write —
+  `EnsureUser` runs on all of them. Skipping when the grant is `customer` is the no-demotion
+  rule restated in Go, so the SQL predicate is never even reached in the ordinary case.
+- **`domain.RoleGrants` has a usable zero value.** A caller who forgets to build one gets
+  "nobody is privileged" rather than a nil-map panic on the first request.
+
+**Two things this cost, both worth recording:**
+
+- **Widening `UserRepository` broke every stub.** Four test doubles across three packages
+  needed the new method. That is the price of a consumer-declared interface and it is the
+  right price — the compiler found all of them, and each one had to state what it does when
+  asked to grant a role.
+- **`Config` stopped being comparable.** Two existing tests asserted `got != Config{}`, which
+  no longer compiles once the struct holds a slice. They now use `reflect.DeepEqual`, and the
+  assertion they were making is unchanged.
+
+**Left for the human:** `.env.example` needs the two new variables added by hand. A local
+permission rule keeps the assistant out of `.env*`, the same rule recorded in T1.
+
+---
+
+> **Checkpoint F — an agent exists in the database and can do nothing new yet.**
+
+---
+
+## Phase 2: Reading every ticket
+
+### T18: `RequireRole` and the `/api/agent` route group ⚠️ the slice's load-bearing task ✅
+
+**Description:** The middleware that turns a role into an authorization decision, and the
+route group that is the only place the unscoped queries will ever be reachable from. Ships
+with one trivial endpoint so the guard is provable before anything depends on it.
+
+**Acceptance criteria:**
+- [x] `RequireRole(roles ...domain.Role)` in `identity/transport/http`, reading the role from
+      the `domain.User` that `RequireAuth` put in the context — **never** from session claims
+- [x] A request with no user in the context answers 401, not 403: that is a wiring mistake,
+      the same failure mode `CallerResolver` already handles
+- [x] A user whose role is not listed answers **403** with an RFC 9457 problem document
+- [x] The composition root mounts an `/api/agent` group inside the authenticated group,
+      carrying `RequireRole(agent, admin)`
+- [x] `GET /api/agent/me` returns the caller's role **and our own user id** — see below
+- [x] An empty role list admits **nobody**, beyond the stated criteria
+
+**Verification:**
+- [x] A customer receives 403 on every path under `/api/agent`, driven from `agentPaths()` so
+      a route added later is covered without the test being edited
+- [x] An agent and an admin both receive 200 on every one of them — which also proves each
+      path **exists**, because chi routes before it runs the group's middleware, so an
+      unmounted path would answer 404 rather than 403
+- [x] An unauthenticated request receives 401
+- [x] The customer's ticket endpoints still admit a customer — slice 2 must not close slice 1
+- [x] 7 unit tests on the middleware in isolation, including a role our CHECK constraint
+      cannot currently produce
+- [x] **5 mutations, 5 dead**: mounting the group without the guard; an empty list meaning
+      "everyone"; 403 instead of 401 for a missing caller; refusing and calling the next
+      handler anyway; naming the required roles in the refusal
+- [x] `make check` and `make test-int` clean; `make arch` unchanged
+
+**Dependencies:** T17
+**Files:** `internal/modules/identity/transport/http/require_role.go`, `.../me.go`,
+`internal/app/router.go`, plus tests
+**Scope:** M
+
+**Decisions taken during T18:**
+
+- **The roles are named in the composition root, not inside the module.** `RequireRole` takes
+  them as arguments and `internal/app` supplies `RoleAgent, RoleAdmin`. That is plan decision
+  C made concrete: the boundary is readable in the router rather than buried in a helper
+  called `RequireAgent`, and `internal/app` is already the one package allowed to know what
+  both modules mean by a role — the same reason `actorRole` lives in `adapters.go`.
+- **An empty role list fails closed.** `RequireRole()` with the arguments forgotten refuses
+  everyone. The alternative — treating it as "no restriction" — is the exact shape of the
+  trap this project was built around: `clerkhttp.WithHeaderAuthorization` looks mounted and
+  rejects nothing (§4.3).
+- **The 403 names neither the caller's role nor the ones that would have worked.** It tells
+  someone how to describe an account worth attacking, and withholding it costs an honest
+  caller nothing.
+- **`/me` returns the role and our user id, not the email or the name.** The role is what the
+  frontend's agent layout decides on, since Clerk holds no role. The id is the value that
+  goes in `assignee_id`, and the browser cannot derive it — Clerk knows a subject and nothing
+  about our `users` table — so T24's "assign this to me" has no other source. The email and
+  name are already in the browser from Clerk, and re-serving them would create a second copy
+  to drift.
+
+**What cost the most time, and it was not the feature.** Four tests passed in isolation and
+two failed together. The cause was the gotcha T7 recorded and this task walked straight back
+into: **Clerk's JWK cache is global to the process and keyed by key id alone**, with no
+scoping by instance or issuer. The helper minted a fresh RSA key per router but reused one
+key id, so the first key won for the rest of the run and later tokens got a 401 that had
+nothing to do with what the test was asserting. Each router now gets its own key id.
+
+Worth stating because the diagnosis nearly went the wrong way: the first reading was that
+the agent group had broken the customer routes, which is what the failing assertion says on
+its face. Running the two tests alone is what separated "this code is wrong" from "these
+tests interfere", and it took one command.
+
+---
+
+### T19: The agent queue ✅
+
+**Description:** One page of **every** ticket, filtered and paginated, through a query that
+has no requester predicate at all.
+
+**Acceptance criteria:**
+- [x] `ListTicketsForQueue` — a **new** query. `ListTicketsByRequester` is untouched and
+      carries no new parameter
+- [x] Filters: status, priority, and assignee (`me`, a specific id, `unassigned`, `any`)
+- [x] Keyset pagination — on `(deadline, id)`, **not** `(created_at, id)`; see below
+- [x] Ordered by the deadline ascending with paused tickets last
+- [x] `GET /api/agent/tickets`, mounted in the T18 group
+- [x] The response carries the requester's display name
+
+**Verification:**
+- [x] Integration: the queue contains tickets belonging to customers other than the caller
+- [x] Integration: one case per filter and one for a pair — five subtests
+- [x] Integration: paging one row at a time reaches the paused tickets at the end, and no row
+      appears on two pages
+- [x] Unit: the DTO falls back to the email when Clerk holds no name; the service refuses a
+      filter with no assignee scope and does not call the repository
+- [x] An unknown filter value is 400, not silently ignored
+- [x] **6 mutations, 6 dead**: the queue query gaining a requester predicate; ordering by
+      `created_at`; the cursor comparing against a bare NULL; `unassigned` behaving like
+      `any`; the service accepting an unset scope; the DTO dropping the email fallback
+- [x] The agent group's route tests cover `/api/agent/tickets` **without being edited**, from
+      the `agentPaths()` list T18 introduced
+- [x] `make check` and `make test-int` clean
+
+**Dependencies:** T18
+**Files:** `db/migrations/004_ticket_queue_index.sql`,
+`internal/modules/ticket/infrastructure/postgres/queries/tickets.sql`, `.../repository.go`,
+`internal/modules/ticket/application/{ports,service}.go`,
+`internal/modules/ticket/transport/http/{queue,dto,caller}.go`, `internal/app/router.go`,
+plus tests
+**Scope:** L — larger than planned, because the card contradicted itself
+
+**The card was wrong, and finding out cost a migration.**
+
+It asked for keyset pagination on `(created_at, id)` *and* ordering by `sla_due_at`. Those
+cannot both hold. **A keyset cursor is a position in the sort order**, so it has to carry the
+key being sorted on; carrying a different one asks the database for "what comes after the row
+created at 10:00" in a list ordered by deadline, which means nothing. The pages would skip and
+repeat.
+
+Worse, and not noticed at planning time: **`sla_due_at` is mutable.** Pausing a ticket clears
+it and resuming recomputes it, so a cursor over it cannot promise what T10's cursor promised.
+
+Resolved by choosing what the queue is *for*. Ordering by creation date is stable and answers
+the wrong question — an agent reads this list to find what breaches next, and sorting the
+loaded page in the browser sorts one page of many, which is the lie T14a already rejected for
+filters. So: **order by the deadline, carry the deadline in the cursor, and accept that a
+ticket transitioned mid-paging can move across it.** Only the row that moved is affected, and
+it is the one an agent just acted on. OFFSET would shift every row after it, on any insert.
+
+**Decisions taken during T19:**
+
+- **The sentinel is `9999-12-31T23:59:59.999999Z`, not `'infinity'`.** `'infinity'` is the
+  natural Postgres value and was the first implementation, until the generated cursor
+  parameter turned out to be `*time.Time` — which has no such value, so a cursor pointing at a
+  paused ticket could not be sent at all. The sentinel is exact in both directions:
+  `timestamptz` resolves to one microsecond and RFC3339Nano writes six digits.
+- **`COALESCE(...)` rather than `NULLS LAST`**, and the reason is the cursor rather than the
+  ordering. Measured against Postgres 16 before committing to it:
+  `(NULL, id) > (x, id)` is **NULL**, not false, and `WHERE NULL` discards the row — so with
+  `NULLS LAST` every paused ticket would sort correctly and then vanish from the second page
+  onward, silently. `TestPagingReachesThePausedTicketsAtTheEnd` is the test for it.
+- **Migration 004 adds an expression index matching the ORDER BY.** A plain index on
+  `sla_due_at` does not serve `COALESCE(sla_due_at, ...)`. Verified rather than assumed: the
+  `text -> timestamptz` cast is STABLE, which an index expression normally refuses, and it is
+  accepted here because a literal argument is constant-folded at parse time. `EXPLAIN` shows
+  the row comparison as an **Index Cond**, not a Filter.
+- **`AssigneeScope` is three values, not a nullable id.** A nil id already means "no filter",
+  so it cannot also mean "unassigned". The zero value is refused rather than defaulted to
+  "any", because defaulting would turn a caller who forgot into "return every ticket" on the
+  one query with no predicate to fall back on.
+- **`AgentRoutes` is a separate mount function from `Routes`.** Everything in it is backed by
+  an unscoped query, so it is handed a router that already carries the role check. A handler
+  added to the wrong list is a handler behind the wrong guard, and two lists make that visible.
+- **Two rules moved layers while writing the tests**, and both moves were improvements rather
+  than accommodations. Refusing an unset scope is a use-case precondition and belongs in the
+  service, not the adapter. Falling back to the email when Clerk holds no name is a display
+  decision and belongs in the DTO. Each is now unit-testable where it lives, and the repository
+  went back to being only a mapping.
+
+**Two things the tests caught that the code did not:**
+
+- `newTicketWith` stamps **every** ticket with the same 24-hour deadline whatever its priority
+  — the policy id varies, `sla_due_at` does not. The first ordering test seeded an urgent and a
+  low ticket and asserted the urgent came first; they tied, and the uuid tiebreaker decided it
+  by coin flip. The test now sets the deadlines explicitly. The failure was the test being
+  wrong about a helper, and "fixing" the query would have broken it.
+- One mutation was written badly: `t.requester_id = t.requester_id` is a tautology and scopes
+  nothing, so it survived and looked like a gap in the tests. Rewritten to scope to an
+  arbitrary user, it died immediately. **A mutation that does not change behaviour proves as
+  little as a test that cannot fail.**
+
+---
+
+### T20: Agent ticket detail and unscoped history ✅
+
+**Description:** One ticket and its full timeline, for a caller who is not its requester.
+
+**Acceptance criteria:**
+- [x] `GET /api/agent/tickets/{id}` and `GET /api/agent/tickets/{id}/history`
+- [x] Backed by `GetTicketByID` (new) and `ListTicketStatusHistory` (**already existed** — it
+      is the input to `sla.Reconstruct` and has never carried a requester predicate)
+- [x] 404 for an id that does not exist
+- [x] The agent history reuses the customer's DTO, so it carries the actor's role and still
+      does not carry `actor_id`
+
+**Verification:**
+- [x] Integration: a ticket and a timeline are read without supplying a requester
+- [x] Integration: the scoped query still refuses another customer's ticket
+- [x] Integration through the **real repository**: `OneByID` and `Timeline` succeed with no
+      requester, and an unknown id is `ErrTicketNotFound`
+- [x] Both new paths joined `agentPaths()`, so the 403 / 200 / 401 tests cover them
+- [x] **4 mutations, 4 dead**: `OneByID` pointed at the scoped query; the detail route
+      unmounted; `GetTicketByID` ignoring its argument; `Timeline` not translating an empty
+      result into not-found
+- [x] `make check` and `make test-int` clean
+
+**Dependencies:** T19
+**Files:** `internal/modules/ticket/infrastructure/postgres/queries/tickets.sql`,
+`.../repository.go`, `internal/modules/ticket/application/{ports,service}.go`,
+`internal/modules/ticket/transport/http/{queue,caller}.go`, plus tests
+**Scope:** S
+
+**Two mutations survived, and both were real.**
+
+The first was a **gap between two covered layers**. Pointing `OneByID` at the scoped
+`GetTicketForRequester` left the entire suite green: the queue's integration tests run against
+the generated queries, and the router tests run against a stub repository, so nothing anywhere
+exercised the repository's *choice* of query. Each layer was covered and the seam between them
+was not. Closed by testing through the real `Repository` in `internal/app`, where a pool-backed
+fixture already existed for the lifecycle tests.
+
+The second was **a test that was true for the wrong reason**. `TestAnUnknownTicketIDReturnsNoRows`
+seeded nothing, so the table was empty inside its transaction and "no rows" held for any query
+at all — including one whose predicate ignored its argument entirely. It now seeds a ticket
+first, so the assertion is about the id rather than about the table being empty.
+
+**And one mutation reported as surviving had never been applied.** The substitution silently
+matched nothing, and `grep -c` returned 0 while the result read as a coverage gap. Checking
+that a mutation actually landed is part of running one — an unapplied mutation and a
+well-tested one produce the same green.
+
+---
+
+> **Checkpoint G — an agent can read every ticket through the API, and a customer receives
+> 403 on every agent path.**
+
+---
+
+## Phase 3: Acting on a ticket
+
+### T21: Assignment
+
+**Description:** Put an agent on a ticket, take them off, and refuse anyone who is not an
+agent — with the check declared by the ticket module and implemented in the composition root.
+
+**Acceptance criteria:**
+- [ ] `PATCH /api/agent/tickets/{id}/assignee`, body `{"assignee_id": "<uuid>|null"}`
+- [ ] `application.AssigneeDirectory` — a consumer-declared port answering *may this id hold
+      tickets?*, implemented in `internal/app` against identity, following `SLAPolicies`
+- [ ] Assigning a customer's id is **422**; assigning an id that does not exist is 422 too,
+      and the two are the same answer — an agent must not be able to enumerate user ids
+- [ ] `null` unassigns, and is distinguishable from an absent field
+- [ ] **No `ticket_status_history` row is written** (plan §E) — the timeline the clock walks
+      is not padded
+- [ ] Assigning an already-assigned ticket overwrites; it is not an error
+
+**Verification:**
+- [ ] Integration: one case per role for the target — agent succeeds, admin succeeds, customer
+      refused, unknown id refused
+- [ ] Integration: `sla_*` columns and the history row count are **unchanged** by an assignment
+- [ ] The consistency property still holds afterwards
+- [ ] `make arch`: the ticket module still imports no other business module
+- [ ] Mutations: dropping the directory check; treating absent as null; writing a history row —
+      each turns a test red
+
+**Dependencies:** T18
+**Files:** `internal/modules/ticket/application/{ports,service}.go`,
+`internal/modules/ticket/infrastructure/postgres/queries/tickets.sql`,
+`internal/modules/ticket/transport/http/{handlers,dto}.go`, `internal/app/adapters.go`, plus tests
+**Scope:** M
+
+---
+
+### T22: The transition endpoint
+
+**Description:** Expose the write path built in T11. This is the first time the SLA clock can
+be paused and resumed over HTTP — the headline behaviour of the entire domain.
+
+**Acceptance criteria:**
+- [ ] `POST /api/agent/tickets/{id}/transitions`, body `{"to": "<status>", "reason": "…"}`
+- [ ] Calls `Service.Transition`, which already resolves the clock before the transaction and
+      takes `FOR UPDATE` — **no new write logic in this task**
+- [ ] An edge the actor's role may not take is **403**; an edge that does not exist at all is
+      **422**. The domain already distinguishes them; the handler must not flatten both into one
+- [ ] A transition on a `closed` ticket is refused — `closed` is terminal (§4.1)
+- [ ] The response is the updated ticket, so the client needs no follow-up read
+- [ ] Statuses join the generated contract — already there since T14a, verify no drift
+
+**Verification:**
+- [ ] Integration: `open → pending` through the endpoint sets `sla_due_at` to null and
+      `sla_clock_started_at` to null, and `pending → open` resumes with the budget already spent
+      preserved
+- [ ] The §9 consistency property holds after every transition made through the endpoint, not
+      only after those made in a test's own transaction
+- [ ] A customer calling it is 403 at the group, before the handler
+- [ ] Concurrent transitions on one ticket: the second observes the first, because of `FOR UPDATE`
+- [ ] Mutations: swapping the 403 and 422 branches; passing the caller's role from the request
+      body; skipping the terminal check — each turns a test red
+
+**Dependencies:** T18
+**Files:** `internal/modules/ticket/transport/http/{handlers,dto}.go`, `internal/app/router.go`,
+plus tests
+**Scope:** M
+
+---
+
+> **Checkpoint H — review with human before the frontend.**
+
+---
+
+## Phase 4: The agent in a browser
+
+### T23: `(agent)` route group, role guard, queue view
+
+**Description:** The agent's half of the app. A second route group beside `(customer)`,
+guarded the same way §4.3 guards the API — and, like T12, the guard here is UX and the real
+boundary stays on the API side.
+
+**Acceptance criteria:**
+- [ ] `web/app/(agent)/` group with its own layout, calling `auth.protect()` **and** checking
+      the role from the API — Clerk does not hold the role, our database does
+- [ ] A customer visiting `/agent` is redirected; a signed-out visitor goes to sign-in
+- [ ] Queue table: requester, title, priority, status, assignee, SLA remaining
+- [ ] `sla-timer.tsx` reused unchanged — no second implementation of the countdown
+- [ ] Filters in URL query params, as T14a established
+- [ ] Loading, empty and error states, including the 403 state for a customer who forced the URL
+
+**Verification:**
+- [ ] Component tests for the table, the filters and the 403 state
+- [ ] `pnpm build`, `pnpm lint`, `tsc --noEmit` clean
+- [ ] Measured, not assumed: the actual redirect target is inspected, because T12 shipped a
+      correct `307` pointing at the wrong host
+
+**Dependencies:** T19
+**Files:** `web/app/(agent)/layout.tsx`, `web/app/(agent)/queue/`, `web/lib/use-agent-tickets.ts`,
+`web/lib/agent.ts`, plus tests
+**Scope:** M
+
+---
+
+### T24: Agent ticket detail with actions
+
+**Description:** The detail view an agent works from: the timeline, the assign control and the
+transition control.
+
+**Acceptance criteria:**
+- [ ] Reuses `status-timeline.tsx` and `sla-timer.tsx` unchanged
+- [ ] Assign control lists agents and offers "unassign"; "assign to me" is one click
+- [ ] Transition control offers **only the edges this actor may take from the current status** —
+      derived from the contract, not hardcoded in the component
+- [ ] A rejected action renders the API's own sentence, verbatim from the problem document
+- [ ] Both actions invalidate the queue and the detail, and neither loses the view's scroll state
+
+**Verification:**
+- [ ] Component tests: the offered edges change with the current status; a 403 renders; a 422
+      renders its field errors
+- [ ] Mutations: offering every status regardless of the current one; invalidating `all`
+      instead of the two specific keys — each turns a test red
+
+**Dependencies:** T20, T21, T22
+**Files:** `web/app/(agent)/queue/[id]/`, `web/components/{assign-control,transition-control}.tsx`,
+`web/lib/use-agent-tickets.ts`, plus tests
+**Scope:** M
+
+---
+
+### T25: E2E, ADR 0011, and the docs
+
+**Description:** Prove the slice in a browser against the deployed stack, and write down the
+decision that will otherwise be re-litigated in six months.
+
+**Acceptance criteria:**
+- [ ] **ADR 0011** records plan decision B: why the scoped queries were not widened with a
+      role flag, and what the route group is doing in the argument
+- [ ] Spec §12.4 struck through and marked resolved, as §12.3 and §12.5 were
+- [ ] Spec §2 roadmap row for slice 2 marked delivered
+- [ ] `docs/architecture.md` gains the `/api/agent` group and `RequireRole`
+- [ ] README explains the two query sets — it is the non-obvious part of the design
+- [ ] E2E: an agent signs in, opens the queue, assigns a ticket to themselves, moves it to
+      `pending`, and the customer's own view shows the paused clock
+
+**Verification:**
+- [ ] The E2E job passes on the PR
+- [ ] `make check` and `make test-int` green
+- [ ] An architecture test asserts the unscoped queries are used by no handler outside the
+      agent group — if one can be written; if not, say so and explain why rather than skipping it
+
+**Dependencies:** T23, T24
+**Files:** `docs/adr/0011-*.md`, `docs/spec.md`, `docs/architecture.md`, `README.md`, `smoke/`
+**Scope:** M
+
+---
+
+> **Checkpoint I — Slice 2 complete.**

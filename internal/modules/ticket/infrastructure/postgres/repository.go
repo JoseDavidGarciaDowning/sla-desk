@@ -306,11 +306,119 @@ func (r *Repository) HistoryForRequester(ctx context.Context, ticketID, requeste
 	return historyFrom(rows), nil
 }
 
+// OneByID reads a ticket without asking whose it is.
+//
+// ErrTicketNotFound for an id that names nothing, which the handler turns into
+// a 404. That rule survives slice 2 untouched: the agent group answers 403 to a
+// customer because its path carries no id to confirm, and an id that names no
+// ticket is a different question (docs/spec.md §11).
+func (r *Repository) OneByID(ctx context.Context, id uuid.UUID) (domain.Ticket, error) {
+	row, err := r.q.GetTicketByID(ctx, id)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return domain.Ticket{}, application.ErrTicketNotFound
+	case err != nil:
+		return domain.Ticket{}, fmt.Errorf("reading the ticket: %w", err)
+	}
+	return ticketFrom(row), nil
+}
+
+// Timeline returns a ticket's full history, for a caller who is not its
+// requester.
+//
+// It reuses ListTicketStatusHistory, which has never had a requester predicate:
+// it is the input to sla.Reconstruct, running inside a transaction that has
+// already established which ticket it is working on. The comment on that query
+// anticipated this exact caller — "an agent transitions tickets that are not
+// theirs" — so slice 2 adds no query here, only a way to reach it.
+//
+// Empty means the ticket does not exist, not that it has no timeline. Every
+// ticket carries at least the entry recording its creation.
+func (r *Repository) Timeline(ctx context.Context, ticketID uuid.UUID) ([]domain.HistoryEntry, error) {
+	rows, err := r.q.ListTicketStatusHistory(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the history: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, application.ErrTicketNotFound
+	}
+	return historyFrom(rows), nil
+}
+
 // ticketFrom maps a row onto the domain entity.
 //
 // Deliberately not returning ticketdb.Ticket. Nothing above this package should
 // depend on the shape of the table: adding a column must not change the type
 // every handler reads.
+// ListForQueue reads every ticket, in deadline order.
+//
+// There is no requester predicate and that is the design, not an omission: an
+// agent reads tickets that are not theirs, so the guarantee that used to live
+// in the SQL now lives in where the handler is mounted (tasks/slice-2/plan.md
+// decisions B and C). The customer's ListForRequester is untouched and still
+// carries its own.
+//
+// The cursor's deadline is coalesced here rather than in the query's parameter,
+// so the value compared is the one the ORDER BY produced. A paused ticket's
+// position is 'infinity', and passing its bare NULL would make the row
+// comparison NULL and drop every paused ticket from the next page.
+func (r *Repository) ListForQueue(ctx context.Context, f application.QueueFilter) ([]application.QueueEntry, error) {
+	rows, err := r.q.ListTicketsForQueue(ctx, ticketdb.ListTicketsForQueueParams{
+		Status:         (*string)(f.Status),
+		Priority:       (*string)(f.Priority),
+		AssigneeFilter: string(f.Assignee),
+		AssigneeID:     f.AssigneeID,
+		AfterDueAt:     f.AfterDueAt,
+		AfterID:        f.AfterID,
+		PageSize:       f.PageSize,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing the queue: %w", err)
+	}
+
+	out := make([]application.QueueEntry, len(rows))
+	for i, row := range rows {
+		name := ""
+		if row.RequesterName != nil {
+			name = *row.RequesterName
+		}
+
+		// Both are carried as stored. Clerk holds no name for someone who
+		// signed up with an email and a password, so one of them is often
+		// empty — which of the two to show is a display decision and is made
+		// in the DTO, not here.
+		out[i] = application.QueueEntry{
+			Ticket:         ticketFrom(queueRowToTicket(row)),
+			RequesterName:  name,
+			RequesterEmail: row.RequesterEmail,
+		}
+	}
+	return out, nil
+}
+
+// queueRowToTicket drops the joined columns so the ticket itself is mapped by
+// the same function every other read uses. Two mappings for one table would
+// drift, and the one that drifted would be the one used by a single caller.
+func queueRowToTicket(row ticketdb.ListTicketsForQueueRow) ticketdb.Ticket {
+	return ticketdb.Ticket{
+		ID:                row.ID,
+		RequesterID:       row.RequesterID,
+		AssigneeID:        row.AssigneeID,
+		Title:             row.Title,
+		Description:       row.Description,
+		Category:          row.Category,
+		Priority:          row.Priority,
+		Status:            row.Status,
+		SlaPolicyID:       row.SlaPolicyID,
+		SlaConsumedMicros: row.SlaConsumedMicros,
+		SlaClockStartedAt: row.SlaClockStartedAt,
+		SlaDueAt:          row.SlaDueAt,
+		SlaBreachedAt:     row.SlaBreachedAt,
+		CreatedAt:         row.CreatedAt,
+		UpdatedAt:         row.UpdatedAt,
+	}
+}
+
 func ticketFrom(row ticketdb.Ticket) domain.Ticket {
 	return domain.Ticket{
 		ID:          row.ID,

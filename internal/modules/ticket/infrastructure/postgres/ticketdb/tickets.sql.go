@@ -79,6 +79,47 @@ func (q *Queries) CreateTicket(ctx context.Context, arg CreateTicketParams) (Tic
 	return i, err
 }
 
+const getTicketByID = `-- name: GetTicketByID :one
+SELECT id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at FROM tickets WHERE id = $1
+`
+
+// One ticket, for a caller who is not its requester.
+//
+// The counterpart to GetTicketForRequester, and a separate query rather than
+// that one with the predicate made conditional — the same decision as the queue
+// (tasks/slice-2/plan.md decision B). The scoped one keeps its predicate and
+// takes no new parameter, so it cannot be talked into returning someone else's
+// ticket by any argument.
+//
+// Reachable only from a handler mounted behind RequireRole. Nothing here
+// enforces that, which is stated rather than hidden.
+//
+// No rows still means 404 at the boundary. The agent group answers 403 to a
+// customer because there is no id in its path to confirm; an id that names no
+// ticket is a different question, and §11's rule applies to it unchanged.
+func (q *Queries) GetTicketByID(ctx context.Context, id uuid.UUID) (Ticket, error) {
+	row := q.db.QueryRow(ctx, getTicketByID, id)
+	var i Ticket
+	err := row.Scan(
+		&i.ID,
+		&i.RequesterID,
+		&i.AssigneeID,
+		&i.Title,
+		&i.Description,
+		&i.Category,
+		&i.Priority,
+		&i.Status,
+		&i.SlaPolicyID,
+		&i.SlaConsumedMicros,
+		&i.SlaClockStartedAt,
+		&i.SlaDueAt,
+		&i.SlaBreachedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getTicketForRequester = `-- name: GetTicketForRequester :one
 SELECT id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at FROM tickets
 WHERE id = $1
@@ -268,6 +309,143 @@ func (q *Queries) ListTicketsByRequester(ctx context.Context, arg ListTicketsByR
 			&i.SlaBreachedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTicketsForQueue = `-- name: ListTicketsForQueue :many
+SELECT t.id, t.requester_id, t.assignee_id, t.title, t.description, t.category, t.priority, t.status, t.sla_policy_id, t.sla_consumed_micros, t.sla_clock_started_at, t.sla_due_at, t.sla_breached_at, t.created_at, t.updated_at, u.name AS requester_name, u.email AS requester_email
+FROM tickets t
+JOIN users u ON u.id = t.requester_id
+WHERE ($1::text IS NULL OR t.status = $1::text)
+  AND ($2::text IS NULL OR t.priority = $2::text)
+  AND (
+    $3::text = 'any'
+    OR ($3::text = 'unassigned' AND t.assignee_id IS NULL)
+    OR ($3::text = 'one' AND t.assignee_id = $4::uuid)
+  )
+  AND (
+    $5::timestamptz IS NULL
+    OR (COALESCE(t.sla_due_at, '9999-12-31 23:59:59.999999+00'::timestamptz), t.id) >
+       ($5::timestamptz, $6::uuid)
+  )
+ORDER BY COALESCE(t.sla_due_at, '9999-12-31 23:59:59.999999+00'::timestamptz), t.id
+LIMIT $7
+`
+
+type ListTicketsForQueueParams struct {
+	Status         *string
+	Priority       *string
+	AssigneeFilter string
+	AssigneeID     *uuid.UUID
+	AfterDueAt     *time.Time
+	AfterID        *uuid.UUID
+	PageSize       int32
+}
+
+type ListTicketsForQueueRow struct {
+	ID                uuid.UUID
+	RequesterID       uuid.UUID
+	AssigneeID        *uuid.UUID
+	Title             string
+	Description       string
+	Category          domain.Category
+	Priority          domain.Priority
+	Status            domain.Status
+	SlaPolicyID       int64
+	SlaConsumedMicros int64
+	SlaClockStartedAt *time.Time
+	SlaDueAt          *time.Time
+	SlaBreachedAt     *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	RequesterName     *string
+	RequesterEmail    string
+}
+
+// One page of EVERY ticket, in deadline order. The agent queue.
+//
+// A separate query rather than ListTicketsByRequester with the predicate made
+// conditional, and that is the decision slice 2 exists to make
+// (tasks/slice-2/plan.md decision B). Passing a role in and skipping
+// WHERE requester_id when it says 'agent' would put a boolean in charge of a
+// security predicate — and T14a's mutation testing already caught that exact
+// shape once, when a query was scoped for the case a test happened to run and
+// open for the one it did not. The customer's query keeps its predicate, takes
+// no new parameter, and cannot be talked into returning someone else's ticket.
+//
+// What replaces the predicate is where this query may be called from: only
+// handlers mounted under /api/agent, behind RequireRole. Nothing here enforces
+// anything, and that is stated rather than hidden.
+//
+// ORDER BY the deadline, not created_at. A queue is read to find what breaches
+// next; ordering by age makes the agent hunt for it, and sorting the loaded
+// page in the browser sorts one page of many — the same lie client-side
+// filtering told in T14a.
+//
+// COALESCE(sla_due_at, sentinel) rather than NULLS LAST, because the cursor has
+// to compare against the same expression and (NULL, id) > (x, id) is NULL, not
+// false. The sentinel is 9999-12-31T23:59:59.999999Z rather than 'infinity'
+// because the generated cursor parameter is *time.Time, which cannot hold one.
+// See db/migrations/004. The matching expression index is what makes this an
+// Index Cond rather than a Filter.
+//
+// The cursor is (deadline, id) and not (created_at, id): a keyset cursor IS a
+// position in the sort order, so it must carry the key being sorted on.
+// Carrying a different one asks the database for "what comes after the row
+// created at 10:00" in a list ordered by deadline, which means nothing.
+//
+// Known and accepted: sla_due_at is mutable — pausing a ticket clears it and
+// resuming recomputes it — so a ticket transitioned while someone is paging can
+// move across the cursor and be seen twice or missed. Only the row that moved
+// is affected, which is the one an agent just acted on. OFFSET would shift
+// every row after it instead, on any insert as well.
+//
+// assignee is three questions, not one: any assignee, a specific one, or none.
+// @assignee_filter distinguishes them because a NULL parameter already means
+// "no filter" and cannot also mean "unassigned".
+func (q *Queries) ListTicketsForQueue(ctx context.Context, arg ListTicketsForQueueParams) ([]ListTicketsForQueueRow, error) {
+	rows, err := q.db.Query(ctx, listTicketsForQueue,
+		arg.Status,
+		arg.Priority,
+		arg.AssigneeFilter,
+		arg.AssigneeID,
+		arg.AfterDueAt,
+		arg.AfterID,
+		arg.PageSize,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTicketsForQueueRow
+	for rows.Next() {
+		var i ListTicketsForQueueRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.RequesterID,
+			&i.AssigneeID,
+			&i.Title,
+			&i.Description,
+			&i.Category,
+			&i.Priority,
+			&i.Status,
+			&i.SlaPolicyID,
+			&i.SlaConsumedMicros,
+			&i.SlaClockStartedAt,
+			&i.SlaDueAt,
+			&i.SlaBreachedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.RequesterName,
+			&i.RequesterEmail,
 		); err != nil {
 			return nil, err
 		}

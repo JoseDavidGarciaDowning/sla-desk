@@ -72,14 +72,26 @@ func run() error {
 
 	// The identity module builds its own repository and Clerk client from the
 	// handle and its own config. This is the only place that knows both exist.
-	identityModule := identity.New(pool, identity.Config{
+	identityModule, err := identity.New(pool, identity.Config{
 		Clerk: clerk.Config{
 			SecretKey:       cfg.ClerkSecretKey,
 			AuthorizedParty: cfg.ClerkAuthorizedParty,
 			APIURL:          cfg.ClerkAPIURL,
 		},
-		WebhookSecret: cfg.ClerkWebhookSecret,
+		WebhookSecret:     cfg.ClerkWebhookSecret,
+		AgentClerkUserIDs: cfg.AgentClerkUserIDs,
+		AdminClerkUserIDs: cfg.AdminClerkUserIDs,
 	})
+	if err != nil {
+		slog.Error("identity module refused the configuration", "error", err)
+		os.Exit(1)
+	}
+
+	// Counts, never the identifiers. An operator needs to know whether the
+	// grant lists arrived at all — a typo in the variable name would otherwise
+	// read exactly like a deploy with no agents, which is also the default.
+	agents, admins := identityModule.GrantedCounts()
+	slog.Info("role grants loaded", "agents", agents, "admins", admins)
 
 	// The SLA module reads reference data on the pool. The ticket module gets
 	// it as the contract it declared, never as the module itself: it is handed

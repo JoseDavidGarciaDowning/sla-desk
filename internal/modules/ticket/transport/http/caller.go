@@ -44,6 +44,20 @@ type CallerResolver func(ctx context.Context) (Caller, bool)
 // decide that: it is given a chi.Router that already carries the authentication
 // middleware, so an endpoint cannot be added to the wrong group by forgetting
 // to. See internal/app.
+// AgentRoutes mounts the endpoints only an agent may reach.
+//
+// Separate from Routes because the two carry different guarantees and must be
+// mounted in different places: everything here is backed by a query with no
+// requester predicate, so the router hands it a chi.Router that already carries
+// a role check (tasks/slice-2/plan.md decision C). A handler added to the wrong
+// function is a handler behind the wrong guard, and the two lists being
+// separate is what makes that visible.
+func AgentRoutes(r chi.Router, svc *application.Service, resolve CallerResolver) {
+	r.Method(nethttp.MethodGet, QueuePath, QueueTicketsHandler(svc, resolve))
+	r.Method(nethttp.MethodGet, QueuePath+"/{id}", AgentTicketHandler(svc, resolve))
+	r.Method(nethttp.MethodGet, QueuePath+"/{id}"+TicketHistorySuffix, AgentTicketHistoryHandler(svc, resolve))
+}
+
 func Routes(r chi.Router, svc *application.Service, resolve CallerResolver) {
 	r.Method(nethttp.MethodPost, TicketsPath, CreateTicketHandler(svc, resolve))
 	r.Method(nethttp.MethodGet, TicketsPath, ListTicketsHandler(svc, resolve))

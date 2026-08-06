@@ -530,3 +530,84 @@ func TestPausingStopsTheClockAndResumingKeepsWhatWasSpent(t *testing.T) {
 		t.Errorf("deadline %v, want %v (%v of budget left)", resumed.SLADueAt, want, remaining)
 	}
 }
+
+// --- The agent's unscoped reads, through the real repository (T20) --------
+//
+// These exist because a mutation survived without them. Pointing OneByID at
+// GetTicketForRequester left every test green: the queue tests run against the
+// generated queries, and the router tests run against a stub, so nothing
+// exercised the repository's choice of query. The gap was in the seam between
+// two layers that were each covered.
+
+// The read an agent's detail page makes. It must not depend on who is asking.
+func TestTheRepositoryReadsATicketWithoutARequester(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := f.repo.OneByID(f.ctx, created.ID)
+	if err != nil {
+		t.Fatalf("OneByID: %v", err)
+	}
+	if got.ID != created.ID {
+		t.Errorf("ID = %s, want %s", got.ID, created.ID)
+	}
+	if got.RequesterID != f.requester {
+		t.Errorf("the row came back attached to the wrong requester")
+	}
+}
+
+// The mutation this test exists for: OneByID pointed at the scoped query. That
+// query needs a requester id to match, and no caller supplies one here — so a
+// repository reaching for it cannot answer at all.
+func TestOneByIDDoesNotNeedARequesterToSucceed(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityUrgent))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// Read it back through a second repository built the same way production
+	// builds it, with nothing carried over from the write.
+	fresh := ticketpostgres.NewRepository(f.pool)
+	if _, err := fresh.OneByID(f.ctx, created.ID); err != nil {
+		t.Fatalf("OneByID: %v — an unscoped read must not require a requester", err)
+	}
+}
+
+func TestTheRepositoryReadsATimelineWithoutARequester(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	got, err := f.repo.Timeline(f.ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+	// Every ticket carries at least the entry recording its creation, which is
+	// what makes "no rows means no such ticket" safe rather than a guess.
+	if len(got) == 0 {
+		t.Fatal("the timeline is empty for a ticket that was just created")
+	}
+}
+
+// An id that names nothing is ErrTicketNotFound, which the handler turns into a
+// 404. Asserted through the repository because that is where the translation
+// from the driver's "no rows" happens.
+func TestAnUnknownIDIsReportedAsNotFound(t *testing.T) {
+	f := newRepoFixture(t)
+
+	if _, err := f.repo.OneByID(f.ctx, uuid.New()); !errors.Is(err, ticketapp.ErrTicketNotFound) {
+		t.Errorf("OneByID error = %v, want ErrTicketNotFound", err)
+	}
+	if _, err := f.repo.Timeline(f.ctx, uuid.New()); !errors.Is(err, ticketapp.ErrTicketNotFound) {
+		t.Errorf("Timeline error = %v, want ErrTicketNotFound", err)
+	}
+}

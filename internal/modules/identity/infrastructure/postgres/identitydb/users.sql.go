@@ -7,6 +7,8 @@ package identitydb
 
 import (
 	"context"
+
+	domain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 )
 
 const getUserByClerkID = `-- name: GetUserByClerkID :one
@@ -29,9 +31,52 @@ func (q *Queries) GetUserByClerkID(ctx context.Context, clerkUserID string) (Use
 	return i, err
 }
 
+const grantUserRole = `-- name: GrantUserRole :one
+UPDATE users
+   SET role       = $1,
+       updated_at = now()
+ WHERE clerk_user_id = $2
+   AND $1::text <> 'customer'
+RETURNING id, clerk_user_id, email, name, role, created_at, updated_at
+`
+
+type GrantUserRoleParams struct {
+	Role        domain.Role
+	ClerkUserID string
+}
+
+// Raises an existing user to a role the operator granted them in configuration.
+//
+// The predicate is the whole point: this statement cannot write 'customer', so
+// there is no argument that turns it into a demotion. Removing an id from the
+// grant list — or mistyping one — therefore cannot strip an agent's role on
+// their next request, which would otherwise happen silently and mid-shift.
+//
+// Enforced here rather than in the caller because a rule that lives in an if
+// statement is a rule the next caller can forget to write. Taking a role away
+// is an explicit action and belongs to the admin surface in slice 9.
+//
+// Returns no rows when the role would be a demotion, which the repository
+// reports as ErrNoSuchUser: nothing was written, and the caller must not be
+// handed a row suggesting otherwise.
+func (q *Queries) GrantUserRole(ctx context.Context, arg GrantUserRoleParams) (User, error) {
+	row := q.db.QueryRow(ctx, grantUserRole, arg.Role, arg.ClerkUserID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.ClerkUserID,
+		&i.Email,
+		&i.Name,
+		&i.Role,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const upsertUserFromClerk = `-- name: UpsertUserFromClerk :one
 INSERT INTO users (clerk_user_id, email, name, role)
-VALUES ($1, $2, $3, 'customer')
+VALUES ($1, $2, $3, $4)
 ON CONFLICT (clerk_user_id) DO UPDATE
 SET email      = EXCLUDED.email,
     name       = EXCLUDED.name,
@@ -43,6 +88,7 @@ type UpsertUserFromClerkParams struct {
 	ClerkUserID string
 	Email       string
 	Name        *string
+	Role        domain.Role
 }
 
 // The idempotent provisioning path from docs/spec.md §4.5. Both the Clerk
@@ -50,11 +96,20 @@ type UpsertUserFromClerkParams struct {
 // arrives first creates the row and the other one is a harmless update. That is
 // what removes the signup race entirely.
 //
-// The role is written as a literal on insert and is deliberately absent from the
-// update clause. A webhook payload must never be able to promote a user, and
-// re-running this on an existing agent must not demote them back to customer.
+// The role is a parameter rather than a literal since slice 2, and the only
+// thing that fills it is our own configuration — never a webhook payload and
+// never a token claim, neither of which reaches this far (§4.5).
+//
+// It stays absent from the update clause, which is the guarantee it always was:
+// re-running this to refresh someone's name must not be able to change what
+// they are allowed to do, in either direction. Promotion is GrantUserRole's job.
 func (q *Queries) UpsertUserFromClerk(ctx context.Context, arg UpsertUserFromClerkParams) (User, error) {
-	row := q.db.QueryRow(ctx, upsertUserFromClerk, arg.ClerkUserID, arg.Email, arg.Name)
+	row := q.db.QueryRow(ctx, upsertUserFromClerk,
+		arg.ClerkUserID,
+		arg.Email,
+		arg.Name,
+		arg.Role,
+	)
 	var i User
 	err := row.Scan(
 		&i.ID,

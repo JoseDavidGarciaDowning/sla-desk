@@ -64,6 +64,39 @@ func (s *Service) List(ctx context.Context, f ListFilter) ([]domain.Ticket, erro
 	return s.repo.ListForRequester(ctx, f)
 }
 
+// Queue returns one page of every ticket, in deadline order.
+//
+// It takes no caller. The identity of whoever is reading changes nothing about
+// what comes back — which is exactly what makes this the unscoped read, and why
+// the route it hangs off has to be the one carrying the role check.
+//
+// Passing a caller in would be worse than useless: it would look like the
+// answer depends on them, and the next person to read this would assume a
+// predicate exists somewhere.
+func (s *Service) Queue(ctx context.Context, f QueueFilter) ([]QueueEntry, error) {
+	// A zero scope is a caller who forgot to set one. Defaulting it to "any"
+	// would turn forgetting into "return every ticket", on the one query in
+	// this module that has no predicate to fall back on.
+	if f.Assignee == "" {
+		return nil, ErrUnsetAssigneeScope
+	}
+	return s.repo.ListForQueue(ctx, f)
+}
+
+// Detail returns any ticket, or ErrTicketNotFound.
+//
+// Like Queue it takes no caller, for the same reason: who is asking changes
+// nothing about the answer. That is what makes it the unscoped read, and why
+// the route it hangs off is the one carrying the role check.
+func (s *Service) Detail(ctx context.Context, id uuid.UUID) (domain.Ticket, error) {
+	return s.repo.OneByID(ctx, id)
+}
+
+// Timeline returns any ticket's full history.
+func (s *Service) Timeline(ctx context.Context, ticketID uuid.UUID) ([]domain.HistoryEntry, error) {
+	return s.repo.Timeline(ctx, ticketID)
+}
+
 // Get returns one of the caller's tickets, or ErrTicketNotFound.
 func (s *Service) Get(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error) {
 	return s.repo.OneForRequester(ctx, id, requesterID)

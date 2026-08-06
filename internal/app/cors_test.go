@@ -12,7 +12,7 @@ func corsRouter(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := testConfig()
 	cfg.CORSAllowedOrigin = allowedOrigin
-	h, err := NewRouter(cfg, Deps{Identity: testIdentity(cfg, routerStubUsers{}), Tickets: testTickets()})
+	h, err := NewRouter(cfg, Deps{Identity: testIdentity(t, cfg, routerStubUsers{}), Tickets: testTickets()})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestCORS_AnswersPreflight(t *testing.T) {
 // Locally the web app and the API share an origin through the dev server, so
 // CORS is simply off. An unset value must not become a wildcard.
 func TestCORS_IsDisabledWhenNoOriginIsConfigured(t *testing.T) {
-	handler, err := NewRouter(testConfig(), Deps{Identity: testIdentity(testConfig(), routerStubUsers{}), Tickets: testTickets()})
+	handler, err := NewRouter(testConfig(), Deps{Identity: testIdentity(t, testConfig(), routerStubUsers{}), Tickets: testTickets()})
 	if err != nil {
 		t.Fatalf("NewRouter: %v", err)
 	}

@@ -42,7 +42,48 @@ CORS_ALLOWED_ORIGIN=http://localhost:3000
 CLERK_AUTHORIZED_PARTY=        # optional; defaults to CORS_ALLOWED_ORIGIN
 CLERK_API_URL=                 # optional; for a Clerk proxy
 REDIS_URL=                     # unused until slice 5
+
+AGENT_CLERK_USER_IDS=          # optional; comma-separated Clerk subjects
+ADMIN_CLERK_USER_IDS=          # optional; same
 ```
+
+### How you become an agent
+
+`AGENT_CLERK_USER_IDS` and `ADMIN_CLERK_USER_IDS` are how a `users` row comes to
+hold anything other than `customer`. Empty means nobody, which is how slice 1
+ran and how CI runs.
+
+To make yourself an agent locally:
+
+1. Sign in to the app once, so the row exists.
+2. Find your subject — it is the `clerk_user_id` column:
+   ```sql
+   SELECT clerk_user_id, email, role FROM users ORDER BY created_at DESC LIMIT 5;
+   ```
+   It looks like `user_2abc123XYZ`. The Clerk dashboard shows the same value as
+   the user's ID.
+3. Put it in `.env` and restart the API:
+   ```
+   AGENT_CLERK_USER_IDS=user_2abc123XYZ
+   ```
+4. Make one authenticated request. `RequireAuth` calls `EnsureUser` on every
+   request, so the promotion lands on that one — there is nothing to run.
+
+Three things worth knowing, all of them deliberate:
+
+- **The subject differs between Clerk instances.** Your development id is not
+  your production id, which is exactly why this is configuration and not a
+  migration. See `tasks/slice-2/plan.md` decision A.
+- **Removing an id does not demote you.** The SQL refuses to write `customer`,
+  so a typo in the variable cannot strip an agent mid-shift. Taking a role away
+  is slice 9's admin endpoint. To undo it locally, write the column by hand.
+- **The same id in both lists stops the boot**, with an error naming the
+  subject. There is no defensible winner, and picking one by map order would
+  make the deployed role depend on nothing you can read.
+
+Startup logs `role grants loaded agents=N admins=N` — counts only, never the
+identifiers, because a log naming the agents is an inventory of privileged
+accounts.
 
 ### `web/.env.local` — the Next.js app
 

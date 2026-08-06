@@ -122,3 +122,80 @@ RETURNING *;
 -- this against the locked row before writing.
 SELECT sla_policy_id FROM tickets
 WHERE id = $1;
+
+-- name: ListTicketsForQueue :many
+-- One page of EVERY ticket, in deadline order. The agent queue.
+--
+-- A separate query rather than ListTicketsByRequester with the predicate made
+-- conditional, and that is the decision slice 2 exists to make
+-- (tasks/slice-2/plan.md decision B). Passing a role in and skipping
+-- WHERE requester_id when it says 'agent' would put a boolean in charge of a
+-- security predicate — and T14a's mutation testing already caught that exact
+-- shape once, when a query was scoped for the case a test happened to run and
+-- open for the one it did not. The customer's query keeps its predicate, takes
+-- no new parameter, and cannot be talked into returning someone else's ticket.
+--
+-- What replaces the predicate is where this query may be called from: only
+-- handlers mounted under /api/agent, behind RequireRole. Nothing here enforces
+-- anything, and that is stated rather than hidden.
+--
+-- ORDER BY the deadline, not created_at. A queue is read to find what breaches
+-- next; ordering by age makes the agent hunt for it, and sorting the loaded
+-- page in the browser sorts one page of many — the same lie client-side
+-- filtering told in T14a.
+--
+-- COALESCE(sla_due_at, sentinel) rather than NULLS LAST, because the cursor has
+-- to compare against the same expression and (NULL, id) > (x, id) is NULL, not
+-- false. The sentinel is 9999-12-31T23:59:59.999999Z rather than 'infinity'
+-- because the generated cursor parameter is *time.Time, which cannot hold one.
+-- See db/migrations/004. The matching expression index is what makes this an
+-- Index Cond rather than a Filter.
+--
+-- The cursor is (deadline, id) and not (created_at, id): a keyset cursor IS a
+-- position in the sort order, so it must carry the key being sorted on.
+-- Carrying a different one asks the database for "what comes after the row
+-- created at 10:00" in a list ordered by deadline, which means nothing.
+--
+-- Known and accepted: sla_due_at is mutable — pausing a ticket clears it and
+-- resuming recomputes it — so a ticket transitioned while someone is paging can
+-- move across the cursor and be seen twice or missed. Only the row that moved
+-- is affected, which is the one an agent just acted on. OFFSET would shift
+-- every row after it instead, on any insert as well.
+--
+-- assignee is three questions, not one: any assignee, a specific one, or none.
+-- @assignee_filter distinguishes them because a NULL parameter already means
+-- "no filter" and cannot also mean "unassigned".
+SELECT t.*, u.name AS requester_name, u.email AS requester_email
+FROM tickets t
+JOIN users u ON u.id = t.requester_id
+WHERE (sqlc.narg(status)::text IS NULL OR t.status = sqlc.narg(status)::text)
+  AND (sqlc.narg(priority)::text IS NULL OR t.priority = sqlc.narg(priority)::text)
+  AND (
+    @assignee_filter::text = 'any'
+    OR (@assignee_filter::text = 'unassigned' AND t.assignee_id IS NULL)
+    OR (@assignee_filter::text = 'one' AND t.assignee_id = sqlc.narg(assignee_id)::uuid)
+  )
+  AND (
+    sqlc.narg(after_due_at)::timestamptz IS NULL
+    OR (COALESCE(t.sla_due_at, '9999-12-31 23:59:59.999999+00'::timestamptz), t.id) >
+       (sqlc.narg(after_due_at)::timestamptz, sqlc.narg(after_id)::uuid)
+  )
+ORDER BY COALESCE(t.sla_due_at, '9999-12-31 23:59:59.999999+00'::timestamptz), t.id
+LIMIT @page_size;
+
+-- name: GetTicketByID :one
+-- One ticket, for a caller who is not its requester.
+--
+-- The counterpart to GetTicketForRequester, and a separate query rather than
+-- that one with the predicate made conditional — the same decision as the queue
+-- (tasks/slice-2/plan.md decision B). The scoped one keeps its predicate and
+-- takes no new parameter, so it cannot be talked into returning someone else's
+-- ticket by any argument.
+--
+-- Reachable only from a handler mounted behind RequireRole. Nothing here
+-- enforces that, which is stated rather than hidden.
+--
+-- No rows still means 404 at the boundary. The agent group answers 403 to a
+-- customer because there is no id in its path to confirm; an id that names no
+-- ticket is a different question, and §11's rule applies to it unchanged.
+SELECT * FROM tickets WHERE id = $1;

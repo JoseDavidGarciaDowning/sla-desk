@@ -158,7 +158,10 @@ func chain(t *testing.T, stub *clerkStub, users application.UserRepository, next
 		AuthorizedParty: testOrigin,
 		APIURL:          stub.URL,
 	}
-	m := identity.NewWith(users, clerk.NewIdentityProvider(cfg), identity.Config{Clerk: cfg})
+	m, err := identity.NewWith(users, clerk.NewIdentityProvider(cfg), identity.Config{Clerk: cfg})
+	if err != nil {
+		t.Fatalf("identity.NewWith: %v", err)
+	}
 	return m.Authenticate(next)
 }
 
@@ -191,9 +194,13 @@ func (f *fakeStore) ByClerkID(context.Context, string) (domain.User, error) {
 	return f.user, nil
 }
 
-func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Identity) (domain.User, error) {
+func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Identity, role domain.Role) (domain.User, error) {
 	f.upserts++
-	return domain.User{ClerkUserID: clerkUserID, Email: id.Email, Role: domain.RoleCustomer}, nil
+	return domain.User{ClerkUserID: clerkUserID, Email: id.Email, Role: role}, nil
+}
+
+func (f *fakeStore) GrantRole(_ context.Context, clerkUserID string, role domain.Role) (domain.User, error) {
+	return domain.User{ClerkUserID: clerkUserID, Role: role}, nil
 }
 
 func request(token string) *http.Request {
