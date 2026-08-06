@@ -270,28 +270,53 @@ it is the one an agent just acted on. OFFSET would shift every row after it, on 
 
 ---
 
-### T20: Agent ticket detail and unscoped history
+### T20: Agent ticket detail and unscoped history ✅
 
 **Description:** One ticket and its full timeline, for a caller who is not its requester.
 
 **Acceptance criteria:**
-- [ ] `GET /api/agent/tickets/{id}` and `GET /api/agent/tickets/{id}/history`
-- [ ] Backed by `GetTicketByID` (new) and `ListTicketStatusHistory` (**exists** — it is the
-      input to `sla.Reconstruct` and already has no requester predicate)
-- [ ] 404 for an id that does not exist — the §11 rule still applies to a specific ticket even
-      though the group itself answers 403
-- [ ] The agent history DTO **does** carry the actor's role, as the customer's does; it still
-      does not carry `actor_id` (T14b), because slice 2 adds no reason to expose one
+- [x] `GET /api/agent/tickets/{id}` and `GET /api/agent/tickets/{id}/history`
+- [x] Backed by `GetTicketByID` (new) and `ListTicketStatusHistory` (**already existed** — it
+      is the input to `sla.Reconstruct` and has never carried a requester predicate)
+- [x] 404 for an id that does not exist
+- [x] The agent history reuses the customer's DTO, so it carries the actor's role and still
+      does not carry `actor_id`
 
 **Verification:**
-- [ ] Integration: an agent reads a ticket whose requester is someone else
-- [ ] `TestHistoryNeverExposesTheActorsIdentity` extended to the agent route
-- [ ] Mutations: pointing the agent handler at the scoped query; returning 403 instead of 404
-      for a missing id — each turns a test red
+- [x] Integration: a ticket and a timeline are read without supplying a requester
+- [x] Integration: the scoped query still refuses another customer's ticket
+- [x] Integration through the **real repository**: `OneByID` and `Timeline` succeed with no
+      requester, and an unknown id is `ErrTicketNotFound`
+- [x] Both new paths joined `agentPaths()`, so the 403 / 200 / 401 tests cover them
+- [x] **4 mutations, 4 dead**: `OneByID` pointed at the scoped query; the detail route
+      unmounted; `GetTicketByID` ignoring its argument; `Timeline` not translating an empty
+      result into not-found
+- [x] `make check` and `make test-int` clean
 
 **Dependencies:** T19
-**Files:** as T19, plus `internal/modules/ticket/infrastructure/postgres/repository.go`
+**Files:** `internal/modules/ticket/infrastructure/postgres/queries/tickets.sql`,
+`.../repository.go`, `internal/modules/ticket/application/{ports,service}.go`,
+`internal/modules/ticket/transport/http/{queue,caller}.go`, plus tests
 **Scope:** S
+
+**Two mutations survived, and both were real.**
+
+The first was a **gap between two covered layers**. Pointing `OneByID` at the scoped
+`GetTicketForRequester` left the entire suite green: the queue's integration tests run against
+the generated queries, and the router tests run against a stub repository, so nothing anywhere
+exercised the repository's *choice* of query. Each layer was covered and the seam between them
+was not. Closed by testing through the real `Repository` in `internal/app`, where a pool-backed
+fixture already existed for the lifecycle tests.
+
+The second was **a test that was true for the wrong reason**. `TestAnUnknownTicketIDReturnsNoRows`
+seeded nothing, so the table was empty inside its transaction and "no rows" held for any query
+at all — including one whose predicate ignored its argument entirely. It now seeds a ticket
+first, so the assertion is about the id rather than about the table being empty.
+
+**And one mutation reported as surviving had never been applied.** The substitution silently
+matched nothing, and `grep -c` returned 0 while the result read as a coverage gap. Checking
+that a mutation actually landed is part of running one — an unapplied mutation and a
+well-tested one produce the same green.
 
 ---
 

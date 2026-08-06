@@ -182,3 +182,20 @@ WHERE (sqlc.narg(status)::text IS NULL OR t.status = sqlc.narg(status)::text)
   )
 ORDER BY COALESCE(t.sla_due_at, '9999-12-31 23:59:59.999999+00'::timestamptz), t.id
 LIMIT @page_size;
+
+-- name: GetTicketByID :one
+-- One ticket, for a caller who is not its requester.
+--
+-- The counterpart to GetTicketForRequester, and a separate query rather than
+-- that one with the predicate made conditional — the same decision as the queue
+-- (tasks/slice-2/plan.md decision B). The scoped one keeps its predicate and
+-- takes no new parameter, so it cannot be talked into returning someone else's
+-- ticket by any argument.
+--
+-- Reachable only from a handler mounted behind RequireRole. Nothing here
+-- enforces that, which is stated rather than hidden.
+--
+-- No rows still means 404 at the boundary. The agent group answers 403 to a
+-- customer because there is no id in its path to confirm; an id that names no
+-- ticket is a different question, and §11's rule applies to it unchanged.
+SELECT * FROM tickets WHERE id = $1;

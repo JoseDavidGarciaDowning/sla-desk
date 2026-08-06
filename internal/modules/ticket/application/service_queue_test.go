@@ -43,6 +43,14 @@ func (r *queueStubRepo) HistoryForRequester(context.Context, uuid.UUID, uuid.UUI
 	return nil, nil
 }
 
+func (r *queueStubRepo) OneByID(context.Context, uuid.UUID) (domain.Ticket, error) {
+	return domain.Ticket{}, nil
+}
+
+func (r *queueStubRepo) Timeline(context.Context, uuid.UUID) ([]domain.HistoryEntry, error) {
+	return nil, nil
+}
+
 // A zero scope is a caller who forgot to set one. Defaulting it to "any" would
 // turn forgetting into "return every ticket", on the one query in this module
 // with no predicate to fall back on — so it must not reach the repository at

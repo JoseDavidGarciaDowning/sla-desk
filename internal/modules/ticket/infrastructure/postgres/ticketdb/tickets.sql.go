@@ -79,6 +79,47 @@ func (q *Queries) CreateTicket(ctx context.Context, arg CreateTicketParams) (Tic
 	return i, err
 }
 
+const getTicketByID = `-- name: GetTicketByID :one
+SELECT id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at FROM tickets WHERE id = $1
+`
+
+// One ticket, for a caller who is not its requester.
+//
+// The counterpart to GetTicketForRequester, and a separate query rather than
+// that one with the predicate made conditional — the same decision as the queue
+// (tasks/slice-2/plan.md decision B). The scoped one keeps its predicate and
+// takes no new parameter, so it cannot be talked into returning someone else's
+// ticket by any argument.
+//
+// Reachable only from a handler mounted behind RequireRole. Nothing here
+// enforces that, which is stated rather than hidden.
+//
+// No rows still means 404 at the boundary. The agent group answers 403 to a
+// customer because there is no id in its path to confirm; an id that names no
+// ticket is a different question, and §11's rule applies to it unchanged.
+func (q *Queries) GetTicketByID(ctx context.Context, id uuid.UUID) (Ticket, error) {
+	row := q.db.QueryRow(ctx, getTicketByID, id)
+	var i Ticket
+	err := row.Scan(
+		&i.ID,
+		&i.RequesterID,
+		&i.AssigneeID,
+		&i.Title,
+		&i.Description,
+		&i.Category,
+		&i.Priority,
+		&i.Status,
+		&i.SlaPolicyID,
+		&i.SlaConsumedMicros,
+		&i.SlaClockStartedAt,
+		&i.SlaDueAt,
+		&i.SlaBreachedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getTicketForRequester = `-- name: GetTicketForRequester :one
 SELECT id, requester_id, assignee_id, title, description, category, priority, status, sla_policy_id, sla_consumed_micros, sla_clock_started_at, sla_due_at, sla_breached_at, created_at, updated_at FROM tickets
 WHERE id = $1

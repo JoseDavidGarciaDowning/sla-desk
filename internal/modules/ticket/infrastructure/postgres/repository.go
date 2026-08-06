@@ -306,6 +306,45 @@ func (r *Repository) HistoryForRequester(ctx context.Context, ticketID, requeste
 	return historyFrom(rows), nil
 }
 
+// OneByID reads a ticket without asking whose it is.
+//
+// ErrTicketNotFound for an id that names nothing, which the handler turns into
+// a 404. That rule survives slice 2 untouched: the agent group answers 403 to a
+// customer because its path carries no id to confirm, and an id that names no
+// ticket is a different question (docs/spec.md §11).
+func (r *Repository) OneByID(ctx context.Context, id uuid.UUID) (domain.Ticket, error) {
+	row, err := r.q.GetTicketByID(ctx, id)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return domain.Ticket{}, application.ErrTicketNotFound
+	case err != nil:
+		return domain.Ticket{}, fmt.Errorf("reading the ticket: %w", err)
+	}
+	return ticketFrom(row), nil
+}
+
+// Timeline returns a ticket's full history, for a caller who is not its
+// requester.
+//
+// It reuses ListTicketStatusHistory, which has never had a requester predicate:
+// it is the input to sla.Reconstruct, running inside a transaction that has
+// already established which ticket it is working on. The comment on that query
+// anticipated this exact caller — "an agent transitions tickets that are not
+// theirs" — so slice 2 adds no query here, only a way to reach it.
+//
+// Empty means the ticket does not exist, not that it has no timeline. Every
+// ticket carries at least the entry recording its creation.
+func (r *Repository) Timeline(ctx context.Context, ticketID uuid.UUID) ([]domain.HistoryEntry, error) {
+	rows, err := r.q.ListTicketStatusHistory(ctx, ticketID)
+	if err != nil {
+		return nil, fmt.Errorf("reading the history: %w", err)
+	}
+	if len(rows) == 0 {
+		return nil, application.ErrTicketNotFound
+	}
+	return historyFrom(rows), nil
+}
+
 // ticketFrom maps a row onto the domain entity.
 //
 // Deliberately not returning ticketdb.Ticket. Nothing above this package should

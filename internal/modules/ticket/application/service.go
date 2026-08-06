@@ -83,6 +83,20 @@ func (s *Service) Queue(ctx context.Context, f QueueFilter) ([]QueueEntry, error
 	return s.repo.ListForQueue(ctx, f)
 }
 
+// Detail returns any ticket, or ErrTicketNotFound.
+//
+// Like Queue it takes no caller, for the same reason: who is asking changes
+// nothing about the answer. That is what makes it the unscoped read, and why
+// the route it hangs off is the one carrying the role check.
+func (s *Service) Detail(ctx context.Context, id uuid.UUID) (domain.Ticket, error) {
+	return s.repo.OneByID(ctx, id)
+}
+
+// Timeline returns any ticket's full history.
+func (s *Service) Timeline(ctx context.Context, ticketID uuid.UUID) ([]domain.HistoryEntry, error) {
+	return s.repo.Timeline(ctx, ticketID)
+}
+
 // Get returns one of the caller's tickets, or ErrTicketNotFound.
 func (s *Service) Get(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error) {
 	return s.repo.OneForRequester(ctx, id, requesterID)

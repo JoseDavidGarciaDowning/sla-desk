@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
 )
@@ -341,5 +343,92 @@ func TestTheCustomerListStillExcludesOtherCustomers(t *testing.T) {
 		if tk.RequesterID != alice {
 			t.Fatalf("the customer list returned %q, which belongs to someone else", tk.Title)
 		}
+	}
+}
+
+// --- The agent's single-ticket reads (T20) --------------------------------
+
+// The unscoped counterpart to GetTicketForRequester. An agent opens a ticket
+// that belongs to a customer, which is the entire job.
+func TestATicketIsReadableWithoutBeingItsRequester(t *testing.T) {
+	c := setup(t)
+
+	customer := newUser(t, c, "user_d_customer", domain.RoleCustomer)
+	tk := newTicket(t, c, customer, "someone else's ticket")
+
+	got, err := c.q.GetTicketByID(c.ctx, tk.ID)
+	if err != nil {
+		t.Fatalf("GetTicketByID: %v", err)
+	}
+	if got.Title != "someone else's ticket" {
+		t.Errorf("Title = %q", got.Title)
+	}
+	if got.RequesterID != customer {
+		t.Errorf("the row came back attached to the wrong requester")
+	}
+}
+
+// An id that names nothing returns no rows, which the handler turns into a 404.
+// The agent group answering 403 to a customer does not change this: that is
+// about the prefix, and this is about a specific ticket (docs/spec.md §11).
+func TestAnUnknownTicketIDReturnsNoRows(t *testing.T) {
+	c := setup(t)
+
+	// A ticket has to exist for this to mean anything. Without one the table is
+	// empty inside this transaction, "no rows" is true for any query at all,
+	// and a predicate that ignored its argument entirely would pass — which is
+	// exactly what a mutation proved before this line was added.
+	customer := newUser(t, c, "user_d_unknown", domain.RoleCustomer)
+	newTicket(t, c, customer, "a real ticket")
+
+	_, err := c.q.GetTicketByID(c.ctx, uuid.New())
+	if err == nil {
+		t.Fatal("GetTicketByID found a ticket for an id that names none")
+	}
+}
+
+// The timeline an agent sees is the full one, including entries written by
+// somebody else. It reuses the query sla.Reconstruct already reads, which has
+// never carried a requester predicate.
+func TestTheTimelineIsReadableWithoutBeingTheRequester(t *testing.T) {
+	c := setup(t)
+
+	customer := newUser(t, c, "user_d_timeline", domain.RoleCustomer)
+	tk := newTicket(t, c, customer, "with a timeline")
+
+	if _, err := c.q.InsertTicketStatusHistory(c.ctx, ticketdb.InsertTicketStatusHistoryParams{
+		TicketID:  tk.ID,
+		ToStatus:  domain.StatusOpen,
+		ActorID:   customer,
+		ActorRole: domain.RoleCustomer,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seeding a history row: %v", err)
+	}
+
+	got, err := c.q.ListTicketStatusHistory(c.ctx, tk.ID)
+	if err != nil {
+		t.Fatalf("ListTicketStatusHistory: %v", err)
+	}
+	if len(got) == 0 {
+		t.Fatal("the timeline is empty, so the handler would answer 404 for a real ticket")
+	}
+}
+
+// The scoped read must still refuse. An unscoped query added beside it is only
+// safe while the original keeps its predicate.
+func TestTheScopedTicketReadStillRefusesAnotherCustomer(t *testing.T) {
+	c := setup(t)
+
+	alice := newUser(t, c, "user_d_alice", domain.RoleCustomer)
+	bob := newUser(t, c, "user_d_bob", domain.RoleCustomer)
+	tk := newTicket(t, c, alice, "alice's private ticket")
+
+	_, err := c.q.GetTicketForRequester(c.ctx, ticketdb.GetTicketForRequesterParams{
+		ID:          tk.ID,
+		RequesterID: bob,
+	})
+	if err == nil {
+		t.Fatal("the scoped query returned another customer's ticket")
 	}
 }

@@ -328,6 +328,20 @@ func (stubTicketRepo) ListForQueue(context.Context, ticketapp.QueueFilter) ([]ti
 	return nil, nil
 }
 
+// The agent detail reads answer with something rather than with
+// ErrTicketNotFound, and that matters to more than convenience: chi routes
+// before it runs a group's middleware, so an unmounted path answers 404. A stub
+// that returned "no such ticket" would make a missing route and a present one
+// look identical, and TestEveryAgentPathAdmitsAnAgentAndAnAdmin would stop
+// proving the route exists.
+func (stubTicketRepo) OneByID(_ context.Context, id uuid.UUID) (ticketdomain.Ticket, error) {
+	return ticketdomain.Ticket{ID: id, Title: "a ticket"}, nil
+}
+
+func (stubTicketRepo) Timeline(context.Context, uuid.UUID) ([]ticketdomain.HistoryEntry, error) {
+	return []ticketdomain.HistoryEntry{{ToStatus: ticketdomain.StatusOpen}}, nil
+}
+
 func (stubTicketRepo) OneForRequester(context.Context, uuid.UUID, uuid.UUID) (ticketdomain.Ticket, error) {
 	return ticketdomain.Ticket{}, nil
 }
@@ -399,10 +413,16 @@ func agentRouter(t *testing.T, role identitydomain.Role) (http.Handler, string) 
 // added here, and the tests below then cover them without being edited — which
 // is the property T14a's mutation testing said was missing when one scope test
 // happened to exercise one filter and the query was open for the other.
+// agentPathTicketID is any well-formed uuid. The stub answers for every id, so
+// what these paths exercise is the guard and the wiring, not a lookup.
+const agentPathTicketID = "11111111-2222-3333-4444-555555555555"
+
 func agentPaths() []string {
 	return []string{
 		AgentPathPrefix + identityhttp.MePath,
 		AgentPathPrefix + tickethttp.QueuePath,
+		AgentPathPrefix + tickethttp.QueuePath + "/" + agentPathTicketID,
+		AgentPathPrefix + tickethttp.QueuePath + "/" + agentPathTicketID + tickethttp.TicketHistorySuffix,
 	}
 }
 

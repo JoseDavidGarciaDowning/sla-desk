@@ -54,6 +54,8 @@ type CallerResolver func(ctx context.Context) (Caller, bool)
 // separate is what makes that visible.
 func AgentRoutes(r chi.Router, svc *application.Service, resolve CallerResolver) {
 	r.Method(nethttp.MethodGet, QueuePath, QueueTicketsHandler(svc, resolve))
+	r.Method(nethttp.MethodGet, QueuePath+"/{id}", AgentTicketHandler(svc, resolve))
+	r.Method(nethttp.MethodGet, QueuePath+"/{id}"+TicketHistorySuffix, AgentTicketHistoryHandler(svc, resolve))
 }
 
 func Routes(r chi.Router, svc *application.Service, resolve CallerResolver) {

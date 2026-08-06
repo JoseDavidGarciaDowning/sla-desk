@@ -217,6 +217,15 @@ type Repository interface {
 	// from handlers mounted behind a role check, and that placement is the
 	// authorization — there is no predicate here to forget.
 	ListForQueue(ctx context.Context, f QueueFilter) ([]QueueEntry, error)
+
+	// OneByID and Timeline are the unscoped reads of a single ticket, for a
+	// caller who is not its requester. They sit beside their ForRequester
+	// counterparts rather than replacing them: an agent reading a ticket and a
+	// customer reading their own are different questions with different
+	// answers, and one method that took an optional requester would let a
+	// caller ask the wrong one by leaving a field unset.
+	OneByID(ctx context.Context, id uuid.UUID) (domain.Ticket, error)
+	Timeline(ctx context.Context, ticketID uuid.UUID) ([]domain.HistoryEntry, error)
 	OneForRequester(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error)
 	HistoryForRequester(ctx context.Context, ticketID, requesterID uuid.UUID) ([]domain.HistoryEntry, error)
 }

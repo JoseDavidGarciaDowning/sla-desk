@@ -2,10 +2,12 @@ package http
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
@@ -153,4 +155,83 @@ func queuePosition(dueAt *time.Time) time.Time {
 		return PausedPosition
 	}
 	return *dueAt
+}
+
+// AgentTicketReader is the slice of the module the agent detail endpoints need.
+//
+// Neither method takes a caller, which is the shape of the guarantee: these
+// reads do not depend on who is asking, so the route they hang off has to be
+// the one that decides who may ask.
+type AgentTicketReader interface {
+	Detail(ctx context.Context, id uuid.UUID) (domain.Ticket, error)
+	Timeline(ctx context.Context, ticketID uuid.UUID) ([]domain.HistoryEntry, error)
+}
+
+// AgentTicketHandler serves GET /api/agent/tickets/{id}.
+//
+// 404 for an id that names no ticket, unchanged from the customer's endpoint.
+// The agent group answers 403 to a customer because its path carries no id to
+// confirm; an id that names nothing is a different question, and docs/spec.md
+// §11's rule applies to it exactly as before.
+func AgentTicketHandler(tickets AgentTicketReader, resolve CallerResolver) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := resolve(r.Context()); !ok {
+			httperr.Write(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+
+		id, err := uuid.Parse(chi.URLParam(r, "id"))
+		if err != nil {
+			httperr.Write(w, http.StatusBadRequest, "the ticket id is not a UUID")
+			return
+		}
+
+		row, err := tickets.Detail(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, application.ErrTicketNotFound) {
+				httperr.Write(w, http.StatusNotFound, "no such ticket")
+				return
+			}
+			slog.ErrorContext(r.Context(), "reading a ticket for an agent failed", "error", err)
+			httperr.WriteInternal(w)
+			return
+		}
+
+		httpx.WriteJSON(w, r, http.StatusOK, NewTicketResponse(row))
+	})
+}
+
+// AgentTicketHistoryHandler serves GET /api/agent/tickets/{id}/history.
+//
+// It reuses the DTO the customer's timeline uses, so both views of a ticket's
+// history say the same thing about it — including the omission that matters:
+// the actor's id never travels. It is another user's primary key, and putting
+// it on the wire hands out an identifier to enumerate (T14b). An agent gains no
+// reason to see one in slice 2.
+func AgentTicketHistoryHandler(tickets AgentTicketReader, resolve CallerResolver) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := resolve(r.Context()); !ok {
+			httperr.Write(w, http.StatusUnauthorized, "authentication required")
+			return
+		}
+
+		id, err := uuid.Parse(chi.URLParam(r, "id"))
+		if err != nil {
+			httperr.Write(w, http.StatusBadRequest, "the ticket id is not a UUID")
+			return
+		}
+
+		rows, err := tickets.Timeline(r.Context(), id)
+		if err != nil {
+			if errors.Is(err, application.ErrTicketNotFound) {
+				httperr.Write(w, http.StatusNotFound, "no such ticket")
+				return
+			}
+			slog.ErrorContext(r.Context(), "reading a ticket history for an agent failed", "error", err)
+			httperr.WriteInternal(w)
+			return
+		}
+
+		httpx.WriteJSON(w, r, http.StatusOK, NewTicketHistoryResponse(rows))
+	})
 }
