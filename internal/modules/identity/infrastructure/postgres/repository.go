@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
@@ -35,6 +36,19 @@ func NewUserRepository(db identitydb.DBTX) *UserRepository {
 // case.
 func (r *UserRepository) ByClerkID(ctx context.Context, clerkUserID string) (domain.User, error) {
 	row, err := r.q.GetUserByClerkID(ctx, clerkUserID)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		return domain.User{}, application.ErrNoSuchUser
+	case err != nil:
+		return domain.User{}, fmt.Errorf("reading the user: %w", err)
+	}
+	return userFrom(row), nil
+}
+
+// ByID reads by our own primary key, translating "no rows" the same way
+// ByClerkID does.
+func (r *UserRepository) ByID(ctx context.Context, id uuid.UUID) (domain.User, error) {
+	row, err := r.q.GetUserByID(ctx, id)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return domain.User{}, application.ErrNoSuchUser

@@ -15,6 +15,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	identityapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
+	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	identitypostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres"
 	slaapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
@@ -36,6 +39,14 @@ type repoFixture struct {
 	// because resolving-then-writing is the sequence production runs and the
 	// repository alone cannot produce a clock.
 	svc *ticketapp.Service
+
+	// identity backs the assignee directory. Built from the real repository
+	// rather than a stub, because what T21 needs to prove is that a customer's
+	// id is refused — and a stub would be answering that question itself.
+	//
+	// The Clerk provider is nil and the grants are empty: MayHoldTickets only
+	// reads a role from our own table, and nothing here provisions anyone.
+	identity *identityapp.Service
 
 	requester uuid.UUID
 }
@@ -89,11 +100,14 @@ func newRepoFixture(t *testing.T) repoFixture {
 	// test exercises the very code cmd/api wires.
 	sla := app.SLAPolicies{Policies: slaapp.NewPolicies(slapostgres.NewPolicyRepository(pool))}
 
+	identity := identityapp.NewService(identitypostgres.NewUserRepository(pool), nil, identitydomain.RoleGrants{})
+
 	return repoFixture{
 		ctx:       ctx,
 		pool:      pool,
 		repo:      repo,
-		svc:       ticketapp.NewService(repo, sla),
+		svc:       ticketapp.NewService(repo, sla, app.AssigneeDirectory{Users: identity}),
+		identity:  identity,
 		requester: requester,
 	}
 }
@@ -609,5 +623,291 @@ func TestAnUnknownIDIsReportedAsNotFound(t *testing.T) {
 	}
 	if _, err := f.repo.Timeline(f.ctx, uuid.New()); !errors.Is(err, ticketapp.ErrTicketNotFound) {
 		t.Errorf("Timeline error = %v, want ErrTicketNotFound", err)
+	}
+}
+
+// --- Assignment (T21) -----------------------------------------------------
+
+// assignable seeds a user with a role and returns their id, so a test can offer
+// a real candidate to the directory rather than a uuid nobody holds.
+// The clerk id is made unique per call rather than derived from the test name.
+// clerk_user_id is UNIQUE, so a run that fails before its cleanup leaves a row
+// that poisons every later run with a duplicate-key error that has nothing to
+// do with what is being tested.
+func (f repoFixture) assignable(t *testing.T, label string, role identitydomain.Role) uuid.UUID {
+	t.Helper()
+
+	clerkID := "user_" + label + "_" + uuid.NewString()
+	var id uuid.UUID
+	if err := f.pool.QueryRow(f.ctx,
+		`INSERT INTO users (clerk_user_id, email, role) VALUES ($1, $2, $3) RETURNING id`,
+		clerkID, clerkID+"@example.test", role,
+	).Scan(&id); err != nil {
+		t.Fatalf("creating %s: %v", clerkID, err)
+	}
+	t.Cleanup(func() {
+		bg := context.Background()
+		// The reference has to go first. Migration 003 deliberately has no
+		// ON DELETE CASCADE anywhere (docs/spec.md §10 forbids hard-deleting a
+		// ticket, and a cascade does exactly that from a distance), so deleting
+		// a user a ticket still points at fails loudly — as it should. This
+		// cleanup is the first thing in the suite to find out.
+		if _, err := f.pool.Exec(bg,
+			`UPDATE tickets SET assignee_id = NULL WHERE assignee_id = $1`, id); err != nil {
+			t.Errorf("cleanup: releasing %s from its tickets: %v", clerkID, err)
+		}
+		// actor_id is NOT NULL, so a history row this user wrote cannot be
+		// released — it has to go. docs/spec.md §10 forbids hard-deleting
+		// history in the application; this is a fixture removing rows it
+		// created, which is the one place that rule does not reach.
+		if _, err := f.pool.Exec(bg,
+			`DELETE FROM ticket_status_history WHERE actor_id = $1`, id); err != nil {
+			t.Errorf("cleanup: removing %s's history rows: %v", clerkID, err)
+		}
+		if _, err := f.pool.Exec(bg, `DELETE FROM users WHERE id = $1`, id); err != nil {
+			t.Errorf("cleanup %s: %v", clerkID, err)
+		}
+	})
+	return id
+}
+
+// The load-bearing assertion of T21, and the one the plan's §E is about.
+// ticket_status_history is the fact the SLA clock is rebuilt from, and
+// assignment does not move a ticket's status — a row for it would pad the
+// timeline Reconstruct walks and the consistency test would be right to fail.
+func TestAssignmentWritesNoHistoryRowAndDoesNotTouchTheClock(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	before, err := f.repo.Timeline(f.ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+
+	agent := f.assignable(t, "assign_agent", identitydomain.RoleAgent)
+	updated, err := f.repo.Assign(f.ctx, created.ID, &agent)
+	if err != nil {
+		t.Fatalf("Assign: %v", err)
+	}
+
+	after, err := f.repo.Timeline(f.ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Timeline after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("history went from %d rows to %d — assignment wrote one", len(before), len(after))
+	}
+
+	// The clock columns are the cache the consistency test compares against.
+	if updated.SLAConsumed != created.SLAConsumed {
+		t.Errorf("SLAConsumed moved from %v to %v", created.SLAConsumed, updated.SLAConsumed)
+	}
+	if !equalTimePtr(updated.SLADueAt, created.SLADueAt) {
+		t.Errorf("SLADueAt moved from %v to %v", created.SLADueAt, updated.SLADueAt)
+	}
+	if !equalTimePtr(updated.SLAClockStartedAt, created.SLAClockStartedAt) {
+		t.Errorf("SLAClockStartedAt moved")
+	}
+	if updated.Status != created.Status {
+		t.Errorf("Status moved from %s to %s", created.Status, updated.Status)
+	}
+}
+
+func equalTimePtr(a, b *time.Time) bool {
+	switch {
+	case a == nil && b == nil:
+		return true
+	case a == nil || b == nil:
+		return false
+	default:
+		return a.Equal(*b)
+	}
+}
+
+// One case per role for the target, through the service so the directory is
+// consulted the way production consults it.
+func TestOnlyAnAgentOrAdminMayBeAssigned(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	svc := ticketapp.NewService(f.repo,
+		app.SLAPolicies{Policies: slaapp.NewPolicies(slapostgres.NewPolicyRepository(f.pool))},
+		app.AssigneeDirectory{Users: f.identity},
+	)
+
+	cases := []struct {
+		role    identitydomain.Role
+		allowed bool
+	}{
+		{identitydomain.RoleAgent, true},
+		{identitydomain.RoleAdmin, true},
+		{identitydomain.RoleCustomer, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(string(tc.role), func(t *testing.T) {
+			target := f.assignable(t, "target", tc.role)
+
+			_, err := svc.Assign(f.ctx, created.ID, &target)
+			switch {
+			case tc.allowed && err != nil:
+				t.Errorf("Assign: %v", err)
+			case !tc.allowed && !errors.Is(err, ticketapp.ErrNotAssignable):
+				t.Errorf("error = %v, want ErrNotAssignable", err)
+			}
+		})
+	}
+
+	// An id that names nobody gets the same answer as a customer's.
+	if _, err := svc.Assign(f.ctx, created.ID, &[]uuid.UUID{uuid.New()}[0]); !errors.Is(err, ticketapp.ErrNotAssignable) {
+		t.Errorf("an unknown id gave %v, want the same refusal a customer gets", err)
+	}
+}
+
+// Reassignment overwrites; it is not an error. And unassigning puts the column
+// back to NULL rather than to a zero uuid.
+func TestReassigningOverwritesAndNilUnassigns(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	first := f.assignable(t, "first", identitydomain.RoleAgent)
+	second := f.assignable(t, "second", identitydomain.RoleAgent)
+
+	if _, err := f.repo.Assign(f.ctx, created.ID, &first); err != nil {
+		t.Fatalf("first Assign: %v", err)
+	}
+	got, err := f.repo.Assign(f.ctx, created.ID, &second)
+	if err != nil {
+		t.Fatalf("second Assign: %v", err)
+	}
+	if got.AssigneeID == nil || *got.AssigneeID != second {
+		t.Errorf("AssigneeID = %v, want %s", got.AssigneeID, second)
+	}
+
+	cleared, err := f.repo.Assign(f.ctx, created.ID, nil)
+	if err != nil {
+		t.Fatalf("unassign: %v", err)
+	}
+	if cleared.AssigneeID != nil {
+		t.Errorf("AssigneeID = %v, want nil", cleared.AssigneeID)
+	}
+}
+
+// An id that names no ticket is ErrTicketNotFound, which the handler turns into
+// a 404 rather than reporting a successful write of nothing.
+func TestAssigningAnUnknownTicketIsNotFound(t *testing.T) {
+	f := newRepoFixture(t)
+
+	agent := f.assignable(t, "orphan", identitydomain.RoleAgent)
+	if _, err := f.repo.Assign(f.ctx, uuid.New(), &agent); !errors.Is(err, ticketapp.ErrTicketNotFound) {
+		t.Errorf("error = %v, want ErrTicketNotFound", err)
+	}
+}
+
+// --- Transitions (T22) ----------------------------------------------------
+//
+// The write path has existed since T11 and no route mounted it. What T11 did
+// not cover, and these do: that a transition made the way the endpoint makes it
+// appends exactly one history row, and that the role rules survive the whole
+// path rather than only the domain function.
+//
+// Deliberately not repeated here: pausing clearing the deadline, resuming
+// keeping the spend, and closed being terminal. TestPausingStopsTheClock… and
+// TestTransitionRefusesToLeaveClosed above already assert all three against
+// this same fixture, and a second copy would be slower to run and no more
+// convincing.
+
+// Every transition appends exactly one history row.
+//
+// The name used to say this asserted the cache matched the history, and it did
+// not — it counted rows. CodeRabbit caught it on PR #13 and proposed
+// reconstructing the clock here and comparing the sla_* columns against it.
+//
+// That is already done, better, one file over.
+// TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom is property-based over 15
+// generated sequences of up to 6 transitions each and asserts exactly that
+// after creation and after every single step. Repeating three fixed steps of it
+// here would be slower to run and strictly weaker.
+//
+// So the name was fixed rather than the test, which leaves this asserting the
+// one thing that file does not: that the *count* grows by one per transition. A
+// write path that appended two rows, or none, would still satisfy a
+// reconstruction — Reconstruct reads whatever rows are there — while making the
+// timeline an agent reads wrong. See docs/adr/0010: a name that lies is a bug,
+// and a test name is a name.
+func TestEveryTransitionAppendsExactlyOneHistoryRow(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	agent := f.assignable(t, "consistency_agent", identitydomain.RoleAgent)
+
+	before, err := f.repo.Timeline(f.ctx, created.ID)
+	if err != nil {
+		t.Fatalf("Timeline: %v", err)
+	}
+	want := len(before)
+
+	for _, target := range []ticketdomain.Status{
+		ticketdomain.StatusPending, ticketdomain.StatusOpen, ticketdomain.StatusResolved,
+	} {
+		if _, err := f.svc.Transition(f.ctx, ticketapp.StatusChange{
+			TicketID: created.ID, Target: target,
+			ActorID: agent, ActorRole: ticketdomain.RoleAgent,
+		}); err != nil {
+			t.Fatalf("moving to %s: %v", target, err)
+		}
+		want++
+
+		timeline, err := f.repo.Timeline(f.ctx, created.ID)
+		if err != nil {
+			t.Fatalf("Timeline after %s: %v", target, err)
+		}
+		if len(timeline) != want {
+			t.Fatalf("after moving to %s the timeline has %d rows, want %d",
+				target, len(timeline), want)
+		}
+		// The last row has to be the move just made. A path that appended the
+		// right number of rows in the wrong order would pass the count alone.
+		last := timeline[len(timeline)-1]
+		if last.ToStatus != target {
+			t.Errorf("the last history row says %s, want %s", last.ToStatus, target)
+		}
+	}
+}
+
+// A customer may not take an agent's edge. The domain refuses it, and this
+// asserts the refusal survives the whole path rather than trusting that the
+// service asks.
+func TestACustomerMayNotTakeAnAgentsEdge(t *testing.T) {
+	f := newRepoFixture(t)
+
+	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err = f.svc.Transition(f.ctx, ticketapp.StatusChange{
+		TicketID: created.ID, Target: ticketdomain.StatusPending,
+		ActorID: f.requester, ActorRole: ticketdomain.RoleCustomer,
+	})
+
+	if !errors.Is(err, ticketdomain.ErrForbidden) {
+		t.Errorf("error = %v, want ErrForbidden — only an agent sets pending", err)
 	}
 }

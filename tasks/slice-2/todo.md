@@ -327,69 +327,180 @@ well-tested one produce the same green.
 
 ## Phase 3: Acting on a ticket
 
-### T21: Assignment
+### T21: Assignment ✅
 
 **Description:** Put an agent on a ticket, take them off, and refuse anyone who is not an
-agent — with the check declared by the ticket module and implemented in the composition root.
+agent — with the check declared by the ticket module and answered by the composition root.
 
 **Acceptance criteria:**
-- [ ] `PATCH /api/agent/tickets/{id}/assignee`, body `{"assignee_id": "<uuid>|null"}`
-- [ ] `application.AssigneeDirectory` — a consumer-declared port answering *may this id hold
+- [x] `PATCH /api/agent/tickets/{id}/assignee`, body `{"assignee_id": "<uuid>|null"}`
+- [x] `application.AssigneeDirectory` — a consumer-declared port answering *may this id hold
       tickets?*, implemented in `internal/app` against identity, following `SLAPolicies`
-- [ ] Assigning a customer's id is **422**; assigning an id that does not exist is 422 too,
-      and the two are the same answer — an agent must not be able to enumerate user ids
-- [ ] `null` unassigns, and is distinguishable from an absent field
-- [ ] **No `ticket_status_history` row is written** (plan §E) — the timeline the clock walks
-      is not padded
-- [ ] Assigning an already-assigned ticket overwrites; it is not an error
+- [x] Assigning a customer's id and assigning an id that does not exist give the **same**
+      answer, so this endpoint cannot be used to enumerate which uuids name users
+- [x] `null` unassigns, and is distinguishable from an absent field
+- [x] **No `ticket_status_history` row is written**, and no clock column moves
+- [x] Assigning an already-assigned ticket overwrites; it is not an error
 
 **Verification:**
-- [ ] Integration: one case per role for the target — agent succeeds, admin succeeds, customer
-      refused, unknown id refused
-- [ ] Integration: `sla_*` columns and the history row count are **unchanged** by an assignment
-- [ ] The consistency property still holds afterwards
-- [ ] `make arch`: the ticket module still imports no other business module
-- [ ] Mutations: dropping the directory check; treating absent as null; writing a history row —
-      each turns a test red
+- [x] Integration: one case per role for the target — agent and admin succeed, a customer and
+      an unknown id are both refused with `ErrNotAssignable`
+- [x] Integration: the history row count and **every** `sla_*` column are unchanged by an
+      assignment, and so is the status
+- [x] Integration: reassignment overwrites, `nil` clears the column, an unknown ticket is
+      `ErrTicketNotFound`
+- [x] Unit: the directory is not consulted when unassigning, and a directory **failure** is
+      not reported as a refusal
+- [x] Handler: absent field, `null`, a malformed uuid, a non-string, and unparseable JSON
+- [x] **6 mutations, 6 dead**: the service skipping the directory; a directory failure read as
+      a refusal; an absent field treated as null; `MayHoldTickets` admitting anyone; an unknown
+      id answering "yes"; the assignment touching `sla_due_at`
+- [x] `make check` and `make test-int` clean
 
 **Dependencies:** T18
 **Files:** `internal/modules/ticket/application/{ports,service}.go`,
-`internal/modules/ticket/infrastructure/postgres/queries/tickets.sql`,
-`internal/modules/ticket/transport/http/{handlers,dto}.go`, `internal/app/adapters.go`, plus tests
+`internal/modules/ticket/infrastructure/postgres/{queries/tickets.sql,repository.go}`,
+`internal/modules/ticket/transport/http/{assign,caller}.go`, `internal/modules/ticket/module.go`,
+`internal/modules/identity/{application/service.go,infrastructure/postgres/*}`,
+`internal/app/adapters.go`, `cmd/api/main.go`, plus tests
 **Scope:** M
+
+**Decisions taken during T21:**
+
+- **It is a 400, not the 422 the card named.** Every other validation failure in this API is a
+  400 carrying an `errors` member, and the frontend's `ApiError.fieldErrors` already reads it
+  (T13). A second status for the same shape of answer would buy a semantic distinction nobody
+  consumes at the cost of a second code path in the client.
+- **`MayHoldTickets` names the roles, the ticket module does not.** The port asks "may this
+  person hold tickets"; that the answer happens to be "their role is agent or admin" is the
+  identity module's business. The ticket module never learns the word *agent* for this.
+- **An unknown id answers `false`, not "no such user".** The caller is deciding whether to
+  accept an assignee, and "does not exist" and "is a customer" have to be the same answer
+  there — the same reasoning that makes another customer's ticket a 404 rather than a 403.
+- **A directory that cannot answer is not a refusal.** Reporting an outage as "that user may
+  not hold tickets" would be a lie the caller acts on, so the cause travels up and the handler
+  answers 500.
+- **`agentPaths()` now carries the method.** Slice 2 mounts writes as well as reads, and
+  requesting a PATCH route with GET answers 405 — which would read as a guard that let the
+  request through. The guard tests cover the new endpoint without being rewritten.
+
+**Three things measured rather than assumed:**
+
+- **Neither obvious way of telling `null` from absent works.** A `*uuid.UUID` field leaves nil
+  for both — and so does a `*json.RawMessage`, because `encoding/json` sets a pointer to nil
+  when it reads `null`, whatever it points at. That second one was the implementation until a
+  test failed on it. Decoding into a `map[string]json.RawMessage` and asking whether the key is
+  present is what actually distinguishes them, and the difference matters: a client sending
+  `{}` by accident would otherwise silently unassign a ticket somebody is working on.
+- **The test cleanup hit migration 003's deliberate lack of `ON DELETE CASCADE`.** Deleting a
+  seeded agent failed because a ticket still pointed at them — exactly what T6 wanted, stated
+  as "deleting a user or a policy that is still referenced fails loudly". The cleanup now
+  releases the reference first. The schema was right and the test was wrong.
+- **Seeded Clerk ids are unique per call, not derived from the test name.** `clerk_user_id` is
+  UNIQUE, so the first failed run left a row that poisoned every later run with a duplicate-key
+  error that had nothing to do with what was being tested.
 
 ---
 
-### T22: The transition endpoint
+### T22: The transition endpoint ✅
 
 **Description:** Expose the write path built in T11. This is the first time the SLA clock can
-be paused and resumed over HTTP — the headline behaviour of the entire domain.
+be paused and resumed over HTTP.
 
 **Acceptance criteria:**
-- [ ] `POST /api/agent/tickets/{id}/transitions`, body `{"to": "<status>", "reason": "…"}`
-- [ ] Calls `Service.Transition`, which already resolves the clock before the transaction and
-      takes `FOR UPDATE` — **no new write logic in this task**
-- [ ] An edge the actor's role may not take is **403**; an edge that does not exist at all is
-      **422**. The domain already distinguishes them; the handler must not flatten both into one
-- [ ] A transition on a `closed` ticket is refused — `closed` is terminal (§4.1)
-- [ ] The response is the updated ticket, so the client needs no follow-up read
-- [ ] Statuses join the generated contract — already there since T14a, verify no drift
+- [x] `POST /api/agent/tickets/{id}/transitions`, body `{"to": "<status>", "reason": "…"}`
+- [x] Calls `Service.Transition` — **no new write logic in this task**
+- [x] An edge the actor's role may not take is **403**; an edge that does not exist is a field
+      error. The domain already tells them apart and the handler does not flatten them
+- [x] A transition on a `closed` ticket is refused, with **no special case** in the handler —
+      it is terminal, so no edge leaves it and the state machine refuses it like any other
+      impossible move
+- [x] The response is the updated ticket, so a client needs no follow-up read to see the new
+      deadline — which is the point of the request when it is a pause
+- [x] Statuses were already in the generated contract since T14a; no drift
 
 **Verification:**
-- [ ] Integration: `open → pending` through the endpoint sets `sla_due_at` to null and
-      `sla_clock_started_at` to null, and `pending → open` resumes with the budget already spent
-      preserved
-- [ ] The §9 consistency property holds after every transition made through the endpoint, not
-      only after those made in a test's own transaction
-- [ ] A customer calling it is 403 at the group, before the handler
-- [ ] Concurrent transitions on one ticket: the second observes the first, because of `FOR UPDATE`
-- [ ] Mutations: swapping the 403 and 422 branches; passing the caller's role from the request
-      body; skipping the terminal check — each turns a test red
+- [x] Handler: the actor's role comes from the caller and a role in the body is ignored; 403
+      and the field error are distinct; an unknown status never reaches the state machine; a
+      whitespace reason is stored as absent; an overlong one is refused; an unknown ticket is 404
+- [x] Integration: a transition appends exactly one history row per move, and a customer is
+      refused an agent's edge through the whole service path
+- [x] **5 mutations, 5 dead**: 403 answered as a field error; the actor's role taken from
+      somewhere other than the caller; an unknown status reaching the use case; a whitespace
+      reason stored; the route left unmounted
+- [x] `make check` and `make test-int` clean
 
 **Dependencies:** T18
-**Files:** `internal/modules/ticket/transport/http/{handlers,dto}.go`, `internal/app/router.go`,
-plus tests
+**Files:** `internal/modules/ticket/transport/http/{transition,caller}.go`, plus tests
 **Scope:** M
+
+**Decisions taken during T22:**
+
+- **`POST .../transitions`, plural, and not `PATCH .../status`.** A transition is a thing that
+  happened, appended to a history; the status column is a cache of that history (§4.2). The URL
+  says which of the two a client is adding to.
+- **403 and the field error stay different answers.** The domain distinguishes "this move does
+  not exist" from "it exists and is not yours to make", and flattening them would tell an agent
+  their client is broken when the truth is that somebody else has to do it.
+- **The impossible-edge case is a 400, not the card's 422** — the same reasoning as T21.
+- **An unknown status is rejected before the state machine sees it.** The domain would refuse
+  it anyway, but as "you cannot go from open to blorp", which reads like an edge that might
+  exist somewhere else.
+- **A reason of whitespace is stored as absent**, because a blank line in a timeline an agent
+  reads is worse than no line.
+
+**What was deliberately not written.** The first draft of the integration tests re-asserted
+that pausing clears the deadline, that resuming keeps the spend, and that `closed` is terminal.
+All three were already covered against this same fixture by
+`TestPausingStopsTheClockAndResumingKeepsWhatWasSpent` and `TestTransitionRefusesToLeaveClosed`,
+written in T11. The duplicates were removed rather than kept: a second copy of a passing
+assertion is slower to run and no more convincing, and it makes the file harder to read for
+whoever comes next.
+
+**Review feedback from CodeRabbit on PR #13, and what was done with it.**
+
+Two findings, both acted on, neither applied as proposed.
+
+*Reject a value after the body.* Valid. `json.Decoder` reads one value and
+stops, so `{"to":"pending"}{}` decoded happily and the trailing object was never
+seen. Nothing downstream was wrong about it — it simply was not read — but a
+client shipping garbage after a valid body should be told, because the next
+thing it ships may be the half the caller meant.
+
+Fixed in **all three** endpoints that take a body rather than the one flagged.
+Two left lax is a rule that holds where somebody happened to look. `decodeBody`
+now owns it, and it closed a second inconsistency found on the way: the create
+endpoint capped its body with `io.LimitReader`, which **truncates silently**, so
+an oversized body arrived as invalid JSON and was reported as a syntax error
+rather than as a size one. All three now use `http.MaxBytesReader`.
+
+*Reconstruct the SLA clock in `TestTheCacheStillMatchesTheHistoryAfterATransition`
+and compare the `sla_*` columns.* **The suggestion was declined; the finding was
+not.** That reconstruction already exists, and is stronger:
+`TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom` is property-based over 15
+generated sequences of up to 6 transitions and asserts it after creation and
+after every step. Three fixed steps here would be slower and strictly weaker —
+the same reason three other tests were deleted from this task.
+
+But the finding pointed at a real defect that the proposed fix would have
+buried: **the test's name claimed it compared a cache, and it counted rows.**
+That is [ADR 0010](docs/adr/0010-a-name-that-lies-is-a-bug.md) applied to a test
+name — a name is a defect when it lies about what the thing does. Renamed to
+`TestEveryTransitionAppendsExactlyOneHistoryRow`, which is what it asserts and
+what the property test does *not*: a write path appending two rows, or none,
+would still satisfy a reconstruction, because `Reconstruct` reads whatever rows
+are there. It also now checks the last row records the move just made, so the
+right number of rows in the wrong order does not pass.
+
+Both fixes were mutation-checked: removing the EOF check turns the trailing-value
+test red, and recording the wrong status in the history row turns the renamed one
+red.
+
+**The test cleanup hit the schema a second time.** T21 released `tickets.assignee_id` before
+deleting a seeded user; transitions add `ticket_status_history.actor_id`, which is NOT NULL and
+therefore cannot be released — those rows have to go. §10 forbids hard-deleting history *in the
+application*; a fixture removing rows it created is the one place that rule does not reach, and
+saying so in the cleanup is cheaper than someone re-deriving it later.
 
 ---
 
