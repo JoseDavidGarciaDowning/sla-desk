@@ -324,6 +324,10 @@ func (stubTicketRepo) ListForRequester(context.Context, ticketapp.ListFilter) ([
 	return nil, nil
 }
 
+func (stubTicketRepo) ListForQueue(context.Context, ticketapp.QueueFilter) ([]ticketapp.QueueEntry, error) {
+	return nil, nil
+}
+
 func (stubTicketRepo) OneForRequester(context.Context, uuid.UUID, uuid.UUID) (ticketdomain.Ticket, error) {
 	return ticketdomain.Ticket{}, nil
 }
@@ -398,6 +402,7 @@ func agentRouter(t *testing.T, role identitydomain.Role) (http.Handler, string) 
 func agentPaths() []string {
 	return []string{
 		AgentPathPrefix + identityhttp.MePath,
+		AgentPathPrefix + tickethttp.QueuePath,
 	}
 }
 

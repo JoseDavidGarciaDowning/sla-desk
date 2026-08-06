@@ -171,39 +171,102 @@ tests interfere", and it took one command.
 
 ---
 
-### T19: The agent queue
+### T19: The agent queue ✅
 
-**Description:** One page of **every** ticket, filtered and paginated the way the customer
-list already is, through a query that has no requester predicate at all.
+**Description:** One page of **every** ticket, filtered and paginated, through a query that
+has no requester predicate at all.
 
 **Acceptance criteria:**
-- [ ] `ListTicketsForQueue` in the ticket module's queries — a **new** query, with the
-      customer's `ListTicketsByRequester` untouched and carrying no new parameter
-- [ ] Filters: status, priority, and **assignee** (`me`, a specific id, and `unassigned`)
-- [ ] Keyset pagination on `(created_at, id)`, reusing the cursor encoding from T10 so both
-      lists mean the same thing by a cursor
-- [ ] Ordered by `sla_due_at` ascending with nulls last, **not** by `created_at` — a queue is
-      read to find what breaches next, and a paused ticket has no deadline (§4.2)
-- [ ] `GET /api/agent/tickets`, mounted in the T18 group
-- [ ] The response carries the requester's display name — an agent queue that shows only ids
-      is not usable
+- [x] `ListTicketsForQueue` — a **new** query. `ListTicketsByRequester` is untouched and
+      carries no new parameter
+- [x] Filters: status, priority, and assignee (`me`, a specific id, `unassigned`, `any`)
+- [x] Keyset pagination — on `(deadline, id)`, **not** `(created_at, id)`; see below
+- [x] Ordered by the deadline ascending with paused tickets last
+- [x] `GET /api/agent/tickets`, mounted in the T18 group
+- [x] The response carries the requester's display name
 
 **Verification:**
-- [ ] Integration: the queue contains tickets belonging to customers other than the caller
-- [ ] Integration: each filter, and the pair, return exactly the expected set — one case per
-      filter, because a query can be right for the case a test happens to run
-- [ ] Pagination is stable across an insert between two page reads, as T10 asserted
-- [ ] `EXPLAIN` shows the `tickets_assignee_status` index used by the assignee filter, and no
-      sequential scan on the unfiltered queue
-- [ ] An unknown filter value is 400, not silently ignored (T14a's rule)
-- [ ] Mutations: adding a requester predicate to the queue query; dropping nulls-last from the
-      ordering; dropping the filters from the query key — each turns a test red
+- [x] Integration: the queue contains tickets belonging to customers other than the caller
+- [x] Integration: one case per filter and one for a pair — five subtests
+- [x] Integration: paging one row at a time reaches the paused tickets at the end, and no row
+      appears on two pages
+- [x] Unit: the DTO falls back to the email when Clerk holds no name; the service refuses a
+      filter with no assignee scope and does not call the repository
+- [x] An unknown filter value is 400, not silently ignored
+- [x] **6 mutations, 6 dead**: the queue query gaining a requester predicate; ordering by
+      `created_at`; the cursor comparing against a bare NULL; `unassigned` behaving like
+      `any`; the service accepting an unset scope; the DTO dropping the email fallback
+- [x] The agent group's route tests cover `/api/agent/tickets` **without being edited**, from
+      the `agentPaths()` list T18 introduced
+- [x] `make check` and `make test-int` clean
 
 **Dependencies:** T18
-**Files:** `internal/modules/ticket/infrastructure/postgres/queries/tickets.sql`,
+**Files:** `db/migrations/004_ticket_queue_index.sql`,
+`internal/modules/ticket/infrastructure/postgres/queries/tickets.sql`, `.../repository.go`,
 `internal/modules/ticket/application/{ports,service}.go`,
-`internal/modules/ticket/transport/http/{handlers,dto}.go`, `internal/app/router.go`, plus tests
-**Scope:** M
+`internal/modules/ticket/transport/http/{queue,dto,caller}.go`, `internal/app/router.go`,
+plus tests
+**Scope:** L — larger than planned, because the card contradicted itself
+
+**The card was wrong, and finding out cost a migration.**
+
+It asked for keyset pagination on `(created_at, id)` *and* ordering by `sla_due_at`. Those
+cannot both hold. **A keyset cursor is a position in the sort order**, so it has to carry the
+key being sorted on; carrying a different one asks the database for "what comes after the row
+created at 10:00" in a list ordered by deadline, which means nothing. The pages would skip and
+repeat.
+
+Worse, and not noticed at planning time: **`sla_due_at` is mutable.** Pausing a ticket clears
+it and resuming recomputes it, so a cursor over it cannot promise what T10's cursor promised.
+
+Resolved by choosing what the queue is *for*. Ordering by creation date is stable and answers
+the wrong question — an agent reads this list to find what breaches next, and sorting the
+loaded page in the browser sorts one page of many, which is the lie T14a already rejected for
+filters. So: **order by the deadline, carry the deadline in the cursor, and accept that a
+ticket transitioned mid-paging can move across it.** Only the row that moved is affected, and
+it is the one an agent just acted on. OFFSET would shift every row after it, on any insert.
+
+**Decisions taken during T19:**
+
+- **The sentinel is `9999-12-31T23:59:59.999999Z`, not `'infinity'`.** `'infinity'` is the
+  natural Postgres value and was the first implementation, until the generated cursor
+  parameter turned out to be `*time.Time` — which has no such value, so a cursor pointing at a
+  paused ticket could not be sent at all. The sentinel is exact in both directions:
+  `timestamptz` resolves to one microsecond and RFC3339Nano writes six digits.
+- **`COALESCE(...)` rather than `NULLS LAST`**, and the reason is the cursor rather than the
+  ordering. Measured against Postgres 16 before committing to it:
+  `(NULL, id) > (x, id)` is **NULL**, not false, and `WHERE NULL` discards the row — so with
+  `NULLS LAST` every paused ticket would sort correctly and then vanish from the second page
+  onward, silently. `TestPagingReachesThePausedTicketsAtTheEnd` is the test for it.
+- **Migration 004 adds an expression index matching the ORDER BY.** A plain index on
+  `sla_due_at` does not serve `COALESCE(sla_due_at, ...)`. Verified rather than assumed: the
+  `text -> timestamptz` cast is STABLE, which an index expression normally refuses, and it is
+  accepted here because a literal argument is constant-folded at parse time. `EXPLAIN` shows
+  the row comparison as an **Index Cond**, not a Filter.
+- **`AssigneeScope` is three values, not a nullable id.** A nil id already means "no filter",
+  so it cannot also mean "unassigned". The zero value is refused rather than defaulted to
+  "any", because defaulting would turn a caller who forgot into "return every ticket" on the
+  one query with no predicate to fall back on.
+- **`AgentRoutes` is a separate mount function from `Routes`.** Everything in it is backed by
+  an unscoped query, so it is handed a router that already carries the role check. A handler
+  added to the wrong list is a handler behind the wrong guard, and two lists make that visible.
+- **Two rules moved layers while writing the tests**, and both moves were improvements rather
+  than accommodations. Refusing an unset scope is a use-case precondition and belongs in the
+  service, not the adapter. Falling back to the email when Clerk holds no name is a display
+  decision and belongs in the DTO. Each is now unit-testable where it lives, and the repository
+  went back to being only a mapping.
+
+**Two things the tests caught that the code did not:**
+
+- `newTicketWith` stamps **every** ticket with the same 24-hour deadline whatever its priority
+  — the policy id varies, `sla_due_at` does not. The first ordering test seeded an urgent and a
+  low ticket and asserted the urgent came first; they tied, and the uuid tiebreaker decided it
+  by coin flip. The test now sets the deadlines explicitly. The failure was the test being
+  wrong about a helper, and "fixing" the query would have broken it.
+- One mutation was written badly: `t.requester_id = t.requester_id` is a tautology and scopes
+  nothing, so it survived and looked like a gap in the tests. Rewritten to scope to an
+  arbitrary user, it died immediately. **A mutation that does not change behaviour proves as
+  little as a test that cannot fail.**
 
 ---
 

@@ -118,6 +118,75 @@ type ListFilter struct {
 	PageSize int32
 }
 
+// AssigneeScope says which tickets a queue page is about, by assignee.
+//
+// Three questions, not one: any assignee, one in particular, or none at all. A
+// nil assignee id cannot express all three — it already means "no filter", so
+// it cannot also mean "unassigned" — and a filter that silently answers the
+// wrong question is worse than one that does not exist.
+type AssigneeScope string
+
+const (
+	AssigneeAny        AssigneeScope = "any"
+	AssigneeUnassigned AssigneeScope = "unassigned"
+	AssigneeOne        AssigneeScope = "one"
+)
+
+// QueueFilter is one page of every ticket, in deadline order.
+//
+// Deliberately not ListFilter with the requester made optional. The two are
+// different reads with different guarantees: ListFilter always carries a
+// requester and its query always scopes by one, and merging them would put the
+// distinction in a field that a caller can leave unset (tasks/slice-2/plan.md
+// decision B).
+type QueueFilter struct {
+	Status   *domain.Status
+	Priority *domain.Priority
+
+	// Assignee says which of the three questions this page asks. The zero value
+	// is not AssigneeAny on purpose — an unset scope is a caller who forgot,
+	// and the repository refuses it rather than quietly showing everything.
+	Assignee   AssigneeScope
+	AssigneeID *uuid.UUID
+
+	// AfterDueAt and AfterID carry the last row of the previous page, in the
+	// order this query sorts by. A keyset cursor is a position in the sort
+	// order, so it carries the deadline and not created_at.
+	//
+	// AfterDueAt is already coalesced: a paused ticket's position is
+	// 'infinity', because (NULL, id) > (x, id) is NULL and WHERE NULL drops the
+	// row. See the query.
+	AfterDueAt *time.Time
+	AfterID    *uuid.UUID
+
+	PageSize int32
+}
+
+// ErrUnsetAssigneeScope reports a QueueFilter built without one.
+//
+// A zero AssigneeScope means a caller forgot, and defaulting it to "any" would
+// turn forgetting into "show every ticket" — which on this query is the whole
+// unscoped set.
+var ErrUnsetAssigneeScope = errors.New("ticket: the queue filter has no assignee scope")
+
+// QueueEntry is a ticket as the agent queue shows it.
+//
+// It carries the requester's display name because a queue of uuids is not
+// usable, and it is a separate type rather than a field on domain.Ticket: the
+// name belongs to the identity module and is joined in for this one read. A
+// Ticket that sometimes carried a name and sometimes did not would make every
+// other caller check.
+type QueueEntry struct {
+	Ticket domain.Ticket
+
+	// RequesterName is empty for anyone who signed up with an email and a
+	// password, because Clerk holds no name for them. The email is carried
+	// alongside so the transport can decide what to show rather than being
+	// handed a blank it cannot recover from.
+	RequesterName  string
+	RequesterEmail string
+}
+
 // Repository stores and reads tickets.
 //
 // The write methods own their transactions, because the fact and the cache have
@@ -143,6 +212,11 @@ type Repository interface {
 	// prefix on the only one that had it. Which was which had to be remembered
 	// rather than worked out.
 	ListForRequester(ctx context.Context, f ListFilter) ([]domain.Ticket, error)
+
+	// ListForQueue reads every ticket, scoped by nothing. It is reachable only
+	// from handlers mounted behind a role check, and that placement is the
+	// authorization — there is no predicate here to forget.
+	ListForQueue(ctx context.Context, f QueueFilter) ([]QueueEntry, error)
 	OneForRequester(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error)
 	HistoryForRequester(ctx context.Context, ticketID, requesterID uuid.UUID) ([]domain.HistoryEntry, error)
 }

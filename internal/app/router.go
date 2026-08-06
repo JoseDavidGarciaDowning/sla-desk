@@ -141,6 +141,7 @@ func NewRouter(cfg config.Config, deps Deps) (http.Handler, error) {
 			r.Use(identityhttp.RequireRole(identitydomain.RoleAgent, identitydomain.RoleAdmin))
 
 			r.Method(http.MethodGet, identityhttp.MePath, identityhttp.MeHandler())
+			tickethttp.AgentRoutes(r, deps.Tickets.Service, callerFromContext)
 		})
 	})
 
