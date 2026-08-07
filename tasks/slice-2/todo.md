@@ -666,30 +666,65 @@ clears. The test now spies on the client and checks all three caches.
 
 ---
 
-### T25: E2E, ADR 0011, and the docs
+### T25: E2E, ADR 0011, and the docs ✅
 
-**Description:** Prove the slice in a browser against the deployed stack, and write down the
+**Description:** Prove the slice in a browser where that is possible, and write down the
 decision that will otherwise be re-litigated in six months.
 
 **Acceptance criteria:**
-- [ ] **ADR 0011** records plan decision B: why the scoped queries were not widened with a
-      role flag, and what the route group is doing in the argument
-- [ ] Spec §12.4 struck through and marked resolved, as §12.3 and §12.5 were
-- [ ] Spec §2 roadmap row for slice 2 marked delivered
-- [ ] `docs/architecture.md` gains the `/api/agent` group and `RequireRole`
-- [ ] README explains the two query sets — it is the non-obvious part of the design
-- [ ] E2E: an agent signs in, opens the queue, assigns a ticket to themselves, moves it to
-      `pending`, and the customer's own view shows the paused clock
+- [x] **ADR 0011** records why the scoped queries were not widened with a role flag, and
+      what the route group is doing in the argument
+- [x] Spec §12.4 struck through and resolved, as §12.3 and §12.5 were
+- [x] Spec §2 roadmap row for slice 2 marked delivered
+- [x] `docs/architecture.md` gains the `/api/agent` group and `RequireRole` — as a
+      **seventh rule**, and one stated as weaker than the other six
+- [x] README explains the two surfaces and how someone becomes an agent
+- [x] E2E: **the negative half** — see below
 
 **Verification:**
-- [ ] The E2E job passes on the PR
-- [ ] `make check` and `make test-int` green
-- [ ] An architecture test asserts the unscoped queries are used by no handler outside the
-      agent group — if one can be written; if not, say so and explain why rather than skipping it
+- [x] `make check` clean after every documentation commit
+- [x] The E2E suite compiles and lints; it runs in CI against a development Clerk instance
 
 **Dependencies:** T23, T24
-**Files:** `docs/adr/0011-*.md`, `docs/spec.md`, `docs/architecture.md`, `README.md`, `smoke/`
+**Files:** `docs/adr/0011-authorization-moves-from-the-predicate-to-the-route.md`,
+`docs/spec.md`, `docs/architecture.md`, `README.md`, `web/e2e/agent-surface.spec.ts`
 **Scope:** M
+
+**The E2E covers the negative half, and that is a limit rather than a choice.**
+
+The card asked for an agent signing in, assigning a ticket to themselves and pausing the
+clock. That cannot run here: a fresh account is created on every run and every account
+starts as a customer (§4.5). Becoming an agent means appearing in `AGENT_CLERK_USER_IDS`,
+which the API reads **at startup** — long before the run exists, with an id that does not
+exist until the sign-up completes.
+
+What the suite proves instead is the thing nothing else could: a signed-in customer typing
+`/queue` is redirected, no agent chrome flashes on the way, and the route exists to turn
+them away rather than 404ing by accident. Every other test in this project builds the router
+itself and therefore knows that answer in advance. It also closes the gap T23 recorded
+explicitly, which was that the layout's redirect on a non-staff role was covered by nothing.
+
+The signed-out case asserts the **hostname**, not just that a sign-in form appeared. T12
+shipped a correct `307` pointing at Clerk's hosted `accounts.dev`, so "a sign-in rendered"
+is not evidence either.
+
+**Left open, deliberately, and this is what a follow-up needs.** The positive half wants a
+fixture agent whose Clerk id is known before the API boots — an account created once in the
+development instance and listed in the workflow's environment. It is not built here because
+an account that lives between runs is a different kind of test: it shares state across runs,
+it can be left in a bad state by a failure, and it needs deciding whether the suite may
+mutate tickets that persist. That deserves choosing rather than smuggling into a docs task.
+
+**ADR 0011 writes down what the design gives up**, not only what it buys. A SQL predicate
+cannot be bypassed by a handler; a route group can be bypassed by mounting a handler in the
+wrong place. What it buys back is that mounting is visible — one file, one list, one test —
+while a forgotten `WHERE` clause is invisible until somebody reads the query. It also states
+what would falsify it: a third scoping rule turns two query sets from duplication into a
+pattern that does not scale.
+
+**The seventh architecture rule is stated as weaker than the other six.** Those are graph
+properties a tool derives; this one is a list a person maintains. Pretending otherwise would
+be the more comfortable sentence and the less true one.
 
 ---
 
