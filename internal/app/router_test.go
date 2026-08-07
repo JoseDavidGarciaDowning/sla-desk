@@ -281,6 +281,10 @@ func (s routerStubUsers) ByID(context.Context, uuid.UUID) (identitydomain.User, 
 	return s.user, nil
 }
 
+func (s routerStubUsers) Assignable(context.Context) ([]identitydomain.User, error) {
+	return []identitydomain.User{s.user}, nil
+}
+
 // testIdentity builds the identity module the way NewRouter's caller does, so a
 // router test exercises the real middleware chain rather than a stand-in for
 // it. Only the users table and the JWKS endpoint are replaced.
@@ -445,6 +449,7 @@ func agentPaths() []agentRoute {
 	ticket := AgentPathPrefix + tickethttp.QueuePath + "/" + agentPathTicketID
 	return []agentRoute{
 		{http.MethodGet, AgentPathPrefix + identityhttp.MePath, ""},
+		{http.MethodGet, AgentPathPrefix + identityhttp.AssignablePath, ""},
 		{http.MethodGet, AgentPathPrefix + tickethttp.QueuePath, ""},
 		{http.MethodGet, ticket, ""},
 		{http.MethodGet, ticket + tickethttp.TicketHistorySuffix, ""},

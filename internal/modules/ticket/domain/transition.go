@@ -47,6 +47,35 @@ var allowed = map[Status]map[Status][]Role{
 	},
 }
 
+// Edges is the state machine as data: from which status, to which, and by whom.
+//
+// A copy rather than the map itself. `allowed` decides every transition in this
+// system, and handing out a reference to it would let any caller — or any test
+// that forgot to restore something — rewrite the rules for the whole process.
+//
+// It exists so the generated frontend contract can carry the table instead of
+// transcribing it. A UI has to know which moves to offer, and the alternative
+// to generating that is a copy in TypeScript that drifts the day an edge
+// changes: the button stays on screen and the API starts refusing it, which is
+// exactly the failure the contract was introduced to prevent (T13).
+//
+// Statuses with no outgoing edges appear with an empty map rather than being
+// left out, so a caller can look one up without a special case. closed is the
+// only one today, and it is terminal on purpose (docs/spec.md §4.1).
+func Edges() map[Status]map[Status][]Role {
+	out := make(map[Status]map[Status][]Role, len(Statuses()))
+
+	for _, from := range Statuses() {
+		targets := make(map[Status][]Role, len(allowed[from]))
+		for to, roles := range allowed[from] {
+			targets[to] = append([]Role(nil), roles...)
+		}
+		out[from] = targets
+	}
+
+	return out
+}
+
 // Transition validates a status change and returns the new status.
 //
 // Pure: no database, no clock, no context. Everything it needs is an argument,

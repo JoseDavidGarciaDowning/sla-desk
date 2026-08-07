@@ -27,6 +27,26 @@ type Contract struct {
 	// what state a ticket is in. They travel anyway because the list endpoint
 	// takes one as a filter, and because the UI has to label them.
 	Statuses []domain.Status
+
+	// Roles are the actor roles the state machine keys its edges on. They are
+	// the ticket module's own vocabulary, not the identity module's: this one
+	// says what somebody was when they acted (docs/adr/0005).
+	Roles []domain.Role
+
+	// Transitions is the state machine as data — from which status, to which,
+	// and by whom.
+	//
+	// It travels for the same reason the categories do: an agent's ticket view
+	// has to offer the moves that are possible from where the ticket is, and it
+	// cannot know them without being told. Transcribing the table in TypeScript
+	// is the alternative, and it is the one that breaks silently — the day an
+	// edge changes in docs/spec.md §4.1, the button stays on screen and the API
+	// starts refusing it.
+	//
+	// The server remains the only authority. Anything this table lets a client
+	// offer is still checked by domain.Transition, which answers 403 for an
+	// edge a role may not take and a field error for one that does not exist.
+	Transitions map[domain.Status]map[domain.Status][]domain.Role
 }
 
 // TicketContract describes what POST /api/tickets accepts.
@@ -43,6 +63,8 @@ func TicketContract() Contract {
 		Categories:           validCategories,
 		Priorities:           validPriorities,
 		Statuses:             validStatuses,
+		Roles:                domain.ActorRoles(),
+		Transitions:          domain.Edges(),
 	}
 }
 
@@ -80,8 +102,56 @@ func (c Contract) TypeScript() string {
 	writeTSUnion(&b, "CATEGORIES", "Category", c.Categories)
 	writeTSUnion(&b, "PRIORITIES", "Priority", c.Priorities)
 	writeTSUnion(&b, "STATUSES", "TicketStatus", c.Statuses)
+	writeTSUnion(&b, "ACTOR_ROLES", "ActorRole", c.Roles)
+	writeTSTransitions(&b, c)
 
 	return b.String()
+}
+
+// writeTSTransitions emits the state machine as a frozen lookup.
+//
+// Keyed by every status including the ones with no outgoing edges, so a caller
+// can index it without a guard — closed is the only such status today, and its
+// empty object is what says "terminal" rather than "forgotten".
+//
+// The statuses are emitted in the order the domain lists them rather than in
+// map order, because Go randomises the latter and a generated file that changes
+// on every run would be a diff nobody can read and a staleness test that never
+// passes twice.
+func writeTSTransitions(b *strings.Builder, c Contract) {
+	b.WriteString("\nexport const TRANSITIONS: Record<\n")
+	b.WriteString("  TicketStatus,\n")
+	b.WriteString("  Partial<Record<TicketStatus, readonly ActorRole[]>>\n")
+	b.WriteString("> = {\n")
+
+	for _, from := range c.Statuses {
+		targets := c.Transitions[from]
+		if len(targets) == 0 {
+			fmt.Fprintf(b, "  %q: {},\n", string(from))
+			continue
+		}
+
+		fmt.Fprintf(b, "  %q: {\n", string(from))
+		// Iterate the status list again rather than the inner map, for the
+		// same reason: a stable order.
+		for _, to := range c.Statuses {
+			roles, ok := targets[to]
+			if !ok {
+				continue
+			}
+			fmt.Fprintf(b, "    %q: [", string(to))
+			for i, role := range roles {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				fmt.Fprintf(b, "%q", string(role))
+			}
+			b.WriteString("],\n")
+		}
+		b.WriteString("  },\n")
+	}
+
+	b.WriteString("} as const;\n")
 }
 
 // writeTSUnion emits a frozen array and the union type derived from it.

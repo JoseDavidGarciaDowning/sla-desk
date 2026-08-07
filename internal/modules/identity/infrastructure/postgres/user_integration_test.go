@@ -423,3 +423,101 @@ func TestGrantRoleReportsAnUnknownSubject(t *testing.T) {
 		t.Errorf("GrantRole error = %v, want ErrNoSuchUser", err)
 	}
 }
+
+// --- The staff roster (T24) -----------------------------------------------
+
+// The predicate is in the query rather than a filter above it, so a customer
+// cannot reach this list even from a caller that forgot to check.
+func TestTheRosterHoldsStaffAndNobodyElse(t *testing.T) {
+	ctx, tx, repo := begin(t)
+
+	seed := func(clerkID string, role domain.Role) {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO users (clerk_user_id, email, role) VALUES ($1, $2, $3)`,
+			clerkID, clerkID+"@example.test", role); err != nil {
+			t.Fatalf("seeding %s: %v", clerkID, err)
+		}
+	}
+
+	seed("user_roster_agent", domain.RoleAgent)
+	seed("user_roster_admin", domain.RoleAdmin)
+	seed("user_roster_customer", domain.RoleCustomer)
+
+	found, err := repo.Assignable(ctx)
+	if err != nil {
+		t.Fatalf("Assignable: %v", err)
+	}
+
+	byClerkID := map[string]domain.Role{}
+	for _, u := range found {
+		byClerkID[u.ClerkUserID] = u.Role
+	}
+
+	if _, ok := byClerkID["user_roster_agent"]; !ok {
+		t.Error("the agent is missing from the roster")
+	}
+	if _, ok := byClerkID["user_roster_admin"]; !ok {
+		t.Error("the admin is missing from the roster")
+	}
+	if _, ok := byClerkID["user_roster_customer"]; ok {
+		t.Error("a customer is on the roster — the predicate is not doing its job")
+	}
+}
+
+// Ordered by name so a select renders the same way twice, and NULLS LAST
+// because Clerk holds no name for someone who signed up with an email and a
+// password — an unnamed colleague belongs at the end of a list rather than the
+// top of it.
+func TestTheRosterIsOrderedByNameWithUnnamedLast(t *testing.T) {
+	ctx, tx, repo := begin(t)
+
+	if _, err := tx.Exec(ctx, `DELETE FROM users WHERE role IN ('agent','admin')`); err != nil {
+		t.Fatalf("clearing the roster: %v", err)
+	}
+
+	seed := func(clerkID string, name *string) {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO users (clerk_user_id, email, name, role) VALUES ($1, $2, $3, 'agent')`,
+			clerkID, clerkID+"@example.test", name); err != nil {
+			t.Fatalf("seeding %s: %v", clerkID, err)
+		}
+	}
+
+	zoe, ada := "Zoe", "Ada"
+	seed("user_order_unnamed", nil)
+	seed("user_order_zoe", &zoe)
+	seed("user_order_ada", &ada)
+
+	found, err := repo.Assignable(ctx)
+	if err != nil {
+		t.Fatalf("Assignable: %v", err)
+	}
+	if len(found) != 3 {
+		t.Fatalf("roster has %d entries, want 3", len(found))
+	}
+
+	if found[0].Name != "Ada" || found[1].Name != "Zoe" {
+		t.Errorf("order = %q, %q — want Ada then Zoe", found[0].Name, found[1].Name)
+	}
+	if found[2].Name != "" {
+		t.Errorf("the unnamed agent is at position 3 with name %q, want it last and empty", found[2].Name)
+	}
+}
+
+// An empty roster is an empty slice, not an error. A deploy with no agents
+// configured is the default state (T17).
+func TestAnEmptyRosterIsNotAnError(t *testing.T) {
+	ctx, tx, repo := begin(t)
+
+	if _, err := tx.Exec(ctx, `DELETE FROM users WHERE role IN ('agent','admin')`); err != nil {
+		t.Fatalf("clearing the roster: %v", err)
+	}
+
+	found, err := repo.Assignable(ctx)
+	if err != nil {
+		t.Fatalf("Assignable: %v", err)
+	}
+	if len(found) != 0 {
+		t.Errorf("roster has %d entries, want none", len(found))
+	}
+}

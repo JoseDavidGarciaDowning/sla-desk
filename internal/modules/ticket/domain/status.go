@@ -29,3 +29,14 @@ const (
 	PriorityNormal Priority = "normal"
 	PriorityLow    Priority = "low"
 )
+
+// Statuses is every status a ticket can hold, in workflow order.
+//
+// Ordered rather than alphabetical: open, pending, resolved, closed is the path
+// a ticket walks, and a filter control that lists them in that order reads like
+// the process it describes. The transport layer keeps its own copy for
+// validation; this one exists so the domain can iterate its own vocabulary
+// without asking a package above it.
+func Statuses() []Status {
+	return []Status{StatusOpen, StatusPending, StatusResolved, StatusClosed}
+}

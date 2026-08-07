@@ -21,3 +21,14 @@ const (
 	RoleAgent    Role = "agent"
 	RoleAdmin    Role = "admin"
 )
+
+// ActorRoles is every role the state machine keys its edges on, least
+// privileged first.
+//
+// Ordered rather than alphabetical, so a generated file and a rendered list
+// both read as an escalation. The transport layer does not accept a role from
+// anyone — it comes from the authenticated caller — so this is a vocabulary for
+// describing the rules, not for validating input.
+func ActorRoles() []Role {
+	return []Role{RoleCustomer, RoleAgent, RoleAdmin}
+}

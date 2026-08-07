@@ -86,6 +86,22 @@ Six, all enforced. Each was watched failing before it was trusted.
 6. **Each module owns its own sqlc config.** There is no root `sqlc.yaml`, and a new one
    fails the build.
 
+Slice 2 added a seventh, and it is the only one this file cannot enforce with a test:
+
+7. **A query with no requester predicate is mounted under `/api/agent` and nowhere else.**
+   The customer's reads carry `WHERE requester_id = $1`; the agent's carry nothing, because
+   an agent reads tickets that are not theirs. What stands in for the predicate is the route
+   group, which sits behind `RequireRole(agent, admin)` — see
+   [ADR 0011](adr/0011-authorization-moves-from-the-predicate-to-the-route.md).
+
+   It is checked by a test that walks **every path under the prefix** as a customer and
+   requires 403 on each, driven from a list in the test file so a route added later is
+   covered without the test being edited. That is weaker than the six above: those are
+   graph properties a tool derives, this is a list a person maintains. The compensation is
+   that chi routes before it runs a group's middleware, so an unmounted path answers 404
+   while a mounted one answers 403 — the same test therefore proves each route is protected
+   *and* that it exists.
+
 ## How they are enforced, and why it takes two things
 
 Both halves run on every CI build. They catch different failures, which is the only reason

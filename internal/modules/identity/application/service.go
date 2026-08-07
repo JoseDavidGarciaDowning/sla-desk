@@ -31,6 +31,11 @@ type UserRepository interface {
 	// ByID reads by our own primary key. Same contract on the error.
 	ByID(ctx context.Context, id uuid.UUID) (domain.User, error)
 
+	// Assignable lists the users a ticket may be handed to. The predicate lives
+	// in the query, so a customer cannot appear in the result whatever the
+	// caller does.
+	Assignable(ctx context.Context) ([]domain.User, error)
+
 	// Upsert is the idempotent provisioning write.
 	//
 	// The role applies to the insert only, and the query leaves the column out
@@ -145,6 +150,16 @@ func (s *Service) MayHoldTickets(ctx context.Context, id uuid.UUID) (bool, error
 	}
 
 	return user.Role == domain.RoleAgent || user.Role == domain.RoleAdmin, nil
+}
+
+// Assignable lists the staff a ticket may be handed to — agents and admins.
+//
+// The predicate is in the query rather than a filter here, for the reason every
+// other read in this project gives: a forgotten check in Go must not be enough
+// to widen an answer. A customer cannot appear in this list even if this method
+// is called from somewhere it should not be.
+func (s *Service) Assignable(ctx context.Context) ([]domain.User, error) {
+	return s.users.Assignable(ctx)
 }
 
 // Provision writes the users row for a Clerk identity, creating it if this is

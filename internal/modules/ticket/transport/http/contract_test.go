@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -236,5 +237,79 @@ func TestGeneratedContractIsUpToDate(t *testing.T) {
 
 	if string(got) != want {
 		t.Errorf("%s is stale. Run `make contract`.", path)
+	}
+}
+
+// The published transition table has to be the one the state machine obeys,
+// not a copy that agrees with itself.
+//
+// Proved by calling domain.Transition at every published edge rather than by
+// comparing the table to itself: a contract that said `open -> closed` while
+// the machine refused it would pass any structural comparison and fail here.
+func TestThePublishedTransitionsAreTheOnesTheMachineAllows(t *testing.T) {
+	contract := tickethttp.TicketContract()
+
+	for from, targets := range contract.Transitions {
+		for to, roles := range targets {
+			for _, role := range roles {
+				if _, err := domain.Transition(from, to, role); err != nil {
+					t.Errorf("the contract publishes %s -> %s for %s, but the machine refuses it: %v",
+						from, to, role, err)
+				}
+			}
+		}
+	}
+}
+
+// And the other direction: an edge the machine allows must be published, or the
+// UI will never offer a move an agent is entitled to make.
+func TestEveryAllowedTransitionIsPublished(t *testing.T) {
+	contract := tickethttp.TicketContract()
+
+	for _, from := range domain.Statuses() {
+		for _, to := range domain.Statuses() {
+			for _, role := range domain.ActorRoles() {
+				_, err := domain.Transition(from, to, role)
+				allowed := err == nil
+
+				published := slices.Contains(contract.Transitions[from][to], role)
+
+				if allowed != published {
+					t.Errorf("%s -> %s for %s: machine allows=%v, contract publishes=%v",
+						from, to, role, allowed, published)
+				}
+			}
+		}
+	}
+}
+
+// Terminal statuses are published with an empty object rather than left out, so
+// a component can index the table without a guard. An absent key and an empty
+// one look the same in TypeScript at the type level and different at runtime.
+func TestATerminalStatusIsPublishedAsEmptyRatherThanOmitted(t *testing.T) {
+	contract := tickethttp.TicketContract()
+
+	targets, present := contract.Transitions[domain.StatusClosed]
+	if !present {
+		t.Fatal("closed is missing from the table — a client would have to special-case it")
+	}
+	if len(targets) != 0 {
+		t.Errorf("closed has %d outgoing edges, want none — it is terminal", len(targets))
+	}
+}
+
+// Edges hands out a copy. Handing out the map itself would let any caller
+// rewrite the rules for the whole process.
+func TestEdgesCannotBeMutatedThroughTheReturnedMap(t *testing.T) {
+	first := domain.Edges()
+	first[domain.StatusClosed][domain.StatusOpen] = []domain.Role{domain.RoleCustomer}
+	delete(first[domain.StatusOpen], domain.StatusPending)
+
+	second := domain.Edges()
+	if len(second[domain.StatusClosed]) != 0 {
+		t.Error("closed gained an edge through a caller's copy")
+	}
+	if _, ok := second[domain.StatusOpen][domain.StatusPending]; !ok {
+		t.Error("open lost an edge through a caller's copy")
 	}
 }

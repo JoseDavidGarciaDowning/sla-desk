@@ -208,6 +208,10 @@ func (f *fakeStore) ByID(context.Context, uuid.UUID) (domain.User, error) {
 	return f.user, nil
 }
 
+func (f *fakeStore) Assignable(context.Context) ([]domain.User, error) {
+	return nil, nil
+}
+
 func (f *fakeStore) GrantRole(_ context.Context, clerkUserID string, role domain.Role) (domain.User, error) {
 	return domain.User{ClerkUserID: clerkUserID, Role: role}, nil
 }

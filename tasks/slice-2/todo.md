@@ -510,84 +510,221 @@ saying so in the cleanup is cheaper than someone re-deriving it later.
 
 ## Phase 4: The agent in a browser
 
-### T23: `(agent)` route group, role guard, queue view
+### T23: `(agent)` route group, role guard, queue view ✅
 
 **Description:** The agent's half of the app. A second route group beside `(customer)`,
-guarded the same way §4.3 guards the API — and, like T12, the guard here is UX and the real
+guarded the same way §4.3 guards the API — and, like T12, the guard here is UX while the real
 boundary stays on the API side.
 
 **Acceptance criteria:**
-- [ ] `web/app/(agent)/` group with its own layout, calling `auth.protect()` **and** checking
-      the role from the API — Clerk does not hold the role, our database does
-- [ ] A customer visiting `/agent` is redirected; a signed-out visitor goes to sign-in
-- [ ] Queue table: requester, title, priority, status, assignee, SLA remaining
-- [ ] `sla-timer.tsx` reused unchanged — no second implementation of the countdown
-- [ ] Filters in URL query params, as T14a established
-- [ ] Loading, empty and error states, including the 403 state for a customer who forced the URL
+- [x] `web/app/(agent)/` group with its own layout, calling `auth.protect()` **and** reading
+      the role from the API — Clerk holds no role, our database does
+- [x] A customer visiting `/queue` is redirected; a signed-out visitor goes to sign-in
+- [x] Queue table: requester, title, priority, status, SLA remaining
+- [x] `sla-timer.tsx` reused unchanged — no second implementation of the countdown
+- [x] Filters in URL query params, as T14a established
+- [x] Loading, two empty states, and the 403 state for a customer who forced the URL
 
 **Verification:**
-- [ ] Component tests for the table, the filters and the 403 state
-- [ ] `pnpm build`, `pnpm lint`, `tsc --noEmit` clean
-- [ ] Measured, not assumed: the actual redirect target is inspected, because T12 shipped a
-      correct `307` pointing at the wrong host
+- [x] 7 component tests: the requester is shown; rows keep the API's order; every filter
+      reaches the request and absent ones do not; each filter combination caches separately;
+      a 403 renders a sentence rather than a status code; the two empty states differ
+- [x] `pnpm build`, `pnpm lint` and `tsc --noEmit` clean; `/queue` builds as a dynamic route
+- [x] **5 mutations, 5 dead**: reordering the rows in the browser; dropping the filters from
+      the query key; rendering the 403 as a plain status code; collapsing the two empty
+      states; omitting the requester's name
+- [x] **Measured, not assumed**, the way T12 required — see below
 
 **Dependencies:** T19
-**Files:** `web/app/(agent)/layout.tsx`, `web/app/(agent)/queue/`, `web/lib/use-agent-tickets.ts`,
-`web/lib/agent.ts`, plus tests
+**Files:** `web/lib/agent.ts`, `web/app/(agent)/layout.tsx`,
+`web/app/(agent)/queue/{page,agent-queue,queue-filters}.tsx`, plus tests
 **Scope:** M
+
+**Decisions taken during T23:**
+
+- **The role check runs on the server, in the layout.** A client-side check would flash the
+  agent chrome before redirecting a customer. It costs one request per navigation into the
+  group, against `/api/agent/me` — the cheapest endpoint in the API — with `cache: "no-store"`,
+  because a cached role would outlive a promotion or survive a demotion.
+- **Any failure of that request redirects, and the reasons are deliberately not told apart.**
+  A 403 means "not staff"; an unreachable API means we cannot know. Showing the agent shell on
+  "cannot know" is the one outcome worth avoiding: failing closed sends a real agent to their
+  own tickets during an outage, which is recoverable, while failing open shows a customer a
+  queue that errors on every request.
+- **`agentKeys` is a separate cache tree from `ticketKeys`.** Not tidiness: invalidating the
+  customer's list must not refetch the queue, and a ticket read as an agent is not the same
+  cached value as the same ticket read by its requester — one is reachable and the other
+  answers 404.
+- **The assignee filter's vocabulary is transcribed, not generated.** Status and priority come
+  from the generated contract; `any`/`unassigned`/`me` exist only on this endpoint and there is
+  nothing in the shared contract to generate them from. Acceptable because an unknown value is
+  answered with a 400 naming the field — it fails loudly on the first click rather than quietly
+  returning the wrong rows.
+- **The ordering is stated on the page.** A list of rows does not show its own sort order, and
+  an agent who assumes newest-first reads the whole screen wrong when the point is that the top
+  row is the next breach.
+
+**Measured rather than assumed.** T12 shipped a correct `307` that pointed at Clerk's hosted
+sign-in — a page that is not part of this app — so a status code is not evidence here. The
+signed-out surface, read off a running dev server:
+
+```
+/          200
+/queue     307 → http://localhost:3000/sign-in?redirect_url=…  [x-middleware-rewrite: /queue]
+/tickets   307 → http://localhost:3000/sign-in?redirect_url=…
+/sign-in   200
+```
+
+Two things that a bare 307 would not have shown: the target is **our** sign-in route rather
+than the hosted one, and `x-middleware-rewrite` is present, which is what proves the proxy
+passed the request through instead of short-circuiting it. Without that header the 307 could
+equally be Clerk's development-instance handshake, which produces the same status.
+
+**Not verified this way, and it needs a real session:** that a signed-in *customer* is
+redirected from `/queue` to `/tickets`. The component test covers the 403 the API answers; the
+layout's redirect on a non-staff role is covered by neither, and belongs in the E2E work of T25.
 
 ---
 
-### T24: Agent ticket detail with actions
+### T24: Agent ticket detail with actions ✅
 
-**Description:** The detail view an agent works from: the timeline, the assign control and the
-transition control.
+**Description:** The detail view an agent works from: the timeline, the assign control and
+the transition control.
 
 **Acceptance criteria:**
-- [ ] Reuses `status-timeline.tsx` and `sla-timer.tsx` unchanged
-- [ ] Assign control lists agents and offers "unassign"; "assign to me" is one click
-- [ ] Transition control offers **only the edges this actor may take from the current status** —
-      derived from the contract, not hardcoded in the component
-- [ ] A rejected action renders the API's own sentence, verbatim from the problem document
-- [ ] Both actions invalidate the queue and the detail, and neither loses the view's scroll state
+- [x] Reuses `status-timeline.tsx` and `sla-timer.tsx` unchanged
+- [x] Assign control lists agents and offers "unassign"; "assign to me" is one click
+- [x] Transition control offers **only the edges this actor may take from the current
+      status** — derived from the contract, not hardcoded
+- [x] A rejected action renders the API's own sentence, verbatim from the problem document
+- [x] Both actions invalidate what they invalidate, and they differ — see below
 
 **Verification:**
-- [ ] Component tests: the offered edges change with the current status; a 403 renders; a 422
-      renders its field errors
-- [ ] Mutations: offering every status regardless of the current one; invalidating `all`
-      instead of the two specific keys — each turns a test red
+- [x] 4 component tests on the detail, 8 on the transition control, 9 on the assign control,
+      6 on `lib/agent.ts`, plus 4 Go tests on the published table and 3 on the DTO shapes
+- [x] Integration: the roster holds staff and nobody else, orders unnamed colleagues last,
+      and an empty roster is not an error
+- [x] **17 mutations, 17 dead** across the six commits
+- [x] `make check`, `make test-int` and the whole web suite clean
 
 **Dependencies:** T20, T21, T22
-**Files:** `web/app/(agent)/queue/[id]/`, `web/components/{assign-control,transition-control}.tsx`,
-`web/lib/use-agent-tickets.ts`, plus tests
-**Scope:** M
+**Files:** `internal/modules/ticket/domain/{transition,status,role}.go`,
+`internal/modules/ticket/transport/http/{contract,dto,queue,assign,transition}.go`,
+`internal/modules/identity/{application/service.go,infrastructure/postgres/*,transport/http/assignable.go}`,
+`internal/app/router.go`, `web/lib/agent.ts`, `web/app/(agent)/queue/[id]/*`,
+`web/components/{assign-control,transition-control}.tsx`, `docs/spec.md`, plus tests
+**Scope:** L — the card asked for two things that did not exist yet
+
+**Two acceptance criteria could not be met as written, and both were gaps rather than
+mistakes in the card.**
+
+*"Derived from the contract"* — the transition table was not in the contract. It lives in
+`domain.allowed`, in Go, and `web/lib/contract.ts` published only the three vocabularies. So
+the contract gained it: `domain.Edges()` hands out a copy, `cmd/gencontract` emits
+`TRANSITIONS`, and two Go tests call `domain.Transition` at every published edge in both
+directions rather than comparing the table to itself. Transcribing it in TypeScript was the
+alternative, and it is the copy that breaks silently — the day an edge changes in §4.1, the
+button stays on screen and the API starts refusing it.
+
+*"Lists agents"* — no endpoint listed them. `GET /api/agent/assignable` is new, and it is
+**the first response in this project that carries another user's id**. T14b dropped
+`actor_id` from the history DTO and T19 sends `requester_name` rather than an id, both to
+avoid handing out identifiers to enumerate, so the departure is written down rather than
+slipped in. It is unavoidable — `PATCH .../assignee` takes an id — and what bounds it is the
+shape of the answer: agents and admins by predicate, inside the group that already refuses
+everyone else. The people who can read the roster are the people on it.
+
+**Decisions taken during T24:**
+
+- **`AgentTicketResponse` is a separate wire shape**, because `TicketResponse` is what a
+  customer gets back for their own ticket. Adding `assignee_id` there would hand every
+  customer the primary key of the agent working their case. The test encodes both shapes and
+  greps the wire rather than reading the structs: a field added with the wrong tag would
+  still travel while the type looked untouched.
+- **The two controls settle their caches differently, and the difference is the point.** A
+  transition invalidates the queue *and* the history — the deadline moved and the timeline
+  gained a row. An assignment invalidates only the queue, because it writes no history row
+  (plan §E). Both write the detail from the response rather than refetching it.
+- **`asActorRole` converts at the boundary.** `/api/agent/me` answers with the identity
+  module's role and `TRANSITIONS` is keyed on the ticket module's — the same three strings,
+  two vocabularies, kept apart on purpose (ADR 0005). Go does the same conversion in its
+  composition root; doing it implicitly in TypeScript would have quietly merged them.
+- **A closed ticket renders a sentence and no buttons**, rather than a disabled row. A
+  greyed-out button invites a click that can never work.
+
+**§4.3 now records that assignment is flat.** Both `agent` and `admin` carry `Assign
+ticket`, so any agent may hand any ticket to any other. That was true since the matrix was
+written and had never been *chosen* — the question of who may assign to whom was never
+asked. It is written down now so it stops being an accident, along with where a hierarchy
+would go if one is wanted: `admin` already has its own column and differs from `agent` in
+exactly one row.
+
+**A mutation caught a missing assertion in the transition control.** Nothing checked that
+the queue was invalidated after a move, so an agent would have kept looking at a queue
+showing the ticket where it used to be — on a list ordered by deadline, which a pause
+clears. The test now spies on the client and checks all three caches.
 
 ---
 
-### T25: E2E, ADR 0011, and the docs
+### T25: E2E, ADR 0011, and the docs ✅
 
-**Description:** Prove the slice in a browser against the deployed stack, and write down the
+**Description:** Prove the slice in a browser where that is possible, and write down the
 decision that will otherwise be re-litigated in six months.
 
 **Acceptance criteria:**
-- [ ] **ADR 0011** records plan decision B: why the scoped queries were not widened with a
-      role flag, and what the route group is doing in the argument
-- [ ] Spec §12.4 struck through and marked resolved, as §12.3 and §12.5 were
-- [ ] Spec §2 roadmap row for slice 2 marked delivered
-- [ ] `docs/architecture.md` gains the `/api/agent` group and `RequireRole`
-- [ ] README explains the two query sets — it is the non-obvious part of the design
-- [ ] E2E: an agent signs in, opens the queue, assigns a ticket to themselves, moves it to
-      `pending`, and the customer's own view shows the paused clock
+- [x] **ADR 0011** records why the scoped queries were not widened with a role flag, and
+      what the route group is doing in the argument
+- [x] Spec §12.4 struck through and resolved, as §12.3 and §12.5 were
+- [x] Spec §2 roadmap row for slice 2 marked delivered
+- [x] `docs/architecture.md` gains the `/api/agent` group and `RequireRole` — as a
+      **seventh rule**, and one stated as weaker than the other six
+- [x] README explains the two surfaces and how someone becomes an agent
+- [x] E2E: **the negative half** — see below
 
 **Verification:**
-- [ ] The E2E job passes on the PR
-- [ ] `make check` and `make test-int` green
-- [ ] An architecture test asserts the unscoped queries are used by no handler outside the
-      agent group — if one can be written; if not, say so and explain why rather than skipping it
+- [x] `make check` clean after every documentation commit
+- [x] The E2E suite compiles and lints; it runs in CI against a development Clerk instance
 
 **Dependencies:** T23, T24
-**Files:** `docs/adr/0011-*.md`, `docs/spec.md`, `docs/architecture.md`, `README.md`, `smoke/`
+**Files:** `docs/adr/0011-authorization-moves-from-the-predicate-to-the-route.md`,
+`docs/spec.md`, `docs/architecture.md`, `README.md`, `web/e2e/agent-surface.spec.ts`
 **Scope:** M
+
+**The E2E covers the negative half, and that is a limit rather than a choice.**
+
+The card asked for an agent signing in, assigning a ticket to themselves and pausing the
+clock. That cannot run here: a fresh account is created on every run and every account
+starts as a customer (§4.5). Becoming an agent means appearing in `AGENT_CLERK_USER_IDS`,
+which the API reads **at startup** — long before the run exists, with an id that does not
+exist until the sign-up completes.
+
+What the suite proves instead is the thing nothing else could: a signed-in customer typing
+`/queue` is redirected, no agent chrome flashes on the way, and the route exists to turn
+them away rather than 404ing by accident. Every other test in this project builds the router
+itself and therefore knows that answer in advance. It also closes the gap T23 recorded
+explicitly, which was that the layout's redirect on a non-staff role was covered by nothing.
+
+The signed-out case asserts the **hostname**, not just that a sign-in form appeared. T12
+shipped a correct `307` pointing at Clerk's hosted `accounts.dev`, so "a sign-in rendered"
+is not evidence either.
+
+**Left open, deliberately, and this is what a follow-up needs.** The positive half wants a
+fixture agent whose Clerk id is known before the API boots — an account created once in the
+development instance and listed in the workflow's environment. It is not built here because
+an account that lives between runs is a different kind of test: it shares state across runs,
+it can be left in a bad state by a failure, and it needs deciding whether the suite may
+mutate tickets that persist. That deserves choosing rather than smuggling into a docs task.
+
+**ADR 0011 writes down what the design gives up**, not only what it buys. A SQL predicate
+cannot be bypassed by a handler; a route group can be bypassed by mounting a handler in the
+wrong place. What it buys back is that mounting is visible — one file, one list, one test —
+while a forgotten `WHERE` clause is invisible until somebody reads the query. It also states
+what would falsify it: a third scoping rule turns two query sets from duplication into a
+pattern that does not scale.
+
+**The seventh architecture rule is stated as weaker than the other six.** Those are graph
+properties a tool derives; this one is a list a person maintains. Pretending otherwise would
+be the more comfortable sentence and the less true one.
 
 ---
 

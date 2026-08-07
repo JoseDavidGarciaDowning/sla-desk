@@ -197,7 +197,7 @@ func AgentTicketHandler(tickets AgentTicketReader, resolve CallerResolver) http.
 			return
 		}
 
-		httpx.WriteJSON(w, r, http.StatusOK, NewTicketResponse(row))
+		httpx.WriteJSON(w, r, http.StatusOK, NewAgentTicketResponse(row))
 	})
 }
 

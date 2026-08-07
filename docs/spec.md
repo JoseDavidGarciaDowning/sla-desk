@@ -1,7 +1,7 @@
 # Spec: Customer Support & SLA Desk
 
 Status: **Draft — awaiting review (Phase 1 gate)**
-Last updated: 2026-07-31
+Last updated: 2026-08-06
 
 ---
 
@@ -57,7 +57,7 @@ Each slice is deployable on its own. Order is by dependency, not by interest.
 
 | Slice | Content | Unlocks |
 |---|---|---|
-| 2 | Agent role, agent ticket list, assignment | RBAC beyond ownership |
+| ~~2~~ | ~~Agent role, agent ticket list, assignment~~ | **Delivered 2026-08-06** — plus the transition endpoint, which slice 1 built and never mounted |
 | ~~3~~ | ~~Ticket state machine + status history~~ | **Delivered in slice 1** — see above |
 | 4 | Comments: public replies vs internal notes | Visibility rules |
 | 5 | SLA clock pause/resume + breach worker | Background work |
@@ -306,6 +306,22 @@ RBAC matrix:
 | Post internal note | ❌ | ✅ | ✅ |
 | Read internal notes | ❌ | ✅ | ✅ |
 | Manage SLA policies | ❌ | ❌ | ✅ |
+
+**Assignment is flat, and that was never decided until now.** Both `agent` and `admin`
+carry `Assign ticket`, so any agent may hand any ticket to any other — there is no lead,
+no supervisor and no queue owner. The matrix has said this since it was written, but
+nobody chose it: the question of *who* may assign to *whom* was never asked, and the row
+above is the answer that fell out of not asking.
+
+Recorded here as a decision so it stops being an accident. The flat model is the ordinary
+one for a desk this size — an agent picks up work, or hands it to whoever knows the area —
+and it assumes a team small enough to trust with that. The alternative, where a lead
+distributes the queue and agents only take what they are given, buys load balancing at the
+cost of a role, a guard and a second bootstrap path.
+
+`admin` is where a hierarchy would go if one is ever wanted: it already exists, already has
+its own column, and differs from `agent` in exactly one row today (`Manage SLA policies`,
+slice 9). Restricting assignment to it would move one ✅ rather than redesign anything.
 
 Authorization is enforced **in the data layer, not only in handlers**: customer-scoped
 queries carry `WHERE requester_id = $1`. A missing handler check must not be sufficient
@@ -657,8 +673,17 @@ Resolved before the slice that needs them, not now.
    fresh budget. Decide when reopening is implemented.
 3. ~~**User provisioning (Slice 1).**~~ **RESOLVED 2026-07-31:** webhook primary +
    idempotent lazy upsert fallback. See §4.5.
-4. **Agent role assignment (Slice 2).** How does a user become an `agent`? Seeded in a
-   migration, or an admin-only endpoint?
+4. ~~**Agent role assignment (Slice 2).**~~ **RESOLVED 2026-08-05: neither.** A migration
+   cannot do it — it is static SQL, so granting a role from one means committing a person's
+   `clerk_user_id` to git, a value that differs between Clerk's development and production
+   instances and that names a row which does not exist yet, because the webhook writes it
+   when that person first signs up. The migration would run at deploy time, match nothing,
+   and report success. An admin-only endpoint has no bootstrap answer: somebody must already
+   be an admin to call it.
+   **`AGENT_CLERK_USER_IDS` and `ADMIN_CLERK_USER_IDS`** are read at startup and consulted
+   in `EnsureUser`, the one point both provisioning paths pass through — so the webhook and
+   the lazy upsert cannot disagree. §4.5 holds unchanged: the role still never comes from a
+   token or a payload. See `tasks/slice-2/plan.md` decision A.
 5. ~~**Deploy provider.**~~ **RESOLVED 2026-07-31:** Cloud Run + Vercel + Neon + Upstash,
    all permanent free tiers. See `tasks/plan.md` for the verified comparison against
    Heroku, Fly.io, Render, Koyeb, Railway and Oracle.
