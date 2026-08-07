@@ -54,7 +54,20 @@ test("a signed-in customer is turned away from the agent surface", async ({
   });
 
   await test.step("the queue redirects a customer to their own tickets", async () => {
-    await page.goto("/queue");
+    // `waitUntil: "commit"` rather than the default "load", and the navigation
+    // error is tolerated on purpose.
+    //
+    // Signed out, the redirect comes from the proxy before anything renders and
+    // page.goto resolves normally. Signed in it comes from the layout, which
+    // asks the API what our database says this person is and then redirects —
+    // during the render, so the document being fetched is replaced mid-flight
+    // and Chromium reports net::ERR_ABORTED for the original navigation.
+    //
+    // That abort *is* the redirect happening. What this test cares about is
+    // where the browser ended up, which the assertion below is what checks.
+    await page.goto("/queue", { waitUntil: "commit" }).catch((error: Error) => {
+      if (!error.message.includes("ERR_ABORTED")) throw error;
+    });
 
     // Redirected, not shown an error. The layout asks the API what our own
     // database says this person is — Clerk holds no role — and sends anyone
@@ -71,7 +84,13 @@ test("a signed-in customer is turned away from the agent surface", async ({
     // Any well-formed uuid. The layout turns this away before the id is ever
     // looked up, which is the point: a customer must not be able to probe
     // whether an id names a real ticket by watching the two answers differ.
-    await page.goto("/queue/11111111-2222-3333-4444-555555555555");
+    await page
+      .goto("/queue/11111111-2222-3333-4444-555555555555", {
+        waitUntil: "commit",
+      })
+      .catch((error: Error) => {
+        if (!error.message.includes("ERR_ABORTED")) throw error;
+      });
 
     await page.waitForURL("**/tickets", { timeout: 30_000 });
   });
