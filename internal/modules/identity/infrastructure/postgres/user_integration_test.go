@@ -24,7 +24,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres"
 )
@@ -229,8 +228,8 @@ func TestUnknownSubjectIsReportedAsNoSuchUser(t *testing.T) {
 	ctx, _, repo := begin(t)
 
 	_, err := repo.ByClerkID(ctx, "user_does_not_exist")
-	if !errors.Is(err, application.ErrNoSuchUser) {
-		t.Errorf("err = %v, want application.ErrNoSuchUser", err)
+	if !errors.Is(err, domain.ErrNoSuchUser) {
+		t.Errorf("err = %v, want domain.ErrNoSuchUser", err)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		t.Error("the driver's error reached the caller; the point of the translation is that it does not")
@@ -381,7 +380,7 @@ func TestGrantRoleStructurallyCannotDemote(t *testing.T) {
 	}
 
 	_, err := repo.GrantRole(ctx, "user_agent_kept", domain.RoleCustomer)
-	if !errors.Is(err, application.ErrNoSuchUser) {
+	if !errors.Is(err, domain.ErrNoSuchUser) {
 		t.Fatalf("GrantRole error = %v, want ErrNoSuchUser — nothing may be written", err)
 	}
 
@@ -419,7 +418,7 @@ func TestGrantRoleReportsAnUnknownSubject(t *testing.T) {
 	ctx, _, repo := begin(t)
 
 	_, err := repo.GrantRole(ctx, "user_never_seen", domain.RoleAgent)
-	if !errors.Is(err, application.ErrNoSuchUser) {
+	if !errors.Is(err, domain.ErrNoSuchUser) {
 		t.Errorf("GrantRole error = %v, want ErrNoSuchUser", err)
 	}
 }

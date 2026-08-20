@@ -16,7 +16,6 @@ import (
 	"github.com/clerk/clerk-sdk-go/v2/jwks"
 	"github.com/clerk/clerk-sdk-go/v2/user"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 )
 
@@ -75,25 +74,35 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 	return clerkhttp.WithHeaderAuthorization(opts...)
 }
 
-// identityProvider reads users from Clerk's Backend API.
-type identityProvider struct {
+// IdentityProvider reads users from Clerk's Backend API.
+//
+// Exported, and returning it concretely rather than as the interface it
+// satisfies, because the feature that consumes it also owns the mapper this
+// package holds: the webhook is handed a Clerk user in its payload and has to
+// turn it into a domain.Identity. Naming provision.Identities here would point
+// this package at that one while that one points back, and the cycle is real
+// rather than stylistic.
+//
+// "Accept interfaces, return structs" is the usual phrasing of the rule, and
+// this is the case that shows why it is not only taste. The port is asserted
+// where it is consumed — identity.NewWith takes a provision.Identities, so a
+// provider that stopped satisfying it fails to compile at the call site.
+type IdentityProvider struct {
 	users *user.Client
 }
 
-var _ application.IdentityProvider = (*identityProvider)(nil)
-
-// NewIdentityProvider returns the production IdentityProvider.
+// NewIdentityProvider builds the production provider.
 //
 // It is only ever called for a subject we have no row for, which is once per
 // user in the life of the system, so the round trip does not sit on the hot
 // path.
-func NewIdentityProvider(cfg Config) application.IdentityProvider {
-	return &identityProvider{
+func NewIdentityProvider(cfg Config) *IdentityProvider {
+	return &IdentityProvider{
 		users: user.NewClient(&clerksdk.ClientConfig{BackendConfig: cfg.backendConfig()}),
 	}
 }
 
-func (c *identityProvider) FetchIdentity(ctx context.Context, clerkUserID string) (domain.Identity, error) {
+func (c *IdentityProvider) FetchIdentity(ctx context.Context, clerkUserID string) (domain.Identity, error) {
 	u, err := c.users.Get(ctx, clerkUserID)
 	if err != nil {
 		return domain.Identity{}, fmt.Errorf("fetching clerk user %s: %w", clerkUserID, err)

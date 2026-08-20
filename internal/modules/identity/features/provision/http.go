@@ -1,4 +1,4 @@
-package http
+package provision
 
 import (
 	"context"
@@ -16,21 +16,15 @@ import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httperr"
 )
 
-// WebhookPath is where Clerk posts user events.
-//
-// It goes straight to the Go API rather than through Next.js, which would add a
-// hop for no reason, and it is the one route that must be mounted outside
-// RequireAuth: Clerk sends a Svix signature, not a session JWT.
-const WebhookPath = "/api/webhooks/clerk"
-
-// maxWebhookBody caps what we will read before verifying anything. Clerk's user
+// maxBody caps what we will read before verifying anything. Clerk's user
 // events are a few kilobytes; anything near this is not one.
-const maxWebhookBody = 1 << 20 // 1 MiB
+const maxBody = 1 << 20 // 1 MiB
 
-// Provisioner is the slice of the module this handler needs. Declared here for
-// the same reason UserSource is: a webhook test should exercise signature
+// UseCase is what the adapter needs: the one call that writes the row.
+//
+// An interface rather than *Handler so a webhook test can exercise signature
 // verification and payload handling without a database behind it.
-type Provisioner interface {
+type UseCase interface {
 	Provision(ctx context.Context, clerkUserID string, id domain.Identity) (domain.User, error)
 }
 
@@ -41,12 +35,12 @@ type clerkEvent struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// WebhookHandler verifies and applies Clerk user events.
+// WebhookHTTP verifies and applies Clerk user events.
 //
 // It returns an error rather than a handler that fails at request time, so a
 // bad signing secret stops the deploy instead of turning into 500s nobody is
 // watching.
-func WebhookHandler(signingSecret string, p Provisioner) (http.Handler, error) {
+func WebhookHTTP(signingSecret string, p UseCase) (http.Handler, error) {
 	verifier, err := svix.NewWebhook(signingSecret)
 	if err != nil {
 		return nil, fmt.Errorf("clerk webhook: %w", err)
@@ -55,7 +49,7 @@ func WebhookHandler(signingSecret string, p Provisioner) (http.Handler, error) {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The signature covers the exact bytes Clerk sent, so the body has to be
 		// read whole and verified before anything is decoded from it.
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBody))
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 		if err != nil {
 			httperr.Write(w, http.StatusBadRequest, "unreadable body")
 			return

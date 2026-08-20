@@ -99,7 +99,7 @@ func run() error {
 	slaModule := sla.New(pool)
 	ticketModule := ticket.New(pool,
 		app.SLAPolicies{Policies: slaModule.Policies},
-		app.AssigneeDirectory{Users: identityModule.Service},
+		app.AssigneeDirectory{Users: identityModule.Assignable},
 	)
 
 	handler, err := app.NewRouter(cfg, app.Deps{

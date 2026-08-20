@@ -1,4 +1,4 @@
-package application
+package provision_test
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/provision"
 )
 
 // stubRepository records what the service asked it to write, so a test can
@@ -21,14 +22,7 @@ type stubRepository struct {
 
 func (s *stubRepository) ByClerkID(_ context.Context, _ string) (domain.User, error) {
 	if s.existing == nil {
-		return domain.User{}, ErrNoSuchUser
-	}
-	return *s.existing, nil
-}
-
-func (s *stubRepository) ByID(_ context.Context, _ uuid.UUID) (domain.User, error) {
-	if s.existing == nil {
-		return domain.User{}, ErrNoSuchUser
+		return domain.User{}, domain.ErrNoSuchUser
 	}
 	return *s.existing, nil
 }
@@ -36,10 +30,6 @@ func (s *stubRepository) ByID(_ context.Context, _ uuid.UUID) (domain.User, erro
 func (s *stubRepository) Upsert(_ context.Context, clerkUserID string, id domain.Identity, role domain.Role) (domain.User, error) {
 	s.upsertedRole = &role
 	return domain.User{ID: uuid.New(), ClerkUserID: clerkUserID, Email: id.Email, Name: id.Name, Role: role}, nil
-}
-
-func (s *stubRepository) Assignable(context.Context) ([]domain.User, error) {
-	return nil, nil
 }
 
 func (s *stubRepository) GrantRole(_ context.Context, clerkUserID string, role domain.Role) (domain.User, error) {
@@ -65,7 +55,7 @@ func grantsFor(t *testing.T, agents, admins []string) domain.RoleGrants {
 
 func TestAnUngrantedSubjectIsProvisionedAsACustomer(t *testing.T) {
 	repo := &stubRepository{}
-	svc := NewService(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, nil))
+	svc := provision.New(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, nil))
 
 	user, err := svc.EnsureUser(context.Background(), "user_2someone")
 	if err != nil {
@@ -85,7 +75,7 @@ func TestAnUngrantedSubjectIsProvisionedAsACustomer(t *testing.T) {
 // agent signs in and is refused the routes they were granted.
 func TestAGrantedSubjectIsProvisionedWithTheGrantedRole(t *testing.T) {
 	repo := &stubRepository{}
-	svc := NewService(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, []string{"user_2admin"}))
+	svc := provision.New(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, []string{"user_2admin"}))
 
 	for _, c := range []struct {
 		subject string
@@ -117,7 +107,7 @@ func TestAnAlreadyProvisionedCustomerIsPromotedOnTheNextRequest(t *testing.T) {
 	repo := &stubRepository{existing: &domain.User{
 		ID: uuid.New(), ClerkUserID: "user_2agent", Role: domain.RoleCustomer,
 	}}
-	svc := NewService(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, nil))
+	svc := provision.New(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, nil))
 
 	user, err := svc.EnsureUser(context.Background(), "user_2agent")
 	if err != nil {
@@ -138,7 +128,7 @@ func TestAnAgentAlreadyHoldingTheGrantedRoleIsNotWrittenAgain(t *testing.T) {
 	repo := &stubRepository{existing: &domain.User{
 		ID: uuid.New(), ClerkUserID: "user_2agent", Role: domain.RoleAgent,
 	}}
-	svc := NewService(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, nil))
+	svc := provision.New(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, nil))
 
 	if _, err := svc.EnsureUser(context.Background(), "user_2agent"); err != nil {
 		t.Fatalf("EnsureUser: %v", err)
@@ -157,7 +147,7 @@ func TestRemovingASubjectFromTheListDoesNotDemoteThem(t *testing.T) {
 	repo := &stubRepository{existing: &domain.User{
 		ID: uuid.New(), ClerkUserID: "user_2agent", Role: domain.RoleAgent,
 	}}
-	svc := NewService(repo, stubIdentityProvider{}, grantsFor(t, nil, nil))
+	svc := provision.New(repo, stubIdentityProvider{}, grantsFor(t, nil, nil))
 
 	user, err := svc.EnsureUser(context.Background(), "user_2agent")
 	if err != nil {
@@ -177,7 +167,7 @@ func TestRemovingASubjectFromTheListDoesNotDemoteThem(t *testing.T) {
 // would determine whether a listed agent got their role.
 func TestProvisionAppliesTheSameGrantAsEnsureUser(t *testing.T) {
 	repo := &stubRepository{}
-	svc := NewService(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, nil))
+	svc := provision.New(repo, stubIdentityProvider{}, grantsFor(t, []string{"user_2agent"}, nil))
 
 	user, err := svc.Provision(context.Background(), "user_2agent", domain.Identity{Email: "a@example.com"})
 	if err != nil {

@@ -5,8 +5,8 @@ import (
 
 	"github.com/google/uuid"
 
-	identityapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	identityassignable "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/assignable"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 	ticketports "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
@@ -73,11 +73,11 @@ func actorRole(r identitydomain.Role) ticketdomain.Role {
 // called identity exists (docs/adr/0005). This file is the one place allowed to
 // know both.
 type AssigneeDirectory struct {
-	Users *identityapp.Service
+	Users *identityassignable.Handler
 }
 
 var _ ticketports.AssigneeDirectory = AssigneeDirectory{}
 
 func (d AssigneeDirectory) CanHoldTickets(ctx context.Context, id uuid.UUID) (bool, error) {
-	return d.Users.MayHoldTickets(ctx, id)
+	return d.Users.CanHoldTickets(ctx, id)
 }
