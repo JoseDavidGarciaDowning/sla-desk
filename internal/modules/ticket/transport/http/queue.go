@@ -16,11 +16,6 @@ import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httpx"
 )
 
-// QueuePath is the agent queue, mounted under the agent prefix by the
-// composition root. It is not reachable from anywhere else, and that placement
-// is the authorization: the query behind it has no requester predicate.
-const QueuePath = "/tickets"
-
 // PausedPosition is where a ticket with no deadline sorts.
 //
 // A paused ticket cannot breach (docs/spec.md §4.2), so it belongs after every
@@ -63,12 +58,12 @@ func QueueTicketsHandler(queue QueueReader, resolve CallerResolver) http.Handler
 		// three bad ones is told about three rather than about the first.
 		filterErrs := make(map[string]string)
 
-		if raw, problem := filterParam(query, "status", validStatuses); problem != "" {
+		if raw, problem := FilterParam(query, "status", ValidStatuses); problem != "" {
 			filterErrs["status"] = problem
 		} else {
 			params.Status = (*domain.Status)(raw)
 		}
-		if raw, problem := filterParam(query, "priority", validPriorities); problem != "" {
+		if raw, problem := FilterParam(query, "priority", ValidPriorities); problem != "" {
 			filterErrs["priority"] = problem
 		} else {
 			params.Priority = (*domain.Priority)(raw)
@@ -106,7 +101,7 @@ func QueueTicketsHandler(queue QueueReader, resolve CallerResolver) http.Handler
 		}
 
 		if raw := query.Get("cursor"); raw != "" {
-			dueAt, id, err := decodeCursor(raw)
+			dueAt, id, err := DecodeCursor(raw)
 			if err != nil {
 				httperr.Write(w, http.StatusBadRequest, "the cursor is not one this API issued")
 				return
@@ -117,7 +112,7 @@ func QueueTicketsHandler(queue QueueReader, resolve CallerResolver) http.Handler
 
 		// One more row than asked for, so "is there another page" is answered
 		// without counting the table.
-		limit := pageSize(query.Get("limit"))
+		limit := PageSize(query.Get("limit"))
 		params.PageSize = limit + 1
 
 		rows, err := queue.Queue(r.Context(), params)
@@ -135,7 +130,7 @@ func QueueTicketsHandler(queue QueueReader, resolve CallerResolver) http.Handler
 			// paused ticket is the sentinel and not its absent deadline. A
 			// cursor built from NULL would make the next page's row comparison
 			// NULL, and every paused ticket would silently disappear from it.
-			cursor := encodeCursor(queuePosition(last.SLADueAt), last.ID)
+			cursor := EncodeCursor(queuePosition(last.SLADueAt), last.ID)
 			next = &cursor
 		}
 
@@ -188,7 +183,7 @@ func AgentTicketHandler(tickets AgentTicketReader, resolve CallerResolver) http.
 
 		row, err := tickets.Detail(r.Context(), id)
 		if err != nil {
-			if errors.Is(err, application.ErrTicketNotFound) {
+			if errors.Is(err, domain.ErrTicketNotFound) {
 				httperr.Write(w, http.StatusNotFound, "no such ticket")
 				return
 			}
@@ -223,7 +218,7 @@ func AgentTicketHistoryHandler(tickets AgentTicketReader, resolve CallerResolver
 
 		rows, err := tickets.Timeline(r.Context(), id)
 		if err != nil {
-			if errors.Is(err, application.ErrTicketNotFound) {
+			if errors.Is(err, domain.ErrTicketNotFound) {
 				httperr.Write(w, http.StatusNotFound, "no such ticket")
 				return
 			}

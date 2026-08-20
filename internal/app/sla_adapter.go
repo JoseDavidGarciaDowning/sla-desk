@@ -6,8 +6,8 @@ import (
 
 	slaapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
-	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	ticketports "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 )
 
 // This file and identity.go are the only places in the codebase that name two
@@ -28,9 +28,9 @@ type SLAPolicies struct {
 	Policies *slaapp.Policies
 }
 
-var _ ticketapp.SLAPolicies = SLAPolicies{}
+var _ ticketports.SLAPolicies = SLAPolicies{}
 
-func (s SLAPolicies) ForPriority(ctx context.Context, p ticketdomain.Priority) (ticketapp.SLAClock, error) {
+func (s SLAPolicies) ForPriority(ctx context.Context, p ticketdomain.Priority) (ticketports.SLAClock, error) {
 	// ticketdomain.Priority and sladomain.Priority carry the same four strings
 	// and are different types on purpose: one is how urgent a requester says a
 	// ticket is, the other is the key a budget is filed under. Both are
@@ -46,7 +46,7 @@ func (s SLAPolicies) ForPriority(ctx context.Context, p ticketdomain.Priority) (
 // ForPolicy keeps its name: it takes a policy id and returns a clock, so both
 // ends of the trip are in the signature. Only the SLA module's own method, which
 // took a policy id and returned a policy, was renamed to ByID.
-func (s SLAPolicies) ForPolicy(ctx context.Context, id int64) (ticketapp.SLAClock, error) {
+func (s SLAPolicies) ForPolicy(ctx context.Context, id int64) (ticketports.SLAClock, error) {
 	policy, err := s.Policies.ByID(ctx, id)
 	if err != nil {
 		return nil, translateSLAError(err)
@@ -61,7 +61,7 @@ func (s SLAPolicies) ForPolicy(ctx context.Context, id int64) (ticketapp.SLACloc
 // original is kept wrapped so the cause still reaches the logs.
 func translateSLAError(err error) error {
 	if errors.Is(err, slaapp.ErrNoPolicyForPriority) {
-		return errors.Join(ticketapp.ErrNoSLAPolicy, err)
+		return errors.Join(ticketdomain.ErrNoSLAPolicy, err)
 	}
 	return err
 }
@@ -75,11 +75,11 @@ type slaClock struct {
 	policy sladomain.Policy
 }
 
-var _ ticketapp.SLAClock = slaClock{}
+var _ ticketports.SLAClock = slaClock{}
 
 func (c slaClock) PolicyID() int64 { return c.policy.ID }
 
-func (c slaClock) Compute(timeline []ticketdomain.Phase) (ticketapp.ClockState, error) {
+func (c slaClock) Compute(timeline []ticketdomain.Phase) (ticketports.ClockState, error) {
 	phases := make([]sladomain.Phase, len(timeline))
 	for i, p := range timeline {
 		phases[i] = sladomain.Phase{At: p.At, Running: p.Running}
@@ -87,10 +87,10 @@ func (c slaClock) Compute(timeline []ticketdomain.Phase) (ticketapp.ClockState, 
 
 	state, err := sladomain.Reconstruct(c.policy, phases)
 	if err != nil {
-		return ticketapp.ClockState{}, err
+		return ticketports.ClockState{}, err
 	}
 
-	return ticketapp.ClockState{
+	return ticketports.ClockState{
 		BudgetUsed:   state.BudgetUsed,
 		RunningSince: state.RunningSince,
 		DueAt:        state.DueAt,

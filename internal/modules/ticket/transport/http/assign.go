@@ -16,9 +16,6 @@ import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httpx"
 )
 
-// AssigneeSuffix is appended to a ticket's path in the agent group.
-const AssigneeSuffix = "/assignee"
-
 // TicketAssigner is the slice of the module this handler needs.
 type TicketAssigner interface {
 	Assign(ctx context.Context, ticketID uuid.UUID, assignee *uuid.UUID) (domain.Ticket, error)
@@ -59,7 +56,7 @@ func AssignTicketHandler(tickets TicketAssigner, resolve CallerResolver) http.Ha
 		}
 
 		var body map[string]json.RawMessage
-		if err := httpx.DecodeJSON(w, r, &body, maxTicketBody); err != nil {
+		if err := httpx.DecodeJSON(w, r, &body, MaxBodyBytes); err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the request body is not valid JSON")
 			return
 		}
@@ -111,7 +108,7 @@ func AssignTicketHandler(tickets TicketAssigner, resolve CallerResolver) http.Ha
 				assignField: "that user may not hold tickets",
 			})
 			return
-		case errors.Is(err, application.ErrTicketNotFound):
+		case errors.Is(err, domain.ErrTicketNotFound):
 			httperr.Write(w, http.StatusNotFound, "no such ticket")
 			return
 		case err != nil:

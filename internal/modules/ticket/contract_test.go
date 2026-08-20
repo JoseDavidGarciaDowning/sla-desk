@@ -1,6 +1,16 @@
-package http_test
+// The contract published to the frontend, tested against what the module
+// actually enforces.
+//
+// It lives at the module root rather than in transport/http because it spans
+// the whole module: the bounds come from transport, the validation from
+// features/create, the filters from features/list. That makes it a test of the
+// wired module, and the module's own package is where those go — the same place
+// identity keeps authentication_test.go. A feature may not import its
+// neighbours; a test of all of them together is not a feature.
+package ticket_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,7 +20,9 @@ import (
 	"testing"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
-
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/create"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/list"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/tickettest"
 	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 )
 
@@ -57,10 +69,10 @@ func TestContractBoundsAreTheOnesValidationEnforces(t *testing.T) {
 	for _, tc := range []struct {
 		field string
 		limit int
-		set   func(*tickethttp.CreateTicketRequest, string)
+		set   func(*create.Request, string)
 	}{
-		{"title", c.MaxTitleLength, func(r *tickethttp.CreateTicketRequest, s string) { r.Title = s }},
-		{"description", c.MaxDescriptionLength, func(r *tickethttp.CreateTicketRequest, s string) { r.Description = s }},
+		{"title", c.MaxTitleLength, func(r *create.Request, s string) { r.Title = s }},
+		{"description", c.MaxDescriptionLength, func(r *create.Request, s string) { r.Description = s }},
 	} {
 		t.Run(tc.field, func(t *testing.T) {
 			if tc.limit <= 0 {
@@ -157,8 +169,8 @@ func TestContractStatusesAreAcceptedAsFilters(t *testing.T) {
 	}
 
 	for _, status := range c.Statuses {
-		reader := &fakeReader{}
-		handler, r := getRequest(t, tickethttp.ListTicketsHandler(reader, resolverFor(customer(t))),
+		reader := &fakeLister{}
+		handler, r := tickettest.GetRequest(t, list.HTTP(reader, tickettest.ResolverFor(tickettest.Customer(t))),
 			"/api/tickets", "/api/tickets?status="+string(status))
 
 		rec := httptest.NewRecorder()
@@ -312,4 +324,26 @@ func TestEdgesCannotBeMutatedThroughTheReturnedMap(t *testing.T) {
 	if _, ok := second[domain.StatusOpen][domain.StatusPending]; !ok {
 		t.Error("open lost an edge through a caller's copy")
 	}
+}
+
+// validCreateTicket is a body that passes every rule, so a case about one field
+// does not have to restate the other three.
+func validCreateTicket() create.Request {
+	return create.Request{
+		Title:       "Cannot download my invoice",
+		Description: "The download button returns a 500.",
+		Category:    domain.CategoryBilling,
+		Priority:    domain.PriorityNormal,
+	}
+}
+
+// fakeLister answers the list endpoint so the filter cases can assert what the
+// API accepts without a database behind it.
+type fakeLister struct {
+	page []domain.Ticket
+	err  error
+}
+
+func (f *fakeLister) Handle(_ context.Context, _ list.Filter) ([]domain.Ticket, error) {
+	return f.page, f.err
 }

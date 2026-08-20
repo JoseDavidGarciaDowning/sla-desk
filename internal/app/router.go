@@ -119,7 +119,7 @@ func NewRouter(cfg config.Config, deps Deps) (http.Handler, error) {
 		// The module mounts its own routes on a router that already carries
 		// authentication. It cannot mount them anywhere else, which is what
 		// stops an endpoint being added outside this group by accident.
-		tickethttp.Routes(r, deps.Tickets.Service, callerFromContext)
+		tickethttp.Routes(r, deps.Tickets.HTTPHandlers(callerFromContext))
 
 		// Everything an agent may do lives under one prefix, behind one role
 		// check. Slice 2's reads have no requester predicate in their SQL —
