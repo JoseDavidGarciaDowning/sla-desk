@@ -34,31 +34,57 @@ internal/
 db/migrations/            goose. Global: one database, one sequence
 ```
 
-Every module has the same four layers:
+Every module has the same shape:
 
 ```
 internal/modules/<module>/
 ├── domain/               entities, value objects, rules, errors. Imports nothing
-├── application/          use cases, and the contracts this module needs outside
+├── features/             ONE DIRECTORY PER USE CASE
+│   └── <use case>/       handler.go, and dto.go / http.go when it needs them
+├── ports/                contracts more than one feature shares  (identity has none)
 ├── infrastructure/
 │   └── postgres/
 │       ├── sqlc.yaml     this module's tables and nobody else's
-│       ├── queries/*.sql
-│       └── <module>db/   generated
-├── transport/http/       handlers, DTOs, routes   (sla has none — nothing calls it directly)
-└── module.go             the front door
+│       ├── queries/*.sql SQL we write
+│       └── generated/    SQLC output. Package <module>db. Never edited by hand
+├── transport/http/       paths, the route table, shared wire shapes, middleware
+│                         — and no endpoint  (sla has none: nothing calls it directly)
+└── module.go             the front door. Builds the features, hands them to the routes
 ```
+
+**`features/` is where a use case lives, and the answer does not depend on the module.**
+`ticket` has seven, `identity` three, `sla` one. A module with a single feature is the
+convention working, not ceremony: nobody has to decide per module whether it is big enough
+to deserve the directory, and nobody has to answer "why is sla different" later.
+
+What varies is how much a feature is split *inside*:
+
+```
+features/me/          http.go                          — calls no use case
+features/get/         handler.go http.go agent.go      — two guarantees, side by side
+features/create/      handler.go dto.go http.go        — plus a request contract
+```
+
+Add a file when the code in it stops fitting; never to complete a pattern.
 
 ## Where does this code go?
 
 | If it… | it belongs in |
 |---|---|
 | is a rule about what a ticket *is* | `modules/ticket/domain` |
-| orchestrates a use case, or names something outside the module | `modules/ticket/application` |
+| is something the system **does** | `modules/ticket/features/<use case>/` |
+| is the request or response shape of **one** endpoint | that endpoint's feature |
+| is a contract **one** feature needs from outside | that feature, beside its handler |
+| is a contract **more than one** feature needs | `modules/<m>/ports` |
+| is a wire shape **more than one** feature returns | `modules/<m>/transport/http` |
+| decides whether a request may proceed at all (middleware) | `modules/<m>/transport/http` |
 | talks to Postgres, Clerk, or any other system | `modules/<m>/infrastructure` |
-| turns a request into a call and a result into a response | `modules/<m>/transport/http` |
 | connects two modules, or decides what a route sits behind | `internal/app` |
 | decides how bytes get onto the wire without knowing what they mean | `internal/platform` |
+
+There is no `application` layer any more, and no `services/`, `controllers/`,
+`repositories/` or `dto/` directory anywhere. A use case is not a technical layer; it is a
+thing the system does, and it lives in one directory named after it.
 
 The `platform` row is the one that gets abused, so it has a sharper test. The admission
 question is **not** "is it used more than once" — that is a fact about the call graph, not
@@ -72,10 +98,11 @@ it.
 
 ## The rules
 
-Six, all enforced. Each was watched failing before it was trusted.
+Nine. Eight are enforced, and each was watched failing before it was trusted.
 
 1. **A module never imports another module.** What it needs, it declares as a contract in
-   its own `application` or `transport` layer, and `internal/app` connects the two ends.
+   its own `ports` (or in the one feature that needs it), and `internal/app` connects the
+   two ends.
 2. **A domain package imports nothing** — no database, no HTTP, no router, no SDK, not even
    our own `platform`. Everything it needs is an argument.
 3. **`internal/app` is a sink.** Everything may be reached from it; nothing may reach it
@@ -85,10 +112,25 @@ Six, all enforced. Each was watched failing before it was trusted.
    that answers a request, and stay there only while they depend on none of them.
 6. **Each module owns its own sqlc config.** There is no root `sqlc.yaml`, and a new one
    fails the build.
+7. **A feature never reaches another feature** — not directly, and not through a helper two
+   hops away. This is the vertical slice invariant: a use case you cannot read without
+   opening its neighbours is a use case in a layer again, whatever the directory is called.
 
-Slice 2 added a seventh, and it is the only one this file cannot enforce with a test:
+   When two features genuinely need the same thing, it moves *below* them both — a rule into
+   the module's `domain`, a contract into its `ports`, a wire shape into its
+   `transport/http`. Never sideways.
+8. **A module's `transport/http` holds no endpoint.** The test is "no function returns an
+   `http.Handler`", not anything about names, because that is what an endpoint *is* here and
+   a name can be chosen to slip past. Middleware is exempt by construction: it returns
+   `func(http.Handler) http.Handler`.
 
-7. **A query with no requester predicate is mounted under `/api/agent` and nowhere else.**
+   This is what stops the old arrangement growing back one handler at a time — which is how
+   it would grow back, because adding a handler next to the route table is always the
+   smaller diff.
+
+Slice 2 added one more, and it is the only one this file cannot enforce with a test:
+
+9. **A query with no requester predicate is mounted under `/api/agent` and nowhere else.**
    The customer's reads carry `WHERE requester_id = $1`; the agent's carry nothing, because
    an agent reads tickets that are not theirs. What stands in for the predicate is the route
    group, which sits behind `RequireRole(agent, admin)` — see
@@ -96,11 +138,20 @@ Slice 2 added a seventh, and it is the only one this file cannot enforce with a 
 
    It is checked by a test that walks **every path under the prefix** as a customer and
    requires 403 on each, driven from a list in the test file so a route added later is
-   covered without the test being edited. That is weaker than the six above: those are
+   covered without the test being edited. That is weaker than the eight above: those are
    graph properties a tool derives, this is a list a person maintains. The compensation is
    that chi routes before it runs a group's middleware, so an unmounted path answers 404
    while a mounted one answers 403 — the same test therefore proves each route is protected
    *and* that it exists.
+
+Rule 9 is readable because each module keeps **one route table**, in
+`transport/http/routes.go`, listing the customer's routes and the agent's separately. Those
+two lists are the only place the answer to "what is behind the role check" exists. The table
+takes handlers that are **already built** — the module's front door constructs the features
+and hands them over — which is what lets it stay free of any feature import. A route table
+that constructed its handlers would import every feature, and every feature imports
+`transport/http` for the wire shapes they share; that is a cycle, and it is why the
+direction is one-way rather than a matter of taste.
 
 ## How they are enforced, and why it takes two things
 
@@ -160,8 +211,8 @@ reaching a CHECK constraint at write time.
 
 **No I/O belonging to another module happens inside our transaction.**
 
-The ticket module's `Service` resolves an SLA clock *before* the repository opens its
-transaction, and hands the repository a value whose `Compute` is pure. The repository
+The ticket module's `create` and `transition` handlers resolve an SLA clock *before* the
+repository opens its transaction, and hand the repository a value whose `Compute` is pure. The repository
 cannot reach the SLA module even by accident, because it is never given anything that
 could.
 
@@ -197,7 +248,7 @@ told to skip.
 Almost always the answer is one of:
 
 - **Declare a contract.** You need something another module has: say what you need, in your
-  own vocabulary, in your own `application` or `transport` layer. `internal/app` supplies
+  own vocabulary, in your own `ports` or in the feature that needs it. `internal/app` supplies
   it.
 - **Move the code.** It is in the wrong layer, or `platform` has grown something that knows
   what a ticket is.

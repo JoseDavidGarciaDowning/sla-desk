@@ -1,6 +1,6 @@
 # Implementation Plan: Vertical Slices — where a use case lives
 
-Status: **Approved**
+Status: **Delivered** — six PRs, 2026-08-20
 Architecture: [`docs/architecture.md`](../../docs/architecture.md)
 Last updated: 2026-08-20
 

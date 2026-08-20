@@ -2,7 +2,10 @@ package architecture_test
 
 import (
 	"errors"
+	"go/ast"
 	"go/build"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"slices"
@@ -350,4 +353,194 @@ func moduleRoot(t *testing.T) string {
 
 func shortName(importPath string) string {
 	return strings.TrimPrefix(importPath, modulePath+"/")
+}
+
+// A feature never reaches another feature.
+//
+// This is the vertical slice invariant, and it is the one rule the refactor
+// that created features/ actually needs. Without it the slices grow into each
+// other and the filesystem stops answering the question it was reorganised to
+// answer: a use case you cannot read without opening its neighbours is a use
+// case in a layer again, whatever the directory is called.
+//
+// Transitive, like the module rule above and for the same reason. A feature
+// that reaches another one through a shared helper has broken the boundary
+// exactly as thoroughly as a direct import, and that is the shape these
+// violations take — nobody writes the obvious one.
+//
+// What a feature *may* import is its own module's domain, its ports, and its
+// transport package for the wire vocabulary more than one of them returns. The
+// arrow points one way there and is load-bearing: transport takes built
+// handlers rather than constructing them, precisely so it never has to name a
+// feature and close a cycle.
+//
+// The escape hatch, when two features genuinely need the same thing, is to move
+// that thing below both of them — into the domain if it is a rule, into ports
+// if it is a contract, into transport if it is a wire shape. Not to import
+// sideways.
+func TestNoFeatureReachesAnotherFeature(t *testing.T) {
+	root := moduleRoot(t)
+
+	for _, pkg := range packagesUnder(t, root, "internal/modules") {
+		owner := featureOf(pkg)
+		if owner == "" {
+			continue
+		}
+
+		for imported := range transitiveImports(t, root, pkg) {
+			other := featureOf(imported)
+			if other == "" || other == owner {
+				continue
+			}
+			t.Errorf("%s reaches %s\n\n"+
+				"A feature is a use case, and a use case that needs its neighbour is\n"+
+				"not one. Whatever they share belongs below them both: a rule in the\n"+
+				"module's domain, a contract in its ports, a wire shape in its\n"+
+				"transport package.",
+				shortName(pkg), shortName(imported))
+		}
+	}
+}
+
+// A module's transport package holds no endpoint.
+//
+// Every use case owns its own HTTP adapter, under features/<use case>/, so that
+// "where is creating a ticket" has one answer. This is what stops the old
+// arrangement growing back one handler at a time — which is how it would grow
+// back, because adding a handler next to the route table is always the smaller
+// diff.
+//
+// The test is "returns an http.Handler" rather than anything about names,
+// because that is what an endpoint *is* here and a name can be chosen to slip
+// past. Middleware is exempt by construction rather than by exception: it
+// returns func(http.Handler) http.Handler, which is a different type, and
+// RequireAuth and RequireRole are not use cases — they decide whether a request
+// may proceed, before any endpoint is chosen.
+func TestTransportHoldsNoEndpoint(t *testing.T) {
+	root := moduleRoot(t)
+
+	for _, pkg := range packagesUnder(t, root, "internal/modules") {
+		if !strings.Contains(pkg, "/transport/") {
+			continue
+		}
+
+		dir := filepath.Join(root, strings.TrimPrefix(pkg, modulePath))
+		for _, fn := range functionsReturningHTTPHandler(t, dir) {
+			t.Errorf("%s returns an http.Handler from %s\n\n"+
+				"An endpoint belongs to the use case it serves, in\n"+
+				"features/<use case>/. This package holds what the endpoints share —\n"+
+				"the paths, the route table, the wire shapes, the middleware — and\n"+
+				"nothing that answers a request itself.",
+				fn, shortName(pkg))
+		}
+	}
+}
+
+// Every module organises its use cases under features/.
+//
+// The convention is worth more than the directory it costs a small module. An
+// agent that has to decide *whether* a module gets features/ will decide
+// wrongly, and "why is sla different" is a question with no good answer in a
+// file the next person reads. sla has one feature and that is the rule working,
+// not an exception to it.
+//
+// A module with no use cases at all would legitimately fail this, and none
+// exists. If one is ever added, the honest fix is to ask what it is for.
+func TestEveryModuleOrganisesItsUseCasesUnderFeatures(t *testing.T) {
+	root := moduleRoot(t)
+
+	entries, err := os.ReadDir(filepath.Join(root, "internal", "modules"))
+	if err != nil {
+		t.Fatalf("reading the modules directory: %v", err)
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		features := filepath.Join(root, "internal", "modules", e.Name(), "features")
+		if _, err := os.Stat(features); err != nil {
+			t.Errorf("module %s has no features/ directory\n\n"+
+				"Use cases live in features/<use case>/ in every module, however few\n"+
+				"it has. One feature is not a reason to skip the directory; it is the\n"+
+				"convention answering the question before anyone asks it.", e.Name())
+		}
+	}
+}
+
+// featureOf returns the package that owns importPath as a feature, or "" when
+// importPath is not inside one.
+//
+// It returns the feature's own root rather than a bool, so a package and its
+// (hypothetical) subpackages count as the same feature and comparing two
+// results answers "different features?" directly.
+func featureOf(importPath string) string {
+	rest, ok := strings.CutPrefix(importPath, modulePath+"/internal/modules/")
+	if !ok {
+		return ""
+	}
+
+	module, rest, ok := strings.Cut(rest, "/features/")
+	if !ok {
+		return ""
+	}
+
+	feature, _, _ := strings.Cut(rest, "/")
+	return module + "/features/" + feature
+}
+
+// functionsReturningHTTPHandler names every function in dir whose result list
+// contains net/http's Handler.
+//
+// It reads the syntax rather than the type information, which is enough here
+// and keeps the test free of a type checker: the result is written in the
+// source as http.Handler, and a package that aliased net/http to something else
+// to get around this would be doing so deliberately.
+//
+// The file list comes from build.ImportDir rather than parser.ParseDir — the
+// latter is deprecated because it ignores build tags, and it is the same walker
+// the rules above already use. Test files are excluded: a handler built inside
+// a test is a fixture, not an endpoint somebody can reach.
+func functionsReturningHTTPHandler(t *testing.T, dir string) []string {
+	t.Helper()
+
+	pkg, err := build.ImportDir(dir, 0)
+	var noGo *build.NoGoError
+	switch {
+	case errors.As(err, &noGo):
+		return nil
+	case err != nil:
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+
+	fset := token.NewFileSet()
+
+	var found []string
+	for _, name := range pkg.GoFiles {
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Type.Results == nil {
+				continue
+			}
+			for _, result := range fn.Type.Results.List {
+				sel, ok := result.Type.(*ast.SelectorExpr)
+				if !ok {
+					continue
+				}
+				ident, ok := sel.X.(*ast.Ident)
+				if !ok || ident.Name != "http" || sel.Sel.Name != "Handler" {
+					continue
+				}
+				found = append(found, fn.Name.Name)
+			}
+		}
+	}
+
+	slices.Sort(found)
+	return found
 }
