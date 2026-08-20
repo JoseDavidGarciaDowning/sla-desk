@@ -64,7 +64,7 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 		}
 
 		var body transitionRequest
-		if err := decodeBody(w, r, &body); err != nil {
+		if err := httpx.DecodeJSON(w, r, &body, maxTicketBody); err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the request body is not valid JSON")
 			return
 		}

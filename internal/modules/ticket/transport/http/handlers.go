@@ -53,7 +53,7 @@ func CreateTicketHandler(tickets TicketCreator, resolve CallerResolver) http.Han
 		}
 
 		var req CreateTicketRequest
-		if err := decodeBody(w, r, &req); err != nil {
+		if err := httpx.DecodeJSON(w, r, &req, maxTicketBody); err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the request body is not valid JSON")
 			return
 		}
