@@ -24,7 +24,7 @@ import (
 	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 	ticketpostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
+	ticketdb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/generated"
 )
 
 // The repo owns its own transaction, so these tests cannot use the rolled-back

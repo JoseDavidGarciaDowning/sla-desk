@@ -22,7 +22,7 @@ import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres/sladb"
+	sladb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres/generated"
 )
 
 // begin opens a transaction that is always rolled back, so every test sees the

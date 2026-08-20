@@ -16,7 +16,7 @@ import (
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres/sladb"
+	sladb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres/generated"
 )
 
 // ErrUnsupportedScheduleMode means a row names a schedule this build cannot

@@ -11,7 +11,7 @@ import (
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
 	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/ticketdb"
+	ticketdb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/generated"
 )
 
 // The obligation docs/spec.md §4.2 takes on by keeping a derived cache:
