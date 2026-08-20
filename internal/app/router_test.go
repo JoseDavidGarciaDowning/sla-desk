@@ -16,10 +16,11 @@ import (
 	"time"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket"
-	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 	ticketcreate "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/create"
 	ticketlist "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/list"
+	ticketqueue "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/queue"
+	tickettransition "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/transition"
 	ticketports "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 
@@ -332,7 +333,7 @@ func (stubTicketRepo) Create(context.Context, ticketcreate.Command, ticketports.
 	return ticketdomain.Ticket{}, nil
 }
 
-func (stubTicketRepo) Transition(context.Context, ticketapp.StatusChange, ticketports.SLAClock) (ticketdomain.Ticket, error) {
+func (stubTicketRepo) Transition(context.Context, tickettransition.Command, ticketports.SLAClock) (ticketdomain.Ticket, error) {
 	return ticketdomain.Ticket{}, nil
 }
 
@@ -342,7 +343,7 @@ func (stubTicketRepo) ListForRequester(context.Context, ticketlist.Filter) ([]ti
 	return nil, nil
 }
 
-func (stubTicketRepo) ListForQueue(context.Context, ticketapp.QueueFilter) ([]ticketapp.QueueEntry, error) {
+func (stubTicketRepo) ListForQueue(context.Context, ticketqueue.Filter) ([]ticketqueue.Entry, error) {
 	return nil, nil
 }
 

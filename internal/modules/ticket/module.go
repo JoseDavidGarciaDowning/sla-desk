@@ -2,8 +2,9 @@
 //
 // It owns the tickets and ticket_status_history tables and the status machine.
 // It imports no other business module: what it needs from the SLA module and
-// from identity it declares as contracts of its own, and the composition root
-// is the only place those contracts are connected to an implementation.
+// from identity it declares as contracts of its own, in ports, and the
+// composition root is the only place those contracts are connected to an
+// implementation.
 //
 // This is also where the module is assembled — the features are constructed
 // here and handed to the route table already built. That direction is what
@@ -18,11 +19,13 @@ package ticket
 import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/assign"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/create"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/get"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/history"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/list"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/queue"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/transition"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 	transporthttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
@@ -39,21 +42,30 @@ type Store interface {
 	create.Tickets
 	list.Tickets
 	get.Tickets
+	get.AgentTickets
 	history.Tickets
-	application.Repository
+	history.AgentTickets
+	queue.Tickets
+	assign.Tickets
+	transition.Tickets
 }
 
-// Module is everything this module offers.
+// Module is everything this module offers: one handler per use case.
 //
-// The customer use cases are their own handlers. Service is what remains of the
-// agent's, and it goes away in the slice that moves them.
+// There is no Service. There was, holding all nine of these as methods on one
+// object with three dependencies, and every handler that reached it could reach
+// the other eight. Each of these holds only what its own use case needs.
 type Module struct {
 	Create  *create.Handler
 	List    *list.Handler
 	Get     *get.Handler
 	History *history.Handler
 
-	Service *application.Service
+	Queue        *queue.Handler
+	AgentGet     *get.AgentHandler
+	AgentHistory *history.AgentHandler
+	Assign       *assign.Handler
+	Transition   *transition.Handler
 }
 
 // New builds the module.
@@ -67,7 +79,7 @@ type Module struct {
 // SLA clock. It names no other module, and supplying it is the composition
 // root's job. `dir` is the second contract: whatever can answer whether a user
 // may hold tickets. Like `sla` it names no other module.
-func New(pool *pgxpool.Pool, sla ports.SLAPolicies, dir application.AssigneeDirectory) *Module {
+func New(pool *pgxpool.Pool, sla ports.SLAPolicies, dir ports.AssigneeDirectory) *Module {
 	return NewWith(postgres.NewRepository(pool), sla, dir)
 }
 
@@ -75,14 +87,18 @@ func New(pool *pgxpool.Pool, sla ports.SLAPolicies, dir application.AssigneeDire
 //
 // It exists so handlers can be exercised in a test without a database, while
 // still running the real use cases.
-func NewWith(store Store, sla ports.SLAPolicies, dir application.AssigneeDirectory) *Module {
+func NewWith(store Store, sla ports.SLAPolicies, dir ports.AssigneeDirectory) *Module {
 	return &Module{
 		Create:  create.New(store, sla),
 		List:    list.New(store),
 		Get:     get.New(store),
 		History: history.New(store),
 
-		Service: application.NewService(store, sla, dir),
+		Queue:        queue.New(store),
+		AgentGet:     get.NewAgent(store),
+		AgentHistory: history.NewAgent(store),
+		Assign:       assign.New(store, dir),
+		Transition:   transition.New(store, sla),
 	}
 }
 
@@ -98,5 +114,22 @@ func (m *Module) HTTPHandlers(resolve ports.CallerResolver) transporthttp.Handle
 		List:    list.HTTP(m.List, resolve),
 		Get:     get.HTTP(m.Get, resolve),
 		History: history.HTTP(m.History, resolve),
+	}
+}
+
+// AgentHTTPHandlers builds the module's agent endpoints, ready to be mounted
+// behind a role check.
+//
+// A separate method from HTTPHandlers, returning a separate type, because the
+// two sets carry different guarantees and the composition root mounts them in
+// different groups. One method returning both would let a caller mount the
+// agent's unscoped reads outside the group that authorizes them.
+func (m *Module) AgentHTTPHandlers(resolve ports.CallerResolver) transporthttp.AgentHandlers {
+	return transporthttp.AgentHandlers{
+		Queue:      queue.HTTP(m.Queue, resolve),
+		Get:        get.AgentHTTP(m.AgentGet, resolve),
+		History:    history.AgentHTTP(m.AgentHistory, resolve),
+		Assign:     assign.HTTP(m.Assign, resolve),
+		Transition: transition.HTTP(m.Transition, resolve),
 	}
 }

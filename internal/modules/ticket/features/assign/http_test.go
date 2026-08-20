@@ -1,4 +1,4 @@
-package http_test
+package assign_test
 
 import (
 	"context"
@@ -11,8 +11,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/assign"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 )
 
@@ -22,7 +23,7 @@ type assignSpy struct {
 	err    error
 }
 
-func (s *assignSpy) Assign(_ context.Context, ticketID uuid.UUID, assignee *uuid.UUID) (domain.Ticket, error) {
+func (s *assignSpy) Handle(_ context.Context, ticketID uuid.UUID, assignee *uuid.UUID) (domain.Ticket, error) {
 	s.called = true
 	s.whom = assignee
 	if s.err != nil {
@@ -36,12 +37,12 @@ func (s *assignSpy) Assign(_ context.Context, ticketID uuid.UUID, assignee *uuid
 func assignPatch(t *testing.T, spy *assignSpy, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	caller := tickethttp.Caller{ID: uuid.New(), Role: domain.RoleAgent}
-	resolve := func(context.Context) (tickethttp.Caller, bool) { return caller, true }
+	caller := ports.Caller{ID: uuid.New(), Role: domain.RoleAgent}
+	resolve := func(context.Context) (ports.Caller, bool) { return caller, true }
 
 	r := chi.NewRouter()
 	r.Method(http.MethodPatch, "/tickets/{id}"+tickethttp.AssigneeSuffix,
-		tickethttp.AssignTicketHandler(spy, resolve))
+		assign.HTTP(spy, resolve))
 
 	req := httptest.NewRequest(http.MethodPatch,
 		"/tickets/"+uuid.New().String()+tickethttp.AssigneeSuffix, strings.NewReader(body))
@@ -126,7 +127,7 @@ func TestAMalformedAssigneeIsRejected(t *testing.T) {
 // 400 rather than the 422 the planning card named — every other validation
 // failure in this API is a 400, and the frontend already reads its field errors.
 func TestAnUnassignableUserIsAFieldError(t *testing.T) {
-	spy := &assignSpy{err: application.ErrNotAssignable}
+	spy := &assignSpy{err: assign.ErrNotAssignable}
 
 	rec := assignPatch(t, spy, `{"assignee_id":"`+uuid.New().String()+`"}`)
 

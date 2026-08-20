@@ -1,4 +1,11 @@
-package http_test
+// Every endpoint that takes a body refuses a value after it, and refuses one
+// over the cap.
+//
+// At the module root because it is an assertion about the *set* of endpoints,
+// not about any one of them: a rule that holds where somebody happened to look
+// is not a rule. Two features are exercised here, and a feature may not import
+// its neighbour — a test of both together is not a feature.
+package ticket_test
 
 import (
 	"context"
@@ -11,6 +18,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/assign"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/transition"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 )
 
@@ -24,8 +34,8 @@ import (
 // here for every endpoint that takes a body, because a rule that holds where
 // somebody happened to look is not a rule.
 func TestNoEndpointAcceptsAValueAfterTheBody(t *testing.T) {
-	caller := tickethttp.Caller{ID: uuid.New(), Role: domain.RoleAgent}
-	resolve := func(context.Context) (tickethttp.Caller, bool) { return caller, true }
+	caller := ports.Caller{ID: uuid.New(), Role: domain.RoleAgent}
+	resolve := func(context.Context) (ports.Caller, bool) { return caller, true }
 
 	id := uuid.New().String()
 
@@ -42,7 +52,7 @@ func TestNoEndpointAcceptsAValueAfterTheBody(t *testing.T) {
 			method:  http.MethodPost,
 			pattern: "/tickets/{id}" + tickethttp.TransitionsSuffix,
 			path:    "/tickets/" + id + tickethttp.TransitionsSuffix,
-			handler: tickethttp.TransitionTicketHandler(&transitionSpy{}, resolve),
+			handler: transition.HTTP(&transitionSpy{}, resolve),
 			body:    `{"to":"pending"}{}`,
 		},
 		{
@@ -50,7 +60,7 @@ func TestNoEndpointAcceptsAValueAfterTheBody(t *testing.T) {
 			method:  http.MethodPatch,
 			pattern: "/tickets/{id}" + tickethttp.AssigneeSuffix,
 			path:    "/tickets/" + id + tickethttp.AssigneeSuffix,
-			handler: tickethttp.AssignTicketHandler(&assignSpy{}, resolve),
+			handler: assign.HTTP(&assignSpy{}, resolve),
 			body:    `{"assignee_id":null}{}`,
 		},
 	}
@@ -76,12 +86,12 @@ func TestNoEndpointAcceptsAValueAfterTheBody(t *testing.T) {
 // truncated silently and the result read as invalid JSON, which told the caller
 // their JSON was malformed when it was merely too big.
 func TestAnOverlongBodyIsRefused(t *testing.T) {
-	caller := tickethttp.Caller{ID: uuid.New(), Role: domain.RoleAgent}
-	resolve := func(context.Context) (tickethttp.Caller, bool) { return caller, true }
+	caller := ports.Caller{ID: uuid.New(), Role: domain.RoleAgent}
+	resolve := func(context.Context) (ports.Caller, bool) { return caller, true }
 
 	r := chi.NewRouter()
 	r.Method(http.MethodPost, "/tickets/{id}"+tickethttp.TransitionsSuffix,
-		tickethttp.TransitionTicketHandler(&transitionSpy{}, resolve))
+		transition.HTTP(&transitionSpy{}, resolve))
 
 	huge := `{"to":"pending","reason":"` + strings.Repeat("x", 70<<10) + `"}`
 	req := httptest.NewRequest(http.MethodPost,
@@ -92,4 +102,19 @@ func TestAnOverlongBodyIsRefused(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", rec.Code)
 	}
+}
+
+// Spies that do nothing but satisfy the two use cases. What these tests assert
+// happens before either is reached: a body this endpoint cannot read is refused
+// without the ticket ever being touched.
+type transitionSpy struct{}
+
+func (transitionSpy) Handle(context.Context, transition.Command) (domain.Ticket, error) {
+	return domain.Ticket{}, nil
+}
+
+type assignSpy struct{}
+
+func (assignSpy) Handle(context.Context, uuid.UUID, *uuid.UUID) (domain.Ticket, error) {
+	return domain.Ticket{}, nil
 }

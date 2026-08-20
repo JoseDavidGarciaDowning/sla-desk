@@ -9,8 +9,8 @@ import (
 
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
-	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	tickettransition "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/transition"
 	ticketdb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/generated"
 )
 
@@ -66,7 +66,7 @@ func TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom(t *testing.T) {
 			// drop.
 			time.Sleep(time.Millisecond)
 
-			tk, err = f.svc.Transition(f.ctx, ticketapp.StatusChange{
+			tk, err = f.mover.Handle(f.ctx, tickettransition.Command{
 				TicketID:  tk.ID,
 				Target:    target,
 				ActorID:   f.requester,

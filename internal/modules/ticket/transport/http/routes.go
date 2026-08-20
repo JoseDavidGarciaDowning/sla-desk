@@ -4,9 +4,6 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 )
 
 // Handlers are the module's customer endpoints, already built.
@@ -25,6 +22,16 @@ type Handlers struct {
 	List    http.Handler
 	Get     http.Handler
 	History http.Handler
+}
+
+// AgentHandlers are the module's agent endpoints, already built, for the same
+// reason.
+type AgentHandlers struct {
+	Queue      http.Handler
+	Get        http.Handler
+	History    http.Handler
+	Assign     http.Handler
+	Transition http.Handler
 }
 
 // Routes mounts every customer ticket endpoint.
@@ -50,23 +57,13 @@ func Routes(r chi.Router, h Handlers) {
 // handler behind the wrong guard, and the two lists being separate is what
 // makes that visible.
 //
-// It still builds its handlers from the module's Service, because the agent
-// features have not moved yet. When they do it takes an AgentHandlers value and
-// this file stops naming application entirely.
-func AgentRoutes(r chi.Router, svc *application.Service, resolve CallerResolver) {
-	r.Method(http.MethodGet, QueuePath, QueueTicketsHandler(svc, resolve))
-	r.Method(http.MethodGet, QueuePath+"/{id}", AgentTicketHandler(svc, resolve))
-	r.Method(http.MethodGet, QueuePath+"/{id}"+TicketHistorySuffix, AgentTicketHistoryHandler(svc, resolve))
-	r.Method(http.MethodPatch, QueuePath+"/{id}"+AssigneeSuffix, AssignTicketHandler(svc, resolve))
-	r.Method(http.MethodPost, QueuePath+"/{id}"+TransitionsSuffix, TransitionTicketHandler(svc, resolve))
+// The two lists are also the whole reason this file exists. Every endpoint's
+// code lives in its own feature; what cannot live there is the answer to "which
+// of these is behind the role check", because that is a fact about the set.
+func AgentRoutes(r chi.Router, h AgentHandlers) {
+	r.Method(http.MethodGet, QueuePath, h.Queue)
+	r.Method(http.MethodGet, QueuePath+"/{id}", h.Get)
+	r.Method(http.MethodGet, QueuePath+"/{id}"+TicketHistorySuffix, h.History)
+	r.Method(http.MethodPatch, QueuePath+"/{id}"+AssigneeSuffix, h.Assign)
+	r.Method(http.MethodPost, QueuePath+"/{id}"+TransitionsSuffix, h.Transition)
 }
-
-// CallerResolver is an alias for the module's own contract, kept so the agent
-// handlers that have not moved yet still compile against it.
-//
-// It disappears with them. The real declaration is in ports, where it belongs:
-// what a caller is, is this module's question, and it names no HTTP type.
-type CallerResolver = ports.CallerResolver
-
-// Caller is an alias, for the same reason and with the same lifetime.
-type Caller = ports.Caller

@@ -1,11 +1,10 @@
-package http_test
+package queue_test
 
 import (
 	"testing"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
-	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/queue"
 )
 
 // Clerk holds no name for anyone who signed up with an email and a password,
@@ -15,12 +14,12 @@ import (
 func TestTheQueueEntryFallsBackToTheEmailWhenThereIsNoName(t *testing.T) {
 	cases := []struct {
 		name  string
-		entry application.QueueEntry
+		entry queue.Entry
 		want  string
 	}{
 		{
 			name: "a name is used as it stands",
-			entry: application.QueueEntry{
+			entry: queue.Entry{
 				RequesterName:  "Ada Lovelace",
 				RequesterEmail: "ada@example.test",
 			},
@@ -28,14 +27,14 @@ func TestTheQueueEntryFallsBackToTheEmailWhenThereIsNoName(t *testing.T) {
 		},
 		{
 			name:  "an absent name falls back to the address",
-			entry: application.QueueEntry{RequesterEmail: "ada@example.test"},
+			entry: queue.Entry{RequesterEmail: "ada@example.test"},
 			want:  "ada@example.test",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := tickethttp.NewQueueEntryResponse(tc.entry)
+			got := queue.NewEntryResponse(tc.entry)
 			if got.RequesterName != tc.want {
 				t.Errorf("RequesterName = %q, want %q", got.RequesterName, tc.want)
 			}
@@ -47,13 +46,13 @@ func TestTheQueueEntryFallsBackToTheEmailWhenThereIsNoName(t *testing.T) {
 // it on the wire hands out an identifier to enumerate, which is the reasoning
 // that kept actor_id out of the history DTO in T14b.
 func TestTheQueueEntryNeverCarriesTheRequestersID(t *testing.T) {
-	entry := application.QueueEntry{
+	entry := queue.Entry{
 		Ticket:         domain.Ticket{Title: "a ticket"},
 		RequesterName:  "Ada",
 		RequesterEmail: "ada@example.test",
 	}
 
-	got := tickethttp.NewQueueEntryResponse(entry)
+	got := queue.NewEntryResponse(entry)
 	if got.RequesterName != "Ada" {
 		t.Fatalf("RequesterName = %q", got.RequesterName)
 	}
