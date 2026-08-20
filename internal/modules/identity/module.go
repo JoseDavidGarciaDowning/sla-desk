@@ -13,7 +13,7 @@ import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres/identitydb"
+	identitydb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres/generated"
 	transporthttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 )
 

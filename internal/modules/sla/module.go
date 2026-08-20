@@ -10,7 +10,7 @@ package sla
 import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres/sladb"
+	sladb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres/generated"
 )
 
 // Module is everything this module offers.

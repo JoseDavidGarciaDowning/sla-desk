@@ -13,8 +13,19 @@ sql:
     queries: "queries"
     gen:
       go:
+        # The directory says what the code is; the package says whose it is.
+        #
+        # `out` is "generated" so the folder itself refuses to be hand-edited:
+        # there is no reading of that name under which changing a file inside it
+        # is correct. `package` stays "sladb" because that name travels — it
+        # appears at every import site and in exported signatures, where a bare
+        # `generated.DBTX` would say nothing about which module's tables these
+        # are, and three packages all called `generated` would collide.
+        #
+        # The cost is that the import path no longer names the package, so every
+        # import of it carries an explicit `sladb` alias.
         package: "sladb"
-        out: "sladb"
+        out: "generated"
         sql_package: "pgx/v5"
         emit_pointers_for_null_types: true
         omit_unused_structs: true
