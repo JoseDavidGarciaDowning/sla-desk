@@ -18,8 +18,8 @@ import (
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	identityassignable "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/assignable"
 	identitypostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres"
-	slaapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
+	slaresolve "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/features/resolve"
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 	ticketassign "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/assign"
@@ -103,7 +103,7 @@ func newRepoFixture(t *testing.T) repoFixture {
 	// had to rebuild the translation by hand — importing the SLA module from
 	// inside ticket, which depguard now refuses. Here it is one import, and the
 	// test exercises the very code cmd/api wires.
-	sla := app.SLAPolicies{Policies: slaapp.NewPolicies(slapostgres.NewPolicyRepository(pool))}
+	sla := app.SLAPolicies{Policies: slaresolve.New(slapostgres.NewPolicyRepository(pool))}
 
 	identity := identityassignable.New(identitypostgres.NewUserRepository(pool))
 

@@ -14,8 +14,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/features/resolve"
 	sladb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres/generated"
 )
 
@@ -33,7 +33,7 @@ type PolicyRepository struct {
 	q *sladb.Queries
 }
 
-var _ application.PolicyRepository = (*PolicyRepository)(nil)
+var _ resolve.Policies = (*PolicyRepository)(nil)
 
 // NewPolicyRepository builds the repository against a database handle.
 //
@@ -53,7 +53,7 @@ func (r *PolicyRepository) ActiveByPriority(ctx context.Context, p domain.Priori
 	row, err := r.q.GetActiveSLAPolicyByPriority(ctx, p)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return domain.Policy{}, fmt.Errorf("%w: %s", application.ErrNoPolicyForPriority, p)
+		return domain.Policy{}, fmt.Errorf("%w: %s", resolve.ErrNoPolicyForPriority, p)
 	case err != nil:
 		return domain.Policy{}, err
 	}
