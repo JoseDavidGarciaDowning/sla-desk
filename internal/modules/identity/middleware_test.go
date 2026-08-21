@@ -1,4 +1,12 @@
-package http_test
+// The authentication middleware, wired to the provisioning use case it
+// actually runs against.
+//
+// At the module root rather than beside the middleware because that is what it
+// exercises: RequireAuth resolving a verified subject into one of our users,
+// which is two packages cooperating. Keeping it in transport would make that
+// package's tests import a feature, and the arrow between them points the other
+// way — features depend on transport's context accessor, not the reverse.
+package identity_test
 
 import (
 	"context"
@@ -12,16 +20,16 @@ import (
 	"github.com/clerk/clerk-sdk-go/v2"
 	"github.com/google/uuid"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/provision"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 )
 
-// fakeStore stands in for the users table. A fake rather than a mock: the tests
+// stubUsers stands in for the users table. A fake rather than a mock: the tests
 // assert on what the middleware produced, not on which methods it happened to
 // call — except for the upsert, where "was it called at all" is the behaviour
 // under test.
-type fakeStore struct {
+type stubUsers struct {
 	user      domain.User
 	getErr    error
 	upsertErr error
@@ -33,16 +41,16 @@ type fakeStore struct {
 	grants         int
 }
 
-var _ application.UserRepository = (*fakeStore)(nil)
+var _ provision.Users = (*stubUsers)(nil)
 
-func (f *fakeStore) ByClerkID(_ context.Context, _ string) (domain.User, error) {
+func (f *stubUsers) ByClerkID(_ context.Context, _ string) (domain.User, error) {
 	if f.getErr != nil {
 		return domain.User{}, f.getErr
 	}
 	return f.user, nil
 }
 
-func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Identity, role domain.Role) (domain.User, error) {
+func (f *stubUsers) Upsert(_ context.Context, clerkUserID string, id domain.Identity, role domain.Role) (domain.User, error) {
 	f.upserts++
 	f.upsertClerkID = clerkUserID
 	f.upsertIdentity = id
@@ -53,18 +61,18 @@ func (f *fakeStore) Upsert(_ context.Context, clerkUserID string, id domain.Iden
 	return f.user, nil
 }
 
-func (f *fakeStore) ByID(context.Context, uuid.UUID) (domain.User, error) {
+func (f *stubUsers) ByID(context.Context, uuid.UUID) (domain.User, error) {
 	if f.getErr != nil {
 		return domain.User{}, f.getErr
 	}
 	return f.user, nil
 }
 
-func (f *fakeStore) Assignable(context.Context) ([]domain.User, error) {
+func (f *stubUsers) Assignable(context.Context) ([]domain.User, error) {
 	return nil, nil
 }
 
-func (f *fakeStore) GrantRole(_ context.Context, _ string, role domain.Role) (domain.User, error) {
+func (f *stubUsers) GrantRole(_ context.Context, _ string, role domain.Role) (domain.User, error) {
 	f.grants++
 	granted := f.user
 	granted.Role = role
@@ -83,13 +91,13 @@ func uuidOf(t *testing.T, s string) uuid.UUID {
 // requireAuth wires the real service behind the real middleware, so these tests
 // still exercise the resolve-or-provision path rather than a stub standing in
 // for it. Only the collaborators at the very edge are fake.
-func requireAuth(users application.UserRepository, ids application.IdentityProvider) func(http.Handler) http.Handler {
+func requireAuth(users provision.Users, ids provision.Identities) func(http.Handler) http.Handler {
 	if users == nil && ids == nil {
 		return identityhttp.RequireAuth(nil)
 	}
 	// The zero RoleGrants grants nobody, which is what these tests want: they
 	// are about rejecting a request, not about who is privileged.
-	return identityhttp.RequireAuth(application.NewService(users, ids, domain.RoleGrants{}))
+	return identityhttp.RequireAuth(provision.New(users, ids, domain.RoleGrants{}))
 }
 
 // withClaims builds the request clerkhttp.WithHeaderAuthorization would have
@@ -100,18 +108,6 @@ func withClaims(subject string) *http.Request {
 		RegisteredClaims: clerk.RegisteredClaims{Subject: subject},
 	}
 	return r.WithContext(clerk.ContextWithSessionClaims(r.Context(), claims))
-}
-
-// reached records whether the protected handler ran. Every rejection test
-// asserts on it: a middleware that returns 401 but still calls the handler has
-// not protected anything.
-type reached struct{ called bool }
-
-func (r *reached) handler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		r.called = true
-		w.WriteHeader(http.StatusOK)
-	})
 }
 
 // The trap documented in docs/spec.md §4.3: clerkhttp.WithHeaderAuthorization
@@ -143,7 +139,7 @@ func TestRequireAuthPutsOurUserInTheContext(t *testing.T) {
 		Email:       "agent@example.test",
 		Role:        domain.RoleAgent,
 	}
-	users := &fakeStore{user: want}
+	users := &stubUsers{user: want}
 
 	var got domain.User
 	var ok bool
@@ -184,7 +180,7 @@ type fakeFetcher struct {
 	calls    int
 }
 
-var _ application.IdentityProvider = (*fakeFetcher)(nil)
+var _ provision.Identities = (*fakeFetcher)(nil)
 
 func (f *fakeFetcher) FetchIdentity(_ context.Context, _ string) (domain.Identity, error) {
 	f.calls++
@@ -201,7 +197,7 @@ func TestRequireAuthProvisionsAUserItHasNeverSeen(t *testing.T) {
 		Email:       "new@example.test",
 		Role:        domain.RoleCustomer,
 	}
-	users := &fakeStore{getErr: application.ErrNoSuchUser, user: provisioned}
+	users := &stubUsers{getErr: domain.ErrNoSuchUser, user: provisioned}
 	clerkAPI := &fakeFetcher{identity: domain.Identity{Email: "new@example.test", Name: "New Person"}}
 
 	var got domain.User
@@ -238,7 +234,7 @@ func TestRequireAuthProvisionsAUserItHasNeverSeen(t *testing.T) {
 
 // An existing user must not cost a Clerk API round trip.
 func TestRequireAuthDoesNotCallClerkForAKnownUser(t *testing.T) {
-	users := &fakeStore{user: domain.User{ClerkUserID: "user_known", Role: domain.RoleCustomer}}
+	users := &stubUsers{user: domain.User{ClerkUserID: "user_known", Role: domain.RoleCustomer}}
 	clerkAPI := &fakeFetcher{}
 
 	handler := requireAuth(users, clerkAPI)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -254,7 +250,7 @@ func TestRequireAuthDoesNotCallClerkForAKnownUser(t *testing.T) {
 // A forged claim is not a role. docs/spec.md §4.3: the role lives in our table
 // and a client-supplied token can never assert one.
 func TestRoleComesFromOurTableNotFromTheToken(t *testing.T) {
-	users := &fakeStore{user: domain.User{
+	users := &stubUsers{user: domain.User{
 		ClerkUserID: "user_ambitious",
 		Role:        domain.RoleCustomer, // what our table says
 	}}
@@ -279,7 +275,7 @@ func TestRoleComesFromOurTableNotFromTheToken(t *testing.T) {
 }
 
 func TestRequireAuthFailsClosedWhenClerkIsUnreachable(t *testing.T) {
-	users := &fakeStore{getErr: application.ErrNoSuchUser}
+	users := &stubUsers{getErr: domain.ErrNoSuchUser}
 	clerkAPI := &fakeFetcher{err: errors.New("clerk: connection refused")}
 
 	var protected reached
@@ -300,7 +296,7 @@ func TestRequireAuthFailsClosedWhenClerkIsUnreachable(t *testing.T) {
 }
 
 func TestRequireAuthFailsClosedWhenTheDatabaseErrors(t *testing.T) {
-	users := &fakeStore{getErr: errors.New("connection reset by peer")}
+	users := &stubUsers{getErr: errors.New("connection reset by peer")}
 	clerkAPI := &fakeFetcher{}
 
 	var protected reached
@@ -326,7 +322,7 @@ func TestRequireAuthFailsClosedWhenTheDatabaseErrors(t *testing.T) {
 // TestUpsertAcceptsAMissingName; what is checked here is that nothing between
 // Clerk and the repository invents one.
 func TestProvisioningWithoutANameCarriesNoName(t *testing.T) {
-	users := &fakeStore{getErr: application.ErrNoSuchUser}
+	users := &stubUsers{getErr: domain.ErrNoSuchUser}
 	clerkAPI := &fakeFetcher{identity: domain.Identity{Email: "noname@example.test"}}
 
 	handler := requireAuth(users, clerkAPI)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -361,7 +357,7 @@ func TestRequireAuthAnswersWithAProblemDocument(t *testing.T) {
 		{
 			name: "the database is unreachable",
 			handler: requireAuth(
-				&fakeStore{getErr: errors.New("connection refused")},
+				&stubUsers{getErr: errors.New("connection refused")},
 				&fakeFetcher{},
 			)(nil),
 			request: withClaims("user_whatever"),
@@ -394,7 +390,7 @@ func TestRequireAuthAnswersWithAProblemDocument(t *testing.T) {
 // thing a pgx error can say; they also carry host names, ports and table names.
 func TestRequireAuthDoesNotEchoTheDatabaseError(t *testing.T) {
 	handler := requireAuth(
-		&fakeStore{getErr: errors.New("dial tcp 10.1.2.3:5432: connection refused")},
+		&stubUsers{getErr: errors.New("dial tcp 10.1.2.3:5432: connection refused")},
 		&fakeFetcher{},
 	)(nil)
 

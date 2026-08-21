@@ -1,8 +1,9 @@
-package http_test
+package provision_test
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	svix "github.com/svix/svix-webhooks/go"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/provision"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 )
 
@@ -89,9 +91,9 @@ func TestWebhookRejectsAnUnsignedRequest(t *testing.T) {
 
 func bytesReader(b []byte) *bytes.Reader { return bytes.NewReader(b) }
 
-func newWebhookHandler(t *testing.T, p identityhttp.Provisioner) http.Handler {
+func newWebhookHandler(t *testing.T, p provision.UseCase) http.Handler {
 	t.Helper()
-	h, err := identityhttp.WebhookHandler(testWebhookSecret, p)
+	h, err := provision.WebhookHTTP(testWebhookSecret, p)
 	if err != nil {
 		t.Fatalf("WebhookHandler: %v", err)
 	}
@@ -240,7 +242,7 @@ func TestWebhookRejectsAUserPayloadWithNoID(t *testing.T) {
 }
 
 func TestWebhookHandlerRefusesAnUnusableSigningSecret(t *testing.T) {
-	if _, err := identityhttp.WebhookHandler("not-a-svix-secret", &recordingProvisioner{}); err == nil {
+	if _, err := provision.WebhookHTTP("not-a-svix-secret", &recordingProvisioner{}); err == nil {
 		t.Error("expected an error — a bad secret must stop the deploy, not become runtime 500s")
 	}
 }
@@ -255,7 +257,7 @@ func TestWebhookHandlerRefusesAnUnusableSigningSecret(t *testing.T) {
 // it being inconsistent: the delivery log in Clerk's dashboard shows it, and
 // it costs nothing to say the same thing everywhere.
 func TestWebhookErrorsAreProblemDocuments(t *testing.T) {
-	handler, err := identityhttp.WebhookHandler(testWebhookSecret, &recordingProvisioner{})
+	handler, err := provision.WebhookHTTP(testWebhookSecret, &recordingProvisioner{})
 	if err != nil {
 		t.Fatalf("building the handler: %v", err)
 	}
@@ -305,4 +307,19 @@ func TestWebhookErrorsAreProblemDocuments(t *testing.T) {
 			}
 		})
 	}
+}
+
+// decodeProblem reads an RFC 9457 document out of a recorded response.
+//
+// The documents themselves are tested in internal/platform/httperr, which owns
+// them. What is asserted here is that the handler reaches for one — with the
+// right status, and without leaking a cause.
+func decodeProblem(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding the problem document: %v\nbody: %s", err, rec.Body.String())
+	}
+	return body
 }

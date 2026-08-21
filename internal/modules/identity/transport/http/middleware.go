@@ -1,6 +1,17 @@
-// Package http is the identity module's HTTP surface: the middleware that
-// turns a verified token into one of our users, and the webhook Clerk posts
-// user events to.
+// Package http is the identity module's HTTP surface as a whole: the paths, the
+// route table, and the middleware that turns a verified token into one of our
+// users.
+//
+// What is not here is any endpoint. Each use case owns its own adapter under
+// features/<use case>/, and this package holds what those adapters have in
+// common — chiefly UserFromContext, which is how every one of them reads the
+// caller the middleware resolved.
+//
+// The middleware itself stays because it is not a use case. It is HTTP
+// behaviour: it decides whether a request may proceed, and it runs before any
+// endpoint is chosen. RequireRole is the same. An architecture test draws the
+// line mechanically — nothing here may return an http.Handler, and middleware
+// returns func(http.Handler) http.Handler.
 package http
 
 import (

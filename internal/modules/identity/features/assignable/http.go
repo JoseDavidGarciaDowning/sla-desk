@@ -1,4 +1,4 @@
-package http
+package assignable
 
 import (
 	"context"
@@ -9,16 +9,13 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httperr"
 )
 
-// AssignablePath is the staff roster, mounted inside the agent route group by
-// the composition root. It is not reachable from anywhere else.
-const AssignablePath = "/assignable"
-
-// AssignableSource is the slice of the module this handler needs.
-type AssignableSource interface {
-	Assignable(ctx context.Context) ([]domain.User, error)
+// UseCase is what the adapter needs: the one call that reads the roster.
+type UseCase interface {
+	List(ctx context.Context) ([]domain.User, error)
 }
 
 // assignableUser is one person a ticket may be handed to.
@@ -43,27 +40,27 @@ type AssignableSource interface {
 // The role travels because an agent and an admin are different colleagues to
 // hand a ticket to, and a roster that will not say which is which makes the
 // reader guess.
-type assignableUser struct {
+type user struct {
 	ID   uuid.UUID   `json:"id"`
 	Name string      `json:"name"`
 	Role domain.Role `json:"role"`
 }
 
-// AssignableUsersHandler serves GET /api/agent/assignable.
+// HTTP adapts GET /api/agent/assignable.
 //
 // Unpaginated, on purpose. This is a staff roster rather than a data set: it is
 // the people who work here, it is read to fill one select, and a desk with
 // enough agents to need a page break has other problems first. If that ever
 // stops being true the fix is a search parameter, not an offset — an agent
 // looking for a colleague types a name, they do not page through everyone.
-func AssignableUsersHandler(users AssignableSource) http.Handler {
+func HTTP(h UseCase) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := UserFromContext(r.Context()); !ok {
+		if _, ok := identityhttp.UserFromContext(r.Context()); !ok {
 			httperr.Write(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 
-		found, err := users.Assignable(r.Context())
+		found, err := h.List(r.Context())
 		if err != nil {
 			slog.ErrorContext(r.Context(), "listing the assignable users failed", "error", err)
 			httperr.WriteInternal(w)
@@ -73,7 +70,7 @@ func AssignableUsersHandler(users AssignableSource) http.Handler {
 		// Built with make so an empty roster encodes as [] rather than null. A
 		// deploy with no agents configured is the default state (T17), so this
 		// is the ordinary answer rather than an edge case.
-		out := make([]assignableUser, 0, len(found))
+		out := make([]user, 0, len(found))
 		for _, u := range found {
 			// Clerk holds no name for someone who signed up with an email and a
 			// password. Falling back to the address here rather than in the
@@ -84,7 +81,7 @@ func AssignableUsersHandler(users AssignableSource) http.Handler {
 				name = u.Email
 			}
 
-			out = append(out, assignableUser{ID: u.ID, Name: name, Role: u.Role})
+			out = append(out, user{ID: u.ID, Name: name, Role: u.Role})
 		}
 
 		w.Header().Set("Content-Type", "application/json")

@@ -18,7 +18,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 )
@@ -152,7 +151,7 @@ func sessionClaims(subject string, expiry time.Time) map[string]any {
 // middlewares itself would keep passing if that method ever mounted only the
 // first one — which is the exact failure docs/spec.md §4.3 warns about, because
 // the token check alone rejects nothing.
-func chain(t *testing.T, stub *clerkStub, users application.UserRepository, next http.Handler) http.Handler {
+func chain(t *testing.T, stub *clerkStub, users identity.Store, next http.Handler) http.Handler {
 	t.Helper()
 
 	cfg := clerk.Config{
@@ -187,7 +186,7 @@ type fakeStore struct {
 	upserts int
 }
 
-var _ application.UserRepository = (*fakeStore)(nil)
+var _ identity.Store = (*fakeStore)(nil)
 
 func (f *fakeStore) ByClerkID(context.Context, string) (domain.User, error) {
 	if f.getErr != nil {

@@ -12,8 +12,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/assignable"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/provision"
 	identitydb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres/generated"
 )
 
@@ -22,7 +23,15 @@ type UserRepository struct {
 	q *identitydb.Queries
 }
 
-var _ application.UserRepository = (*UserRepository)(nil)
+// The ports this adapter satisfies, one per feature that needs it.
+//
+// Two narrow interfaces rather than the five-method one they replaced: reading
+// the roster cannot reach the provisioning write, and provisioning cannot read
+// the roster.
+var (
+	_ provision.Users  = (*UserRepository)(nil)
+	_ assignable.Users = (*UserRepository)(nil)
+)
 
 func NewUserRepository(db identitydb.DBTX) *UserRepository {
 	return &UserRepository{q: identitydb.New(db)}
@@ -38,7 +47,7 @@ func (r *UserRepository) ByClerkID(ctx context.Context, clerkUserID string) (dom
 	row, err := r.q.GetUserByClerkID(ctx, clerkUserID)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return domain.User{}, application.ErrNoSuchUser
+		return domain.User{}, domain.ErrNoSuchUser
 	case err != nil:
 		return domain.User{}, fmt.Errorf("reading the user: %w", err)
 	}
@@ -51,7 +60,7 @@ func (r *UserRepository) ByID(ctx context.Context, id uuid.UUID) (domain.User, e
 	row, err := r.q.GetUserByID(ctx, id)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return domain.User{}, application.ErrNoSuchUser
+		return domain.User{}, domain.ErrNoSuchUser
 	case err != nil:
 		return domain.User{}, fmt.Errorf("reading the user: %w", err)
 	}
@@ -118,7 +127,7 @@ func (r *UserRepository) GrantRole(ctx context.Context, clerkUserID string, role
 	})
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		return domain.User{}, application.ErrNoSuchUser
+		return domain.User{}, domain.ErrNoSuchUser
 	case err != nil:
 		return domain.User{}, fmt.Errorf("granting the role: %w", err)
 	}

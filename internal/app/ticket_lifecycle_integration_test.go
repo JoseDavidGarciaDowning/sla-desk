@@ -15,8 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	identityapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	identityassignable "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/assignable"
 	identitypostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres"
 	slaapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
@@ -51,7 +51,7 @@ type repoFixture struct {
 	//
 	// The Clerk provider is nil and the grants are empty: MayHoldTickets only
 	// reads a role from our own table, and nothing here provisions anyone.
-	identity *identityapp.Service
+	identity *identityassignable.Handler
 
 	requester uuid.UUID
 }
@@ -105,7 +105,7 @@ func newRepoFixture(t *testing.T) repoFixture {
 	// test exercises the very code cmd/api wires.
 	sla := app.SLAPolicies{Policies: slaapp.NewPolicies(slapostgres.NewPolicyRepository(pool))}
 
-	identity := identityapp.NewService(identitypostgres.NewUserRepository(pool), nil, identitydomain.RoleGrants{})
+	identity := identityassignable.New(identitypostgres.NewUserRepository(pool))
 
 	return repoFixture{
 		ctx:       ctx,

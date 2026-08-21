@@ -4,13 +4,19 @@
 // making this request". Other modules never import it: a module that needs to
 // know who the caller is declares a contract for that, and the composition root
 // connects the two ends. See docs/adr/0005.
+//
+// This is also where the module is assembled — the features are constructed
+// here and handed to the route table already built, the same arrangement the
+// ticket module uses and for the same reason.
 package identity
 
 import (
 	nethttp "net/http"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/assignable"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/me"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/provision"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres"
 	identitydb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/postgres/generated"
@@ -37,9 +43,26 @@ type Config struct {
 	AdminClerkUserIDs []string
 }
 
-// Module is everything this module offers.
+// Store is everything this module needs from persistence: the union of the
+// narrow ports each feature declares for itself.
+//
+// It exists so the composition root can supply one adapter and a test one fake.
+// No feature holds it — provision.Handler holds provision.Users and cannot read
+// the roster.
+type Store interface {
+	provision.Users
+	assignable.Users
+}
+
+// Module is everything this module offers: one handler per use case.
+//
+// Provision is exported because the middleware needs it — it is what satisfies
+// transport's UserSource — and because the composition root builds the webhook
+// route from it. Assignable is exported because the ticket module's assignee
+// contract is satisfied by it, through an adapter in internal/app.
 type Module struct {
-	Service *application.Service
+	Provision  *provision.Handler
+	Assignable *assignable.Handler
 
 	grants domain.RoleGrants
 	cfg    Config
@@ -53,24 +76,26 @@ func New(db identitydb.DBTX, cfg Config) (*Module, error) {
 // NewWith builds the module from its collaborators.
 //
 // It exists so a router can be assembled in a test without a database or a live
-// Clerk instance, while still running the real middleware and the real service.
-// A test that swapped those out would stop proving that a route is protected.
+// Clerk instance, while still running the real middleware and the real use
+// cases. A test that swapped those out would stop proving that a route is
+// protected.
 //
 // It returns an error because a subject listed as both an agent and an admin
 // has no defensible answer, and resolving it by map iteration order would make
 // a deployed role depend on nothing anyone can read. Same rule as an unusable
 // webhook secret: a configuration that cannot be obeyed stops the process here,
 // not later and not per request.
-func NewWith(users application.UserRepository, ids application.IdentityProvider, cfg Config) (*Module, error) {
+func NewWith(store Store, ids provision.Identities, cfg Config) (*Module, error) {
 	grants, err := domain.NewRoleGrants(cfg.AgentClerkUserIDs, cfg.AdminClerkUserIDs)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Module{
-		Service: application.NewService(users, ids, grants),
-		grants:  grants,
-		cfg:     cfg,
+		Provision:  provision.New(store, ids, grants),
+		Assignable: assignable.New(store),
+		grants:     grants,
+		cfg:        cfg,
 	}, nil
 }
 
@@ -91,7 +116,7 @@ func (m *Module) GrantedCounts() (agents, admins int) {
 // users. Returning them as one chain is what stops a caller mounting only the
 // first and leaving the route open (docs/spec.md §4.3).
 func (m *Module) Authenticate(next nethttp.Handler) nethttp.Handler {
-	return clerk.Middleware(m.cfg.Clerk)(transporthttp.RequireAuth(m.Service)(next))
+	return clerk.Middleware(m.cfg.Clerk)(transporthttp.RequireAuth(m.Provision)(next))
 }
 
 // WebhookRoute is the path and handler Clerk posts user events to.
@@ -100,10 +125,23 @@ func (m *Module) Authenticate(next nethttp.Handler) nethttp.Handler {
 // process at startup. A route that answers 500 to every delivery, in an
 // endpoint nobody watches, is the kind of failure discovered weeks later by a
 // user who was never provisioned.
+//
+// It is returned on its own rather than in AgentHandlers because it is mounted
+// outside the authenticated group: Clerk sends a Svix signature, not a session
+// JWT, so RequireAuth would reject every delivery.
 func (m *Module) WebhookRoute() (string, nethttp.Handler, error) {
-	h, err := transporthttp.WebhookHandler(m.cfg.WebhookSecret, m.Service)
+	h, err := provision.WebhookHTTP(m.cfg.WebhookSecret, m.Provision)
 	if err != nil {
 		return "", nil, err
 	}
 	return transporthttp.WebhookPath, h, nil
+}
+
+// AgentHTTPHandlers builds the module's agent-group endpoints, ready to be
+// mounted behind a role check.
+func (m *Module) AgentHTTPHandlers() transporthttp.AgentHandlers {
+	return transporthttp.AgentHandlers{
+		Me:         me.HTTP(),
+		Assignable: assignable.HTTP(m.Assignable),
+	}
 }

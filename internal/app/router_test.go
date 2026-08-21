@@ -27,7 +27,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity"
-	identityapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/infrastructure/clerk"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
@@ -292,7 +291,7 @@ func (s routerStubUsers) Assignable(context.Context) ([]identitydomain.User, err
 // testIdentity builds the identity module the way NewRouter's caller does, so a
 // router test exercises the real middleware chain rather than a stand-in for
 // it. Only the users table and the JWKS endpoint are replaced.
-func testIdentity(tb testing.TB, cfg config.Config, users identityapp.UserRepository) *identity.Module {
+func testIdentity(tb testing.TB, cfg config.Config, users identity.Store) *identity.Module {
 	tb.Helper()
 	clerkCfg := clerk.Config{
 		SecretKey:       cfg.ClerkSecretKey,
