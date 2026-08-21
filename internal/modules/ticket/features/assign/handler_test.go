@@ -1,4 +1,4 @@
-package application_test
+package assign_test
 
 import (
 	"context"
@@ -7,15 +7,17 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/assign"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 )
 
-// assignStubRepo records the write the service asked for, so a test can assert
-// on the decision rather than on a row.
+// assignStubRepo records the write the use case asked for, so a test can
+// assert on the decision rather than on a row.
+//
+// One method, because assign.Tickets has one. It used to embed a ten-method
+// repository stub to satisfy an interface that carried every use case's needs.
 type assignStubRepo struct {
-	queueStubRepo
-
 	assigned  bool
 	gotTicket uuid.UUID
 	gotWhom   *uuid.UUID
@@ -41,18 +43,18 @@ func (d *stubDirectory) CanHoldTickets(_ context.Context, id uuid.UUID) (bool, e
 	return d.canHold, d.err
 }
 
-func assignService(repo application.Repository, dir application.AssigneeDirectory) *application.Service {
-	return application.NewService(repo, nil, dir)
+func assignHandler(repo assign.Tickets, dir ports.AssigneeDirectory) *assign.Handler {
+	return assign.New(repo, dir)
 }
 
 func TestAnAgentCanBeAssignedATicket(t *testing.T) {
 	repo := &assignStubRepo{}
 	dir := &stubDirectory{canHold: true}
-	svc := assignService(repo, dir)
+	svc := assignHandler(repo, dir)
 
 	ticketID, agent := uuid.New(), uuid.New()
 
-	got, err := svc.Assign(context.Background(), ticketID, &agent)
+	got, err := svc.Handle(context.Background(), ticketID, &agent)
 	if err != nil {
 		t.Fatalf("Assign: %v", err)
 	}
@@ -71,12 +73,12 @@ func TestAnAgentCanBeAssignedATicket(t *testing.T) {
 // composition root answers.
 func TestACustomerCannotBeAssignedATicket(t *testing.T) {
 	repo := &assignStubRepo{}
-	svc := assignService(repo, &stubDirectory{canHold: false})
+	svc := assignHandler(repo, &stubDirectory{canHold: false})
 
 	customer := uuid.New()
-	_, err := svc.Assign(context.Background(), uuid.New(), &customer)
+	_, err := svc.Handle(context.Background(), uuid.New(), &customer)
 
-	if !errors.Is(err, application.ErrNotAssignable) {
+	if !errors.Is(err, assign.ErrNotAssignable) {
 		t.Fatalf("error = %v, want ErrNotAssignable", err)
 	}
 	if repo.assigned {
@@ -88,11 +90,11 @@ func TestACustomerCannotBeAssignedATicket(t *testing.T) {
 // different refusals would let an agent enumerate which uuids name real users.
 func TestAnUnknownIDIsRefusedLikeACustomer(t *testing.T) {
 	repo := &assignStubRepo{}
-	svc := assignService(repo, &stubDirectory{canHold: false})
+	svc := assignHandler(repo, &stubDirectory{canHold: false})
 
-	_, err := svc.Assign(context.Background(), uuid.New(), ptr(uuid.New()))
+	_, err := svc.Handle(context.Background(), uuid.New(), ptr(uuid.New()))
 
-	if !errors.Is(err, application.ErrNotAssignable) {
+	if !errors.Is(err, assign.ErrNotAssignable) {
 		t.Errorf("error = %v, want ErrNotAssignable — the same answer a customer gets", err)
 	}
 }
@@ -102,9 +104,9 @@ func TestAnUnknownIDIsRefusedLikeACustomer(t *testing.T) {
 func TestUnassigningDoesNotConsultTheDirectory(t *testing.T) {
 	repo := &assignStubRepo{}
 	dir := &stubDirectory{canHold: false}
-	svc := assignService(repo, dir)
+	svc := assignHandler(repo, dir)
 
-	got, err := svc.Assign(context.Background(), uuid.New(), nil)
+	got, err := svc.Handle(context.Background(), uuid.New(), nil)
 	if err != nil {
 		t.Fatalf("Assign: %v", err)
 	}
@@ -126,11 +128,11 @@ func TestUnassigningDoesNotConsultTheDirectory(t *testing.T) {
 func TestADirectoryFailureIsNotARefusal(t *testing.T) {
 	repo := &assignStubRepo{}
 	boom := errors.New("the directory is unreachable")
-	svc := assignService(repo, &stubDirectory{canHold: false, err: boom})
+	svc := assignHandler(repo, &stubDirectory{canHold: false, err: boom})
 
-	_, err := svc.Assign(context.Background(), uuid.New(), ptr(uuid.New()))
+	_, err := svc.Handle(context.Background(), uuid.New(), ptr(uuid.New()))
 
-	if errors.Is(err, application.ErrNotAssignable) {
+	if errors.Is(err, assign.ErrNotAssignable) {
 		t.Error("a directory failure was reported as a refusal")
 	}
 	if !errors.Is(err, boom) {

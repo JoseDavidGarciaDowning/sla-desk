@@ -8,9 +8,8 @@ import (
 	identityapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/application"
 	identitydomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/domain"
 	identityhttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/transport/http"
-	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
-	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
+	ticketports "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 )
 
 // This file is where the identity module's answers are translated into the
@@ -25,16 +24,16 @@ import (
 //
 // The second result is false on any request that did not pass through the
 // identity module's middleware, which is the only thing that puts a user there.
-// It satisfies tickethttp.CallerResolver, which is the contract the ticket
+// It satisfies ticketports.CallerResolver, which is the contract the ticket
 // module declared for exactly this. That module never learns where a caller
 // comes from, and the identity module never learns what one is used for.
-func callerFromContext(ctx context.Context) (tickethttp.Caller, bool) {
+func callerFromContext(ctx context.Context) (ticketports.Caller, bool) {
 	user, ok := identityhttp.UserFromContext(ctx)
 	if !ok {
-		return tickethttp.Caller{}, false
+		return ticketports.Caller{}, false
 	}
 
-	return tickethttp.Caller{
+	return ticketports.Caller{
 		ID:   user.ID,
 		Role: actorRole(user.Role),
 	}, true
@@ -77,7 +76,7 @@ type AssigneeDirectory struct {
 	Users *identityapp.Service
 }
 
-var _ ticketapp.AssigneeDirectory = AssigneeDirectory{}
+var _ ticketports.AssigneeDirectory = AssigneeDirectory{}
 
 func (d AssigneeDirectory) CanHoldTickets(ctx context.Context, id uuid.UUID) (bool, error) {
 	return d.Users.MayHoldTickets(ctx, id)

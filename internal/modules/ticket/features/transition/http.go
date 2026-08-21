@@ -1,4 +1,4 @@
-package http
+package transition
 
 import (
 	"context"
@@ -11,8 +11,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
+	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httperr"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httpx"
 )
@@ -21,27 +22,19 @@ import (
 // comments are slice 4 — so it is short on purpose.
 const maxReasonLength = 500
 
-// TicketTransitioner is the slice of the module this handler needs.
-type TicketTransitioner interface {
-	Transition(ctx context.Context, in application.StatusChange) (domain.Ticket, error)
-}
-
-type transitionRequest struct {
+// request is the body of POST /api/agent/tickets/{id}/transitions.
+type request struct {
 	To     string  `json:"to"`
 	Reason *string `json:"reason"`
 }
 
-// TransitionTicketHandler serves POST /api/agent/tickets/{id}/transitions.
-//
-// It adds no write logic. Service.Transition has resolved the clock before the
-// transaction, taken FOR UPDATE, written the history row, rebuilt the clock
-// from it and updated the cache since T11 — all of it mutation-tested, and all
-// of it reachable only from integration tests until now. This is the surface
-// that was missing.
-//
-// It is where the SLA clock can be paused and resumed over HTTP for the first
-// time, which is the headline behaviour of the whole domain.
-func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver) http.Handler {
+// UseCase is what the adapter needs: the one call that moves a ticket.
+type UseCase interface {
+	Handle(ctx context.Context, cmd Command) (domain.Ticket, error)
+}
+
+// HTTP adapts POST /api/agent/tickets/{id}/transitions onto the use case.
+func HTTP(h UseCase, resolve ports.CallerResolver) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		caller, ok := resolve(r.Context())
 		if !ok {
@@ -55,8 +48,8 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 			return
 		}
 
-		var body transitionRequest
-		if err := httpx.DecodeJSON(w, r, &body, MaxBodyBytes); err != nil {
+		var body request
+		if err := httpx.DecodeJSON(w, r, &body, tickethttp.MaxBodyBytes); err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the request body is not valid JSON")
 			return
 		}
@@ -66,7 +59,7 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 		target := domain.Status(body.To)
 		if body.To == "" {
 			fieldErrs["to"] = "is required"
-		} else if !slices.Contains(ValidStatuses, target) {
+		} else if !slices.Contains(tickethttp.ValidStatuses, target) {
 			// Rejected here rather than passed down, so an unknown word never
 			// reaches the state machine. The domain would refuse it too, but as
 			// "you cannot go from open to blorp", which reads like an edge that
@@ -91,7 +84,7 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 			return
 		}
 
-		updated, err := tickets.Transition(r.Context(), application.StatusChange{
+		updated, err := h.Handle(r.Context(), Command{
 			TicketID:  ticketID,
 			Target:    target,
 			ActorID:   caller.ID,
@@ -129,13 +122,13 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 
 		// The updated ticket, so a client needs no follow-up read to see the
 		// new deadline — which is the whole point of the request for a pause.
-		httpx.WriteJSON(w, r, http.StatusOK, NewAgentTicketResponse(updated))
+		httpx.WriteJSON(w, r, http.StatusOK, tickethttp.NewAgentTicketResponse(updated))
 	})
 }
 
 func statusList() string {
-	out := make([]string, len(ValidStatuses))
-	for i, s := range ValidStatuses {
+	out := make([]string, len(tickethttp.ValidStatuses))
+	for i, s := range tickethttp.ValidStatuses {
 		out[i] = string(s)
 	}
 	return strings.Join(out, ", ")

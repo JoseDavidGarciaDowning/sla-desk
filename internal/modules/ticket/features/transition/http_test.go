@@ -1,4 +1,4 @@
-package http_test
+package transition_test
 
 import (
 	"context"
@@ -11,18 +11,19 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/transition"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 )
 
 type transitionSpy struct {
 	called bool
-	got    application.StatusChange
+	got    transition.Command
 	err    error
 }
 
-func (s *transitionSpy) Transition(_ context.Context, in application.StatusChange) (domain.Ticket, error) {
+func (s *transitionSpy) Handle(_ context.Context, in transition.Command) (domain.Ticket, error) {
 	s.called = true
 	s.got = in
 	if s.err != nil {
@@ -34,12 +35,12 @@ func (s *transitionSpy) Transition(_ context.Context, in application.StatusChang
 func postTransition(t *testing.T, spy *transitionSpy, role domain.Role, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	caller := tickethttp.Caller{ID: uuid.New(), Role: role}
-	resolve := func(context.Context) (tickethttp.Caller, bool) { return caller, true }
+	caller := ports.Caller{ID: uuid.New(), Role: role}
+	resolve := func(context.Context) (ports.Caller, bool) { return caller, true }
 
 	r := chi.NewRouter()
 	r.Method(http.MethodPost, "/tickets/{id}"+tickethttp.TransitionsSuffix,
-		tickethttp.TransitionTicketHandler(spy, resolve))
+		transition.HTTP(spy, resolve))
 
 	req := httptest.NewRequest(http.MethodPost,
 		"/tickets/"+uuid.New().String()+tickethttp.TransitionsSuffix, strings.NewReader(body))

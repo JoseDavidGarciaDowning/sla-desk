@@ -97,7 +97,7 @@ func TestTheRefusalDoesNotNameTheRequiredRoles(t *testing.T) {
 
 // 401, not 403. No user in the context means the request never passed through
 // RequireAuth, which is a wiring mistake rather than a permission problem —
-// the same distinction tickethttp.CallerResolver already makes. Answering 403
+// the same distinction ticketports.CallerResolver already makes. Answering 403
 // would tell an unauthenticated caller they are logged in as the wrong person.
 func TestARequestThatSkippedAuthenticationIsUnauthorized(t *testing.T) {
 	reached := false

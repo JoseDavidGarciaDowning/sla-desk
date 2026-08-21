@@ -8,8 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/transition"
 	ticketdb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/generated"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 )
@@ -42,7 +42,7 @@ func (r *Repository) PolicyIDOf(ctx context.Context, id uuid.UUID) (int64, error
 // Reading the history before the insert leaves the cache exactly one event
 // behind: a plausible-looking corruption that no unit test of the arithmetic
 // would ever find, because the arithmetic is right and the input is stale.
-func (r *Repository) Transition(ctx context.Context, in application.StatusChange, clock ports.SLAClock) (domain.Ticket, error) {
+func (r *Repository) Transition(ctx context.Context, in transition.Command, clock ports.SLAClock) (domain.Ticket, error) {
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return domain.Ticket{}, fmt.Errorf("begin: %w", err)

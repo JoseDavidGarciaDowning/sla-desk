@@ -21,9 +21,10 @@ import (
 	slaapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
-	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	ticketassign "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/assign"
 	ticketcreate "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/create"
+	tickettransition "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/transition"
 	ticketpostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres"
 	ticketdb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/generated"
 )
@@ -39,12 +40,10 @@ type repoFixture struct {
 	// it. The write paths are exercised through this rather than through repo,
 	// because resolving-then-writing is the sequence production runs and the
 	// repository alone cannot produce a clock.
-	svc *ticketapp.Service
-
-	// creator is the create use case, which now lives in its own feature
-	// rather than on Service. The fixture holds both while the agent use
-	// cases are still on Service.
+	// One handler per use case, which is what the module now offers. The
+	// Service that held all of them as methods is gone.
 	creator *ticketcreate.Handler
+	mover   *tickettransition.Handler
 
 	// identity backs the assignee directory. Built from the real repository
 	// rather than a stub, because what T21 needs to prove is that a customer's
@@ -112,8 +111,8 @@ func newRepoFixture(t *testing.T) repoFixture {
 		ctx:       ctx,
 		pool:      pool,
 		repo:      repo,
-		svc:       ticketapp.NewService(repo, sla, app.AssigneeDirectory{Users: identity}),
 		creator:   ticketcreate.New(repo, sla),
+		mover:     tickettransition.New(repo, sla),
 		identity:  identity,
 		requester: requester,
 	}
@@ -438,7 +437,7 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 		t.Fatalf("breaking the policy: %v", err)
 	}
 
-	if _, err := f.svc.Transition(f.ctx, ticketapp.StatusChange{
+	if _, err := f.mover.Handle(f.ctx, tickettransition.Command{
 		TicketID:  tk.ID,
 		Target:    ticketdomain.StatusPending,
 		ActorID:   f.requester,
@@ -478,7 +477,7 @@ func TestTransitionRefusesToLeaveClosed(t *testing.T) {
 	}
 
 	for _, target := range []ticketdomain.Status{ticketdomain.StatusResolved, ticketdomain.StatusClosed} {
-		tk, err = f.svc.Transition(f.ctx, ticketapp.StatusChange{
+		tk, err = f.mover.Handle(f.ctx, tickettransition.Command{
 			TicketID: tk.ID, Target: target, ActorID: f.requester, ActorRole: ticketdomain.RoleAdmin,
 		})
 		if err != nil {
@@ -486,7 +485,7 @@ func TestTransitionRefusesToLeaveClosed(t *testing.T) {
 		}
 	}
 
-	_, err = f.svc.Transition(f.ctx, ticketapp.StatusChange{
+	_, err = f.mover.Handle(f.ctx, tickettransition.Command{
 		TicketID: tk.ID, Target: ticketdomain.StatusOpen, ActorID: f.requester, ActorRole: ticketdomain.RoleAdmin,
 	})
 	if !errors.Is(err, ticketdomain.ErrInvalidTransition) {
@@ -507,7 +506,7 @@ func TestPausingStopsTheClockAndResumingKeepsWhatWasSpent(t *testing.T) {
 
 	time.Sleep(5 * time.Millisecond)
 
-	paused, err := f.svc.Transition(f.ctx, ticketapp.StatusChange{
+	paused, err := f.mover.Handle(f.ctx, tickettransition.Command{
 		TicketID: tk.ID, Target: ticketdomain.StatusPending, ActorID: f.requester, ActorRole: ticketdomain.RoleAdmin,
 	})
 	if err != nil {
@@ -528,7 +527,7 @@ func TestPausingStopsTheClockAndResumingKeepsWhatWasSpent(t *testing.T) {
 	// Time spent waiting on the customer must not consume budget.
 	time.Sleep(20 * time.Millisecond)
 
-	resumed, err := f.svc.Transition(f.ctx, ticketapp.StatusChange{
+	resumed, err := f.mover.Handle(f.ctx, tickettransition.Command{
 		TicketID: tk.ID, Target: ticketdomain.StatusOpen, ActorID: f.requester, ActorRole: ticketdomain.RoleCustomer,
 	})
 	if err != nil {
@@ -745,10 +744,7 @@ func TestOnlyAnAgentOrAdminMayBeAssigned(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	svc := ticketapp.NewService(f.repo,
-		app.SLAPolicies{Policies: slaapp.NewPolicies(slapostgres.NewPolicyRepository(f.pool))},
-		app.AssigneeDirectory{Users: f.identity},
-	)
+	svc := ticketassign.New(f.repo, app.AssigneeDirectory{Users: f.identity})
 
 	cases := []struct {
 		role    identitydomain.Role
@@ -763,18 +759,18 @@ func TestOnlyAnAgentOrAdminMayBeAssigned(t *testing.T) {
 		t.Run(string(tc.role), func(t *testing.T) {
 			target := f.assignable(t, "target", tc.role)
 
-			_, err := svc.Assign(f.ctx, created.ID, &target)
+			_, err := svc.Handle(f.ctx, created.ID, &target)
 			switch {
 			case tc.allowed && err != nil:
 				t.Errorf("Assign: %v", err)
-			case !tc.allowed && !errors.Is(err, ticketapp.ErrNotAssignable):
+			case !tc.allowed && !errors.Is(err, ticketassign.ErrNotAssignable):
 				t.Errorf("error = %v, want ErrNotAssignable", err)
 			}
 		})
 	}
 
 	// An id that names nobody gets the same answer as a customer's.
-	if _, err := svc.Assign(f.ctx, created.ID, &[]uuid.UUID{uuid.New()}[0]); !errors.Is(err, ticketapp.ErrNotAssignable) {
+	if _, err := svc.Handle(f.ctx, created.ID, &[]uuid.UUID{uuid.New()}[0]); !errors.Is(err, ticketassign.ErrNotAssignable) {
 		t.Errorf("an unknown id gave %v, want the same refusal a customer gets", err)
 	}
 }
@@ -873,7 +869,7 @@ func TestEveryTransitionAppendsExactlyOneHistoryRow(t *testing.T) {
 	for _, target := range []ticketdomain.Status{
 		ticketdomain.StatusPending, ticketdomain.StatusOpen, ticketdomain.StatusResolved,
 	} {
-		if _, err := f.svc.Transition(f.ctx, ticketapp.StatusChange{
+		if _, err := f.mover.Handle(f.ctx, tickettransition.Command{
 			TicketID: created.ID, Target: target,
 			ActorID: agent, ActorRole: ticketdomain.RoleAgent,
 		}); err != nil {
@@ -909,7 +905,7 @@ func TestACustomerMayNotTakeAnAgentsEdge(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	_, err = f.svc.Transition(f.ctx, ticketapp.StatusChange{
+	_, err = f.mover.Handle(f.ctx, tickettransition.Command{
 		TicketID: created.ID, Target: ticketdomain.StatusPending,
 		ActorID: f.requester, ActorRole: ticketdomain.RoleCustomer,
 	})

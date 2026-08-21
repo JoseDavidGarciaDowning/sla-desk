@@ -96,3 +96,38 @@ func NewTicketHistoryResponse(rows []domain.HistoryEntry) TicketHistoryResponse 
 	}
 	return TicketHistoryResponse{Entries: entries}
 }
+
+// AgentTicketResponse is a ticket as an agent sees it: everything a customer
+// sees about their own, plus who is on it.
+//
+// Shared here rather than owned by a feature because three of them return it:
+// the agent's ticket read, an assignment and a transition.
+//
+// A separate type rather than a field added to TicketResponse, and the reason
+// is who reads each one. TicketResponse is what a customer gets back for their
+// own ticket, and putting an assignee id in it would hand every customer the
+// primary key of the agent working their case — the leak T14b closed by
+// dropping actor_id from the history and T19 avoided by sending requester_name
+// instead of an id.
+//
+// Embedded rather than restated, so a field added to TicketResponse appears
+// here without anyone remembering. The two views of a ticket must not disagree
+// about what a ticket is.
+type AgentTicketResponse struct {
+	TicketResponse
+	AssigneeID *string `json:"assignee_id"`
+}
+
+// NewAgentTicketResponse maps a ticket onto the agent's wire shape.
+func NewAgentTicketResponse(row domain.Ticket) AgentTicketResponse {
+	var assignee *string
+	if row.AssigneeID != nil {
+		id := row.AssigneeID.String()
+		assignee = &id
+	}
+
+	return AgentTicketResponse{
+		TicketResponse: NewTicketResponse(row),
+		AssigneeID:     assignee,
+	}
+}

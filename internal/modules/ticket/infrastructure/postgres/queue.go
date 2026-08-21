@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/queue"
 	ticketdb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/generated"
 )
 
@@ -25,7 +25,7 @@ import (
 // so the value compared is the one the ORDER BY produced. A paused ticket's
 // position is 'infinity', and passing its bare NULL would make the row
 // comparison NULL and drop every paused ticket from the next page.
-func (r *Repository) ListForQueue(ctx context.Context, f application.QueueFilter) ([]application.QueueEntry, error) {
+func (r *Repository) ListForQueue(ctx context.Context, f queue.Filter) ([]queue.Entry, error) {
 	rows, err := r.q.ListTicketsForQueue(ctx, ticketdb.ListTicketsForQueueParams{
 		Status:         (*string)(f.Status),
 		Priority:       (*string)(f.Priority),
@@ -39,7 +39,7 @@ func (r *Repository) ListForQueue(ctx context.Context, f application.QueueFilter
 		return nil, fmt.Errorf("listing the queue: %w", err)
 	}
 
-	out := make([]application.QueueEntry, len(rows))
+	out := make([]queue.Entry, len(rows))
 	for i, row := range rows {
 		name := ""
 		if row.RequesterName != nil {
@@ -50,7 +50,7 @@ func (r *Repository) ListForQueue(ctx context.Context, f application.QueueFilter
 		// signed up with an email and a password, so one of them is often
 		// empty — which of the two to show is a display decision and is made
 		// in the DTO, not here.
-		out[i] = application.QueueEntry{
+		out[i] = queue.Entry{
 			Ticket:         ticketFrom(queueRowToTicket(row)),
 			RequesterName:  name,
 			RequesterEmail: row.RequesterEmail,
