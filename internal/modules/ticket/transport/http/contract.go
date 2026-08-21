@@ -58,11 +58,11 @@ type Contract struct {
 // themselves.
 func TicketContract() Contract {
 	return Contract{
-		MaxTitleLength:       maxTitleLength,
-		MaxDescriptionLength: maxDescriptionLength,
-		Categories:           validCategories,
-		Priorities:           validPriorities,
-		Statuses:             validStatuses,
+		MaxTitleLength:       MaxTitleLength,
+		MaxDescriptionLength: MaxDescriptionLength,
+		Categories:           ValidCategories,
+		Priorities:           ValidPriorities,
+		Statuses:             ValidStatuses,
 		Roles:                domain.ActorRoles(),
 		Transitions:          domain.Edges(),
 	}

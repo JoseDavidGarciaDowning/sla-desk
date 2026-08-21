@@ -1,11 +1,12 @@
-// Package application holds the ticket use cases and the contracts they need
-// from everything outside this module.
+// Package application holds the ticket use cases that have not moved into
+// features yet, and the contracts they still need.
 //
-// Every interface here is declared by the consumer — this package — and never
-// by whoever implements it (docs/spec.md §8). That is what makes the module
-// independently evolvable: it states what it needs in its own vocabulary, and
-// the composition root is responsible for finding something that can provide
-// it. Nothing in this module imports another business module.
+// It is on its way out. Four of its nine use cases now live in features/, each
+// declaring the narrow port it needs beside the handler that uses it; what is
+// left here are the agent's five, which move in the next slice. When they do,
+// this package goes away and Service with it.
+//
+// Nothing here is a pattern to copy. New use cases go in features/.
 package application
 
 import (
@@ -16,66 +17,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 )
-
-// ErrNoSLAPolicy means nothing serves that priority.
-//
-// Declared here rather than re-exported from whatever implements SLAPolicies,
-// because this module does not know what that is. The adapter in the
-// composition root translates the provider's own sentinel into this one, so a
-// handler can tell "our seed data is wrong" apart from "the database is down"
-// without importing another module to do it.
-var ErrNoSLAPolicy = errors.New("ticket: no SLA policy serves that priority")
-
-// ErrTicketNotFound means no ticket has that id, or it is not the caller's.
-//
-// The two are deliberately the same error. A 403 would confirm that an id names
-// a real ticket, which is exactly what a caller must not be able to learn
-// (docs/spec.md §11), and the queries return nothing for both cases so nothing
-// here could tell them apart even if it wanted to.
-var ErrTicketNotFound = errors.New("ticket: no ticket with that id")
-
-// SLAClock is a resolved SLA policy: it computes clock state from a timeline
-// with no further I/O.
-//
-// The split between resolving and computing is not incidental — it is what lets
-// the repository do its read *before* opening its transaction. Calling out to
-// another module mid-transaction would hold a second pooled connection for the
-// transaction's duration, and pgxpool defaults to max(4, NumCPU), so enough
-// concurrent writes would wait on each other.
-type SLAClock interface {
-	// PolicyID is the policy this clock was resolved from, snapshotted onto the
-	// ticket so that editing a policy does not move existing deadlines.
-	PolicyID() int64
-
-	// Compute is pure. It touches nothing and may be called inside a
-	// transaction.
-	Compute(timeline []domain.Phase) (ClockState, error)
-}
-
-// ClockState is what an SLA calculation yields.
-//
-// RunningSince and DueAt are both nil or both set: a paused ticket has no
-// deadline and therefore cannot breach (docs/spec.md §4.2). The tickets table
-// carries CHECK constraints saying the same thing, so an implementation that
-// got this wrong would be refused by the database rather than stored.
-type ClockState struct {
-	BudgetUsed   time.Duration
-	RunningSince *time.Time
-	DueAt        *time.Time
-}
-
-// SLAPolicies resolves SLA clocks.
-//
-// Implemented in the composition root against the SLA module. This package does
-// not know that module exists, and states its needs in its own Priority type.
-type SLAPolicies interface {
-	// ForPriority resolves the policy a new ticket should be created under.
-	ForPriority(ctx context.Context, p domain.Priority) (SLAClock, error)
-
-	// ForPolicy reads the policy a ticket was already snapshotted with.
-	ForPolicy(ctx context.Context, id int64) (SLAClock, error)
-}
 
 // ErrNotAssignable means the id offered as an assignee may not hold tickets.
 //
@@ -87,10 +30,10 @@ var ErrNotAssignable = errors.New("ticket: that user may not hold tickets")
 
 // AssigneeDirectory answers whether an id may be put on a ticket.
 //
-// Declared here, by the consumer, and implemented in the composition root
-// against the identity module (docs/adr/0005). assignee_id is a bare foreign
-// key to users, so the database will happily accept a customer's id there; this
-// module cannot check it, because it does not know the identity module exists.
+// Declared by the consumer and implemented in the composition root against the
+// identity module (docs/adr/0005). assignee_id is a bare foreign key to users,
+// so the database will happily accept a customer's id there; this module cannot
+// check it, because it does not know the identity module exists.
 //
 // So it asks the question in its own words. "May this person hold tickets" is
 // what this module needs to know; that the answer happens to be "their role is
@@ -104,20 +47,6 @@ type AssigneeDirectory interface {
 	CanHoldTickets(ctx context.Context, id uuid.UUID) (bool, error)
 }
 
-// NewTicket is everything a caller supplies to create one.
-//
-// The status, the clock and the policy are not in it — they are consequences,
-// not inputs. Neither is the requester's identity trusted from a client: it
-// arrives from the authenticated caller (docs/spec.md §4.3).
-type NewTicket struct {
-	RequesterID uuid.UUID
-	ActorRole   domain.Role
-	Title       string
-	Description string
-	Category    domain.Category
-	Priority    domain.Priority
-}
-
 // StatusChange is a request to move a ticket.
 type StatusChange struct {
 	TicketID  uuid.UUID
@@ -125,24 +54,6 @@ type StatusChange struct {
 	ActorID   uuid.UUID
 	ActorRole domain.Role
 	Reason    *string
-}
-
-// ListFilter is one page of a requester's tickets.
-//
-// Status and Priority are pointers because absent and "the empty value" are
-// different questions, and a filter that cannot express "no filter" silently
-// returns nothing.
-type ListFilter struct {
-	RequesterID uuid.UUID
-	Status      *domain.Status
-	Priority    *domain.Priority
-
-	// AfterCreatedAt and AfterID carry the last row of the previous page.
-	// Keyset pagination, not OFFSET: see the query for why.
-	AfterCreatedAt *time.Time
-	AfterID        *uuid.UUID
-
-	PageSize int32
 }
 
 // AssigneeScope says which tickets a queue page is about, by assignee.
@@ -161,11 +72,11 @@ const (
 
 // QueueFilter is one page of every ticket, in deadline order.
 //
-// Deliberately not ListFilter with the requester made optional. The two are
-// different reads with different guarantees: ListFilter always carries a
-// requester and its query always scopes by one, and merging them would put the
-// distinction in a field that a caller can leave unset (tasks/slice-2/plan.md
-// decision B).
+// Deliberately not the customer list's filter with the requester made optional.
+// The two are different reads with different guarantees: the customer's always
+// carries a requester and its query always scopes by one, and merging them
+// would put the distinction in a field a caller can leave unset
+// (tasks/slice-2/plan.md decision B).
 type QueueFilter struct {
 	Status   *domain.Status
 	Priority *domain.Priority
@@ -214,31 +125,19 @@ type QueueEntry struct {
 	RequesterEmail string
 }
 
-// Repository stores and reads tickets.
+// Repository is what the agent use cases still need from storage.
 //
-// The write methods own their transactions, because the fact and the cache have
-// to commit together (docs/spec.md §4.1). They take an already-resolved
-// SLAClock for the reason given on that type: no I/O belonging to another
-// module happens inside them.
+// Four methods shorter than it was: creating, listing, reading and reading the
+// timeline of a customer's own ticket are now declared by the features that do
+// them, one narrow port each. What remains is the agent's five plus PolicyIDOf,
+// and it shrinks to nothing in the next slice.
 type Repository interface {
-	Create(ctx context.Context, in NewTicket, clock SLAClock) (domain.Ticket, error)
-	Transition(ctx context.Context, in StatusChange, clock SLAClock) (domain.Ticket, error)
+	Transition(ctx context.Context, in StatusChange, clock ports.SLAClock) (domain.Ticket, error)
 
 	// PolicyIDOf reads which policy a ticket was created under, and nothing
 	// else. It exists so the clock can be resolved before Transition opens its
 	// transaction.
 	PolicyIDOf(ctx context.Context, id uuid.UUID) (int64, error)
-
-	// The read methods scope by requester in the query rather than filtering
-	// afterwards. A forgotten check in Go must not be enough to leak another
-	// customer's ticket (docs/spec.md §4.3).
-	//
-	// All three share the ForRequester suffix and differ only in what they
-	// return. They used to read ListByRequester, GetForRequester and
-	// HistoryForRequester: two prepositions for one relationship, and a Get
-	// prefix on the only one that had it. Which was which had to be remembered
-	// rather than worked out.
-	ListForRequester(ctx context.Context, f ListFilter) ([]domain.Ticket, error)
 
 	// ListForQueue reads every ticket, scoped by nothing. It is reachable only
 	// from handlers mounted behind a role check, and that placement is the
@@ -247,10 +146,10 @@ type Repository interface {
 
 	// OneByID and Timeline are the unscoped reads of a single ticket, for a
 	// caller who is not its requester. They sit beside their ForRequester
-	// counterparts rather than replacing them: an agent reading a ticket and a
-	// customer reading their own are different questions with different
-	// answers, and one method that took an optional requester would let a
-	// caller ask the wrong one by leaving a field unset.
+	// counterparts in the same adapter rather than replacing them: an agent
+	// reading a ticket and a customer reading their own are different questions
+	// with different answers, and one method that took an optional requester
+	// would let a caller ask the wrong one by leaving a field unset.
 	OneByID(ctx context.Context, id uuid.UUID) (domain.Ticket, error)
 	Timeline(ctx context.Context, ticketID uuid.UUID) ([]domain.HistoryEntry, error)
 
@@ -262,6 +161,4 @@ type Repository interface {
 	// status. A row for it would pad the timeline Reconstruct walks, and the
 	// consistency test would be right to fail.
 	Assign(ctx context.Context, ticketID uuid.UUID, assignee *uuid.UUID) (domain.Ticket, error)
-	OneForRequester(ctx context.Context, id, requesterID uuid.UUID) (domain.Ticket, error)
-	HistoryForRequester(ctx context.Context, ticketID, requesterID uuid.UUID) ([]domain.HistoryEntry, error)
 }

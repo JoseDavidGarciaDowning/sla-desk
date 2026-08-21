@@ -154,7 +154,7 @@ func TestAnOverlongReasonIsRejected(t *testing.T) {
 }
 
 func TestTransitioningAnUnknownTicketIs404(t *testing.T) {
-	spy := &transitionSpy{err: application.ErrTicketNotFound}
+	spy := &transitionSpy{err: domain.ErrTicketNotFound}
 
 	rec := postTransition(t, spy, domain.RoleAgent, `{"to":"pending"}`)
 

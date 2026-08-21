@@ -146,7 +146,7 @@ func TestAnUnassignableUserIsAFieldError(t *testing.T) {
 }
 
 func TestAssigningAnUnknownTicketIs404(t *testing.T) {
-	spy := &assignSpy{err: application.ErrTicketNotFound}
+	spy := &assignSpy{err: domain.ErrTicketNotFound}
 
 	rec := assignPatch(t, spy, `{"assignee_id":"`+uuid.New().String()+`"}`)
 

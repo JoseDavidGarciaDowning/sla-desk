@@ -9,6 +9,7 @@ import (
 
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 )
 
 // queueStubRepo records the filter the service passed down.
@@ -23,25 +24,10 @@ func (r *queueStubRepo) ListForQueue(_ context.Context, f application.QueueFilte
 	return nil, nil
 }
 
-func (r *queueStubRepo) Create(context.Context, application.NewTicket, application.SLAClock) (domain.Ticket, error) {
-	return domain.Ticket{}, nil
-}
-
-func (r *queueStubRepo) Transition(context.Context, application.StatusChange, application.SLAClock) (domain.Ticket, error) {
+func (r *queueStubRepo) Transition(context.Context, application.StatusChange, ports.SLAClock) (domain.Ticket, error) {
 	return domain.Ticket{}, nil
 }
 func (r *queueStubRepo) PolicyIDOf(context.Context, uuid.UUID) (int64, error) { return 0, nil }
-func (r *queueStubRepo) ListForRequester(context.Context, application.ListFilter) ([]domain.Ticket, error) {
-	return nil, nil
-}
-
-func (r *queueStubRepo) OneForRequester(context.Context, uuid.UUID, uuid.UUID) (domain.Ticket, error) {
-	return domain.Ticket{}, nil
-}
-
-func (r *queueStubRepo) HistoryForRequester(context.Context, uuid.UUID, uuid.UUID) ([]domain.HistoryEntry, error) {
-	return nil, nil
-}
 
 func (r *queueStubRepo) OneByID(context.Context, uuid.UUID) (domain.Ticket, error) {
 	return domain.Ticket{}, nil

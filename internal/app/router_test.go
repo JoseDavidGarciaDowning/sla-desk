@@ -18,6 +18,9 @@ import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket"
 	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	ticketcreate "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/create"
+	ticketlist "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/list"
+	ticketports "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 	tickethttp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/transport/http"
 
 	"github.com/google/uuid"
@@ -325,17 +328,17 @@ func (stubDirectory) CanHoldTickets(context.Context, uuid.UUID) (bool, error) { 
 
 type stubTicketRepo struct{}
 
-func (stubTicketRepo) Create(context.Context, ticketapp.NewTicket, ticketapp.SLAClock) (ticketdomain.Ticket, error) {
+func (stubTicketRepo) Create(context.Context, ticketcreate.Command, ticketports.SLAClock) (ticketdomain.Ticket, error) {
 	return ticketdomain.Ticket{}, nil
 }
 
-func (stubTicketRepo) Transition(context.Context, ticketapp.StatusChange, ticketapp.SLAClock) (ticketdomain.Ticket, error) {
+func (stubTicketRepo) Transition(context.Context, ticketapp.StatusChange, ticketports.SLAClock) (ticketdomain.Ticket, error) {
 	return ticketdomain.Ticket{}, nil
 }
 
 func (stubTicketRepo) PolicyIDOf(context.Context, uuid.UUID) (int64, error) { return 1, nil }
 
-func (stubTicketRepo) ListForRequester(context.Context, ticketapp.ListFilter) ([]ticketdomain.Ticket, error) {
+func (stubTicketRepo) ListForRequester(context.Context, ticketlist.Filter) ([]ticketdomain.Ticket, error) {
 	return nil, nil
 }
 
@@ -371,11 +374,11 @@ func (stubTicketRepo) HistoryForRequester(context.Context, uuid.UUID, uuid.UUID)
 
 type stubSLA struct{}
 
-func (stubSLA) ForPriority(context.Context, ticketdomain.Priority) (ticketapp.SLAClock, error) {
+func (stubSLA) ForPriority(context.Context, ticketdomain.Priority) (ticketports.SLAClock, error) {
 	return nil, nil
 }
 
-func (stubSLA) ForPolicy(context.Context, int64) (ticketapp.SLAClock, error) { return nil, nil }
+func (stubSLA) ForPolicy(context.Context, int64) (ticketports.SLAClock, error) { return nil, nil }
 
 // --- The agent route group (slice 2, T18) ---------------------------------
 

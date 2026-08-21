@@ -17,14 +17,6 @@ import (
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/platform/httpx"
 )
 
-// TransitionsSuffix is appended to a ticket's path in the agent group.
-//
-// Plural, and a POST rather than a PATCH on the status: a transition is a thing
-// that happened, appended to a history, and not a field being overwritten. The
-// ticket_status_history row is the fact and tickets.status is a cache of it
-// (docs/spec.md §4.2), so the URL says which of the two the client is adding to.
-const TransitionsSuffix = "/transitions"
-
 // maxReasonLength bounds the note an agent may attach. It is not a comment —
 // comments are slice 4 — so it is short on purpose.
 const maxReasonLength = 500
@@ -64,7 +56,7 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 		}
 
 		var body transitionRequest
-		if err := httpx.DecodeJSON(w, r, &body, maxTicketBody); err != nil {
+		if err := httpx.DecodeJSON(w, r, &body, MaxBodyBytes); err != nil {
 			httperr.Write(w, http.StatusBadRequest, "the request body is not valid JSON")
 			return
 		}
@@ -74,7 +66,7 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 		target := domain.Status(body.To)
 		if body.To == "" {
 			fieldErrs["to"] = "is required"
-		} else if !slices.Contains(validStatuses, target) {
+		} else if !slices.Contains(ValidStatuses, target) {
 			// Rejected here rather than passed down, so an unknown word never
 			// reaches the state machine. The domain would refuse it too, but as
 			// "you cannot go from open to blorp", which reads like an edge that
@@ -126,7 +118,7 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 				"to": "that transition is not possible from this ticket's status",
 			})
 			return
-		case errors.Is(err, application.ErrTicketNotFound):
+		case errors.Is(err, domain.ErrTicketNotFound):
 			httperr.Write(w, http.StatusNotFound, "no such ticket")
 			return
 		case err != nil:
@@ -142,8 +134,8 @@ func TransitionTicketHandler(tickets TicketTransitioner, resolve CallerResolver)
 }
 
 func statusList() string {
-	out := make([]string, len(validStatuses))
-	for i, s := range validStatuses {
+	out := make([]string, len(ValidStatuses))
+	for i, s := range ValidStatuses {
 		out[i] = string(s)
 	}
 	return strings.Join(out, ", ")

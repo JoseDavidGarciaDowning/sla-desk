@@ -48,7 +48,7 @@ func TestCacheAlwaysMatchesTheHistoryItWasBuiltFrom(t *testing.T) {
 	rng := rand.New(rand.NewPCG(seed, 0x5eed))
 
 	for run := range sequences {
-		tk, err := f.svc.Create(f.ctx, f.newTicket(randomPriority(rng)))
+		tk, err := f.creator.Handle(f.ctx, f.newTicket(randomPriority(rng)))
 		if err != nil {
 			t.Fatalf("run %d: Create: %v", run, err)
 		}

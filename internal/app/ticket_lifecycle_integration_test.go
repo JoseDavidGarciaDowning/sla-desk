@@ -23,6 +23,7 @@ import (
 	slapostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
 	ticketapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/application"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
+	ticketcreate "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/create"
 	ticketpostgres "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres"
 	ticketdb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/infrastructure/postgres/generated"
 )
@@ -39,6 +40,11 @@ type repoFixture struct {
 	// because resolving-then-writing is the sequence production runs and the
 	// repository alone cannot produce a clock.
 	svc *ticketapp.Service
+
+	// creator is the create use case, which now lives in its own feature
+	// rather than on Service. The fixture holds both while the agent use
+	// cases are still on Service.
+	creator *ticketcreate.Handler
 
 	// identity backs the assignee directory. Built from the real repository
 	// rather than a stub, because what T21 needs to prove is that a customer's
@@ -107,13 +113,14 @@ func newRepoFixture(t *testing.T) repoFixture {
 		pool:      pool,
 		repo:      repo,
 		svc:       ticketapp.NewService(repo, sla, app.AssigneeDirectory{Users: identity}),
+		creator:   ticketcreate.New(repo, sla),
 		identity:  identity,
 		requester: requester,
 	}
 }
 
-func (f repoFixture) newTicket(priority ticketdomain.Priority) ticketapp.NewTicket {
-	return ticketapp.NewTicket{
+func (f repoFixture) newTicket(priority ticketdomain.Priority) ticketcreate.Command {
+	return ticketcreate.Command{
 		RequesterID: f.requester,
 		ActorRole:   ticketdomain.RoleCustomer,
 		Title:       "Cannot download my invoice",
@@ -126,7 +133,7 @@ func (f repoFixture) newTicket(priority ticketdomain.Priority) ticketapp.NewTick
 func TestCreateStartsTheClockRunning(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	tk, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -167,7 +174,7 @@ func TestDeadlineIsTheSeededBudgetForEveryPriority(t *testing.T) {
 
 	for priority, budget := range budgets {
 		t.Run(string(priority), func(t *testing.T) {
-			tk, err := f.svc.Create(f.ctx, f.newTicket(priority))
+			tk, err := f.creator.Handle(f.ctx, f.newTicket(priority))
 			if err != nil {
 				t.Fatalf("Create: %v", err)
 			}
@@ -195,7 +202,7 @@ func TestDeadlineIsTheSeededBudgetForEveryPriority(t *testing.T) {
 func TestCachedClockMatchesTheReconstructionFromHistory(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityUrgent))
+	tk, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityUrgent))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -250,7 +257,7 @@ func TestAFailedHistoryWriteLeavesNoTicket(t *testing.T) {
 	in := f.newTicket(ticketdomain.PriorityNormal)
 	in.ActorRole = "superadmin" // rejected by ticket_status_history_actor_role_valid
 
-	if _, err := f.svc.Create(f.ctx, in); err == nil {
+	if _, err := f.creator.Handle(f.ctx, in); err == nil {
 		t.Fatal("Create succeeded with an invalid actor role")
 	}
 
@@ -274,8 +281,8 @@ func TestCreateReportsAnUnservedPriority(t *testing.T) {
 
 	in := f.newTicket("critical") // no seeded policy, and not a legal value
 
-	_, err := f.svc.Create(f.ctx, in)
-	if !errors.Is(err, ticketapp.ErrNoSLAPolicy) {
+	_, err := f.creator.Handle(f.ctx, in)
+	if !errors.Is(err, ticketdomain.ErrNoSLAPolicy) {
 		t.Errorf("err = %v, want ErrNoPolicyForPriority", err)
 	}
 }
@@ -290,7 +297,7 @@ func TestPaginationIsStableAcrossAnInsert(t *testing.T) {
 
 	const total = 5
 	for range total {
-		if _, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal)); err != nil {
+		if _, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
@@ -317,7 +324,7 @@ func TestPaginationIsStableAcrossAnInsert(t *testing.T) {
 	// A ticket arrives between the two reads. With OFFSET 2 the second page
 	// would start one row too late and the caller would never see one of the
 	// original tickets.
-	if _, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityUrgent)); err != nil {
+	if _, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityUrgent)); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -349,7 +356,7 @@ func TestCursorSeparatesTicketsSharingATimestamp(t *testing.T) {
 
 	// Each Create is its own transaction, so force the tie instead.
 	for range 3 {
-		if _, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal)); err != nil {
+		if _, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal)); err != nil {
 			t.Fatalf("Create: %v", err)
 		}
 	}
@@ -402,7 +409,7 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 	f := newRepoFixture(t)
 	q := ticketdb.New(f.pool)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	tk, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -465,7 +472,7 @@ func TestAFailedCacheUpdateLeavesNoHistoryRow(t *testing.T) {
 func TestTransitionRefusesToLeaveClosed(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	tk, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -493,7 +500,7 @@ func TestTransitionRefusesToLeaveClosed(t *testing.T) {
 func TestPausingStopsTheClockAndResumingKeepsWhatWasSpent(t *testing.T) {
 	f := newRepoFixture(t)
 
-	tk, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityUrgent))
+	tk, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityUrgent))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -557,7 +564,7 @@ func TestPausingStopsTheClockAndResumingKeepsWhatWasSpent(t *testing.T) {
 func TestTheRepositoryReadsATicketWithoutARequester(t *testing.T) {
 	f := newRepoFixture(t)
 
-	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	created, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -580,7 +587,7 @@ func TestTheRepositoryReadsATicketWithoutARequester(t *testing.T) {
 func TestOneByIDDoesNotNeedARequesterToSucceed(t *testing.T) {
 	f := newRepoFixture(t)
 
-	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityUrgent))
+	created, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityUrgent))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -596,7 +603,7 @@ func TestOneByIDDoesNotNeedARequesterToSucceed(t *testing.T) {
 func TestTheRepositoryReadsATimelineWithoutARequester(t *testing.T) {
 	f := newRepoFixture(t)
 
-	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	created, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -618,10 +625,10 @@ func TestTheRepositoryReadsATimelineWithoutARequester(t *testing.T) {
 func TestAnUnknownIDIsReportedAsNotFound(t *testing.T) {
 	f := newRepoFixture(t)
 
-	if _, err := f.repo.OneByID(f.ctx, uuid.New()); !errors.Is(err, ticketapp.ErrTicketNotFound) {
+	if _, err := f.repo.OneByID(f.ctx, uuid.New()); !errors.Is(err, ticketdomain.ErrTicketNotFound) {
 		t.Errorf("OneByID error = %v, want ErrTicketNotFound", err)
 	}
-	if _, err := f.repo.Timeline(f.ctx, uuid.New()); !errors.Is(err, ticketapp.ErrTicketNotFound) {
+	if _, err := f.repo.Timeline(f.ctx, uuid.New()); !errors.Is(err, ticketdomain.ErrTicketNotFound) {
 		t.Errorf("Timeline error = %v, want ErrTicketNotFound", err)
 	}
 }
@@ -678,7 +685,7 @@ func (f repoFixture) assignable(t *testing.T, label string, role identitydomain.
 func TestAssignmentWritesNoHistoryRowAndDoesNotTouchTheClock(t *testing.T) {
 	f := newRepoFixture(t)
 
-	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	created, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -733,7 +740,7 @@ func equalTimePtr(a, b *time.Time) bool {
 func TestOnlyAnAgentOrAdminMayBeAssigned(t *testing.T) {
 	f := newRepoFixture(t)
 
-	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	created, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -777,7 +784,7 @@ func TestOnlyAnAgentOrAdminMayBeAssigned(t *testing.T) {
 func TestReassigningOverwritesAndNilUnassigns(t *testing.T) {
 	f := newRepoFixture(t)
 
-	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	created, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -811,7 +818,7 @@ func TestAssigningAnUnknownTicketIsNotFound(t *testing.T) {
 	f := newRepoFixture(t)
 
 	agent := f.assignable(t, "orphan", identitydomain.RoleAgent)
-	if _, err := f.repo.Assign(f.ctx, uuid.New(), &agent); !errors.Is(err, ticketapp.ErrTicketNotFound) {
+	if _, err := f.repo.Assign(f.ctx, uuid.New(), &agent); !errors.Is(err, ticketdomain.ErrTicketNotFound) {
 		t.Errorf("error = %v, want ErrTicketNotFound", err)
 	}
 }
@@ -850,7 +857,7 @@ func TestAssigningAnUnknownTicketIsNotFound(t *testing.T) {
 func TestEveryTransitionAppendsExactlyOneHistoryRow(t *testing.T) {
 	f := newRepoFixture(t)
 
-	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	created, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -897,7 +904,7 @@ func TestEveryTransitionAppendsExactlyOneHistoryRow(t *testing.T) {
 func TestACustomerMayNotTakeAnAgentsEdge(t *testing.T) {
 	f := newRepoFixture(t)
 
-	created, err := f.svc.Create(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
+	created, err := f.creator.Handle(f.ctx, f.newTicket(ticketdomain.PriorityNormal))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
