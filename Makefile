@@ -91,7 +91,24 @@ test-int: ## Run the integration tests against the local Postgres (requires `mak
 		exit 1; \
 	}
 	$(MAKE) migrate-up
-	go test ./... -race -tags=integration -count=1
+	@# -p 1: one package at a time, and it is a correctness requirement rather
+	@# than a courtesy to the machine.
+	@#
+	@# These suites share one database and isolate themselves differently, both
+	@# deliberately. Most use a transaction they roll back. internal/app's
+	@# lifecycle tests use the pool and commit, because what they prove is that
+	@# a ticket and its history row commit *together* (docs/adr/0008) — which
+	@# cannot be observed inside a rollback.
+	@#
+	@# identity's roster tests then assert on the whole users table: one wants it
+	@# empty, another wants exactly three rows. Those answers are only stable
+	@# while nobody else is committing users and tickets at the same moment.
+	@#
+	@# Run in parallel they fail intermittently on a foreign key, and which test
+	@# fails depends on scheduling rather than on anything a diff would show.
+	@# Serialising is the honest reconciliation: a globally-scoped assertion and
+	@# a concurrent writer cannot both be right.
+	go test ./... -race -tags=integration -count=1 -p 1
 
 fmt: ## Format the Go sources
 	go tool golangci-lint fmt ./...
