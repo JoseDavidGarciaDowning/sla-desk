@@ -107,6 +107,141 @@ linters:
             - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/app
               desc: internal/platform sits below the composition root, not above it.
 
+        # ── The vertical slice invariant (rule 8) ──────────────────────────
+        #
+        # One rule per feature, each saying the same thing: this feature is
+        # private to itself. The architecture test asserts it too, on the
+        # transitive graph — but the graph walk uses the default build context
+        # and cannot see files behind //go:build integration, which is exactly
+        # where a feature borrowing a neighbour's fixture would hide. Enabling
+        # depguard once found seven such imports the graph walk had been
+        # passing over (docs/architecture.md).
+        #
+        # The negated glob is what keeps this to one deny per feature rather
+        # than one per pair: every feature file in the module, except the
+        # feature's own, is refused the import.
+        identity-feature-assignable-is-private:
+          files:
+            - "**/internal/modules/identity/features/**"
+            - "!**/internal/modules/identity/features/assignable/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/assignable
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into identity/domain, a contract into identity/ports,
+                a wire shape into identity/transport/http.
+        identity-feature-me-is-private:
+          files:
+            - "**/internal/modules/identity/features/**"
+            - "!**/internal/modules/identity/features/me/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/me
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into identity/domain, a contract into identity/ports,
+                a wire shape into identity/transport/http.
+        identity-feature-provision-is-private:
+          files:
+            - "**/internal/modules/identity/features/**"
+            - "!**/internal/modules/identity/features/provision/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/identity/features/provision
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into identity/domain, a contract into identity/ports,
+                a wire shape into identity/transport/http.
+        sla-feature-resolve-is-private:
+          files:
+            - "**/internal/modules/sla/features/**"
+            - "!**/internal/modules/sla/features/resolve/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/features/resolve
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into sla/domain, a contract into sla/ports,
+                a wire shape into sla/transport/http.
+        ticket-feature-assign-is-private:
+          files:
+            - "**/internal/modules/ticket/features/**"
+            - "!**/internal/modules/ticket/features/assign/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/assign
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into ticket/domain, a contract into ticket/ports,
+                a wire shape into ticket/transport/http.
+        ticket-feature-create-is-private:
+          files:
+            - "**/internal/modules/ticket/features/**"
+            - "!**/internal/modules/ticket/features/create/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/create
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into ticket/domain, a contract into ticket/ports,
+                a wire shape into ticket/transport/http.
+        ticket-feature-get-is-private:
+          files:
+            - "**/internal/modules/ticket/features/**"
+            - "!**/internal/modules/ticket/features/get/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/get
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into ticket/domain, a contract into ticket/ports,
+                a wire shape into ticket/transport/http.
+        ticket-feature-history-is-private:
+          files:
+            - "**/internal/modules/ticket/features/**"
+            - "!**/internal/modules/ticket/features/history/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/history
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into ticket/domain, a contract into ticket/ports,
+                a wire shape into ticket/transport/http.
+        ticket-feature-list-is-private:
+          files:
+            - "**/internal/modules/ticket/features/**"
+            - "!**/internal/modules/ticket/features/list/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/list
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into ticket/domain, a contract into ticket/ports,
+                a wire shape into ticket/transport/http.
+        ticket-feature-queue-is-private:
+          files:
+            - "**/internal/modules/ticket/features/**"
+            - "!**/internal/modules/ticket/features/queue/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/queue
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into ticket/domain, a contract into ticket/ports,
+                a wire shape into ticket/transport/http.
+        ticket-feature-transition-is-private:
+          files:
+            - "**/internal/modules/ticket/features/**"
+            - "!**/internal/modules/ticket/features/transition/**"
+          deny:
+            - pkg: github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/features/transition
+              desc: >-
+                A feature is a use case, and a use case that needs its
+                neighbour is not one. Move what they share below them both:
+                a rule into ticket/domain, a contract into ticket/ports,
+                a wire shape into ticket/transport/http.
+
         # ── Layer direction inside a module ────────────────────────────────
         domain-depends-on-nothing:
           files: ["**/internal/modules/*/domain/**"]
