@@ -5,21 +5,27 @@
 // surface: nothing here is exposed to a client directly, and other modules
 // reach it through contracts they declare for themselves rather than by
 // importing this package. See docs/adr/0005.
+//
+// It has one feature, and that is not a sign the convention was applied
+// carelessly — it is the convention working. features/ says where a use case
+// lives whether a module has one or nine, so nobody has to decide per module
+// whether this one is big enough to deserve the directory. What varies is how
+// much a feature is split inside, not whether it exists.
 package sla
 
 import (
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/features/resolve"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
 	sladb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres/generated"
 )
 
 // Module is everything this module offers.
 //
-// One field today. It is a struct rather than a bare *Policies so that adding
-// a second capability — the breach checker in slice 5 — is an added field here
-// rather than a changed signature at every call site.
+// One field today. It is a struct rather than a bare *resolve.Handler so that
+// adding a second capability — the breach checker in slice 5 — is an added
+// field here rather than a changed signature at every call site.
 type Module struct {
-	Policies *application.Policies
+	Policies *resolve.Handler
 }
 
 // New builds the module against a database handle.
@@ -30,6 +36,6 @@ type Module struct {
 // transaction is the caller's decision, not this module's.
 func New(db sladb.DBTX) *Module {
 	return &Module{
-		Policies: application.NewPolicies(postgres.NewPolicyRepository(db)),
+		Policies: resolve.New(postgres.NewPolicyRepository(db)),
 	}
 }

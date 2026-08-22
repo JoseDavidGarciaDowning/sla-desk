@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	slaapp "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	sladomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
+	slaresolve "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/features/resolve"
 	ticketdomain "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/domain"
 	ticketports "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/ticket/ports"
 )
@@ -25,7 +25,7 @@ import (
 // strings and mean different things, so the translation is real — see
 // docs/adr/0005.
 type SLAPolicies struct {
-	Policies *slaapp.Policies
+	Policies *slaresolve.Handler
 }
 
 var _ ticketports.SLAPolicies = SLAPolicies{}
@@ -60,7 +60,7 @@ func (s SLAPolicies) ForPolicy(ctx context.Context, id int64) (ticketports.SLACl
 // on its errors, which is the coupling the contract exists to avoid. The
 // original is kept wrapped so the cause still reaches the logs.
 func translateSLAError(err error) error {
-	if errors.Is(err, slaapp.ErrNoPolicyForPriority) {
+	if errors.Is(err, slaresolve.ErrNoPolicyForPriority) {
 		return errors.Join(ticketdomain.ErrNoSLAPolicy, err)
 	}
 	return err

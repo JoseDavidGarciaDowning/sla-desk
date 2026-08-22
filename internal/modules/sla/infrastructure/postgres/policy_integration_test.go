@@ -19,8 +19,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/application"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/domain"
+	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/features/resolve"
 	"github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres"
 	sladb "github.com/JoseDavidGarciaDowning/sla-desk/internal/modules/sla/infrastructure/postgres/generated"
 )
@@ -149,8 +149,8 @@ func TestAnUnservedPriorityIsReportedAsNoPolicy(t *testing.T) {
 	}
 
 	_, err := repo.ActiveByPriority(ctx, domain.PriorityLow)
-	if !errors.Is(err, application.ErrNoPolicyForPriority) {
-		t.Errorf("err = %v, want application.ErrNoPolicyForPriority", err)
+	if !errors.Is(err, resolve.ErrNoPolicyForPriority) {
+		t.Errorf("err = %v, want resolve.ErrNoPolicyForPriority", err)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		t.Error("the driver's error reached the caller; the translation exists so it does not")
